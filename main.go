@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dlasky/gotk3-layershell/layershell"
+	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
 	"github.com/joshuarubin/go-sway"
 )
@@ -132,8 +133,9 @@ label {
 					}
 				}
 				text += "</span>"
-				workspaceLabel.SetMarkup(text)
-
+				glib.IdleAdd(func() {
+					workspaceLabel.SetMarkup(text)
+				})
 			}
 
 			tree, err := client.GetTree(ctx)
@@ -143,22 +145,37 @@ label {
 				continue
 			}
 			if tree.FocusedNode() != nil {
-				centerLabel.SetText(tree.FocusedNode().Name)
+
+				glib.IdleAdd(func() {
+					centerLabel.SetText(tree.FocusedNode().Name)
+				})
 			}
 
-			time.Sleep(time.Millisecond * 100)
+			time.Sleep(time.Millisecond * 200)
 		}
 	}()
 
 	go func() {
 		for {
 			now := time.Now()
-			formatted := fmt.Sprintf("%02d:%02d:%02d", now.Hour(), now.Minute(), now.Second())
-			timeLabel.SetText(fmt.Sprintf("%v", formatted))
-			time.Sleep(time.Millisecond * 100)
+			formatted := now.Format("2006-01-02 15:04:05")
+			glib.IdleAdd(func() {
+				timeLabel.SetText(fmt.Sprintf("%v", formatted))
+			})
+			time.Sleep(time.Millisecond * 200)
 		}
 	}()
 
-	window.ShowAll()
+	glib.IdleAdd(func() {
+		window.ShowAll()
+	})
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		glib.IdleAdd(func() {
+			window.QueueDraw()
+		})
+	}()
 	gtk.Main()
+
 }
