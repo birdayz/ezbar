@@ -94,11 +94,11 @@ func main() {
 	background-color: rgba(20, 20, 20, 0.8);
 }
 label {
-	font-size: 14px;
-	font-family: monospace;
-	color: #ffffff;
-	padding: 5px;
-	margin: 0;
+  font-size: 14px;
+  font: 14px "Monospace", "Noto Color Emoji", "Twemoji", sans-serif;
+  color: #ffffff;
+  padding: 5px;
+  margin: 0;
 }
 `
 	cssProvider.LoadFromData(css)
