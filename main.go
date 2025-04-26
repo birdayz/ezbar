@@ -94,12 +94,16 @@ func main() {
 	background-color: rgba(20, 20, 20, 0.8);
 }
 label {
-  font-size: 14px;
-  font: 14px "Monospace", "Noto Color Emoji", "Twemoji", sans-serif;
+  font: 14px "Monospace";
   color: #ffffff;
   padding: 5px;
   margin: 0;
 }
+
+.emoji {
+  font-family: "Noto Color Emoji", "Twemoji", sans-serif; /* Use emoji font for emojis */
+}
+
 `
 	cssProvider.LoadFromData(css)
 	gtk.AddProviderForScreen(screen, cssProvider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -147,7 +151,16 @@ label {
 			if tree.FocusedNode() != nil {
 
 				glib.IdleAdd(func() {
-					centerLabel.SetText(tree.FocusedNode().Name)
+					nodeName := tree.FocusedNode().Name
+
+					// If you want to add emoji support, you can format the text with HTML-like markup
+					// For example, if nodeName contains an emoji, apply the appropriate font to it
+					formattedText := fmt.Sprintf(
+						"<span font_desc='Noto Color Emoji'>%s</span>",
+						nodeName,
+					)
+
+					centerLabel.SetMarkup(formattedText)
 				})
 			}
 
