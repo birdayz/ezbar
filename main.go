@@ -4,95 +4,150 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/dlasky/gotk3-layershell/layershell"
-	"github.com/gotk3/gotk3/glib"
-	"github.com/gotk3/gotk3/gtk"
+	layershell "github.com/diamondburned/gotk4-layer-shell/pkg/gtk4layershell"
+	"github.com/diamondburned/gotk4/pkg/gio/v2"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
+	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/godbus/dbus/v5"
 	"github.com/joshuarubin/go-sway"
 )
 
 var workspaceLabel *gtk.Label
 var timeLabel *gtk.Label
 
-func main() {
-	gtk.Init(nil)
-
-	window, err := gtk.WindowNew(gtk.WINDOW_POPUP)
+func uptimeSeconds() float64 {
+	data, err := os.ReadFile("/proc/uptime")
 	if err != nil {
-		log.Fatal(err)
+		return 0
 	}
+	fields := strings.Fields(string(data))
+	uptime, _ := strconv.ParseFloat(fields[0], 64)
+	return uptime
+}
+
+func watchUptime(w *gtk.Window, a *gtk.Application) {
+	last := uptimeSeconds()
+
+	for {
+		time.Sleep(2 * time.Second)
+		now := uptimeSeconds()
+
+		// If time jumps more than 5-10 seconds without us sleeping 2s -> we were suspended
+		if now-last > 2 {
+			log.Println("[ezbar] Detected large uptime jump (sleep/hibernate)! Exiting...")
+			os.Exit(1)
+		}
+
+		last = now
+	}
+}
+
+func main() {
+	// Connect to the system bus
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	app := gtk.NewApplication("com.xx", gio.ApplicationFlagsNone)
+	app.ConnectActivate(func() {
+		w := activate(app)
+		w.Show()
+	})
+
+	go func() {
+		<-ctx.Done()
+		glib.IdleAdd(app.Quit)
+	}()
+
+	if code := app.Run(os.Args); code > 0 {
+		cancel()
+		os.Exit(code)
+	}
+}
+
+func activate(app *gtk.Application) *gtk.Window {
+	// window, err := gtk.New(gtk.WINDOW_POPUP)
+	window := gtk.NewApplicationWindow(app)
 	window.SetTitle("ezbar")
 	window.SetDecorated(false)
-	window.SetBorderWidth(0)
+	// window.SetBorderWidth(0)
+	// window.Bor
 	window.SetName("bar-window")
 
-	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-	window.Add(mainBox)
+	// window.get
 
-	timeLabel, err = gtk.LabelNew("Loading…")
-	if err != nil {
-		log.Fatal(err)
-	}
+	mainBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	window.SetChild(mainBox)
 
-	workspaceLabel, err = gtk.LabelNew("Starting...")
-	if err != nil {
-		log.Fatal(err)
-	}
+	timeLabel = gtk.NewLabel("Loading…")
 
-	workspaceLabel.SetHAlign(gtk.ALIGN_CENTER)
-	workspaceLabel.SetVAlign(gtk.ALIGN_CENTER)
+	workspaceLabel = gtk.NewLabel("Starting...")
+	workspaceLabel.AddCSSClass("bar-label")
+
+	workspaceLabel.SetHAlign(gtk.AlignCenter)
+	workspaceLabel.SetVAlign(gtk.AlignCenter)
 	workspaceLabel.SetMarginStart(0)
 	workspaceLabel.SetMarginEnd(0)
 	workspaceLabel.SetMarginTop(0)
 	workspaceLabel.SetMarginBottom(0)
 
-	workspaceLabel.SetLineWrap(false)
+	// workspaceLabel.SetLi(false)
 	workspaceLabel.SetSingleLineMode(true)
 
 	// Create the label you want to center
-	centerLabel, err := gtk.LabelNew("Centered Label")
-	if err != nil {
-		log.Fatal(err)
-	}
+	centerLabel := gtk.NewLabel("Centered Label")
 
 	// Left box
-	leftBox, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 0)
-	leftBox.SetHAlign(gtk.ALIGN_START)
-	leftBox.PackStart(workspaceLabel, false, false, 10)
+	leftBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	leftBox.SetHAlign(gtk.AlignStart)
+	// leftBox.PackStart(workspaceLabel, false, false, 10)
+	leftBox.Append(workspaceLabel)
 
 	// Center box
-	centerBox, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 0)
-	centerBox.SetHAlign(gtk.ALIGN_CENTER)
-	centerBox.PackStart(centerLabel, false, false, 0)
+	centerBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	centerBox.SetHAlign(gtk.AlignCenter)
+	// centerBox.PackStart(centerLabel, false, false, 0)
+	centerBox.Append(centerLabel)
 
 	// Right box
-	rightBox, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 0)
-	rightBox.SetHAlign(gtk.ALIGN_END)
-	rightBox.PackStart(timeLabel, false, false, 10)
+	rightBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	rightBox.SetHAlign(gtk.AlignEnd)
+	// rightBox.PackStart(timeLabel, false, false, 10)
+	rightBox.Append(timeLabel)
 
-	mainBox.PackStart(leftBox, true, true, 0)
-	mainBox.PackStart(centerBox, true, true, 0)
-	mainBox.PackStart(rightBox, true, true, 0)
+	// mainBox.PackStart(leftBox, true, true, 0)
+	// mainBox.PackStart(centerBox, true, true, 0)
+	// mainBox.PackStart(rightBox, true, true, 0)
 
-	screen := window.GetScreen()
-	visual, _ := screen.GetRGBAVisual()
-	if visual != nil {
-		window.SetVisual(visual)
-	}
+	mainBox.Append(leftBox)
+	mainBox.Append(centerBox)
+	mainBox.Append(rightBox)
 
-	// CSS Styling
-	cssProvider, err := gtk.CssProviderNew()
-	if err != nil {
-		log.Fatal(err)
-	}
-	css := `
-#bar-window {
-	background-color: rgba(20, 20, 20, 0.8);
+	leftBox.SetHExpand(true)
+	leftBox.SetHAlign(gtk.AlignStart)
+
+	centerBox.SetHExpand(true)
+	centerBox.SetHAlign(gtk.AlignCenter)
+
+	rightBox.SetHExpand(true)
+	rightBox.SetHAlign(gtk.AlignEnd)
+	workspaceLabel.AddCSSClass("workspace-label")
+
+	css := gtk.NewCSSProvider()
+	css.LoadFromData(`
+window {
+	background-color: rgba(0, 0, 0, 0.8); /* Fully opaque window background */
 }
+.emoji {
+  font-family: "Noto Color Emoji", "Twemoji", sans-serif; /* Use emoji font for emojis */
+}
+
 label {
   font: 14px "Monospace";
   color: #ffffff;
@@ -100,23 +155,20 @@ label {
   margin: 0;
 }
 
-.emoji {
-  font-family: "Noto Color Emoji", "Twemoji", sans-serif; /* Use emoji font for emojis */
-}
 
-`
-	cssProvider.LoadFromData(css)
-	gtk.AddProviderForScreen(screen, cssProvider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+`)
+	styleContext := window.StyleContext()
+	gtk.StyleContextAddProviderForDisplay(styleContext.Display(), css, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
 	// LayerShell setup
 	// Makes it possible to have this "sticky", reserved area for the bar, and other windows are pushed.
-	layershell.InitForWindow(window)
-	layershell.SetNamespace(window, "gtk-layer-shell")
-	layershell.SetAnchor(window, layershell.LAYER_SHELL_EDGE_LEFT, true)
-	layershell.SetAnchor(window, layershell.LAYER_SHELL_EDGE_RIGHT, true)
-	layershell.SetAnchor(window, layershell.LAYER_SHELL_EDGE_BOTTOM, true)
-	layershell.SetLayer(window, layershell.LAYER_SHELL_LAYER_TOP)
-	layershell.AutoExclusiveZoneEnable(window)
+	layershell.InitForWindow(&window.Window)
+	layershell.SetNamespace(&window.Window, "gtk-layer-shell")
+	layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeLeft, true)
+	layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeRight, true)
+	layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeBottom, true)
+	layershell.SetLayer(&window.Window, layershell.LayerShellLayerTop)
+	layershell.AutoExclusiveZoneEnable(&window.Window)
 
 	go func() {
 		ctx := context.Background()
@@ -126,6 +178,7 @@ label {
 			return
 		}
 		for {
+
 			workspaces, err := client.GetWorkspaces(ctx)
 			if err == nil {
 				text := "<span>"
@@ -180,15 +233,53 @@ label {
 	}()
 
 	glib.IdleAdd(func() {
-		window.ShowAll()
+		window.Show()
 	})
+	window.Show()
+
+	// go watchUptime(&window.Window, app)
+	// Start GTK main loop
+	conn, err := dbus.ConnectSystemBus()
+	if err != nil {
+		panic(err)
+	}
+	// defer conn.Close()
+
+	// Add a match rule for PrepareForSleep
+	call := conn.BusObject().Call(
+		"org.freedesktop.DBus.AddMatch", 0,
+		"type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
+	)
+	if call.Err != nil {
+		panic(call.Err)
+	}
+
+	// Channel for incoming signals
+	c := make(chan *dbus.Signal, 10)
+	conn.Signal(c)
 
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		glib.IdleAdd(func() {
-			window.QueueDraw()
-		})
+		for signal := range c {
+			if signal.Name == "org.freedesktop.login1.Manager.PrepareForSleep" {
+				if len(signal.Body) == 1 {
+					sleeping, ok := signal.Body[0].(bool)
+					if ok {
+						if !sleeping {
+							time.Sleep(time.Second * 2)
+							layershell.InitForWindow(&window.Window)
+							layershell.SetNamespace(&window.Window, "gtk-layer-shell")
+							layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeLeft, true)
+							layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeRight, true)
+							layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeBottom, true)
+							layershell.SetLayer(&window.Window, layershell.LayerShellLayerTop)
+							layershell.AutoExclusiveZoneEnable(&window.Window)
+						}
+					}
+				}
+			}
+		}
 	}()
-	gtk.Main()
+
+	return &window.Window
 
 }
