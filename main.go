@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"os/signal"
@@ -213,7 +214,7 @@ label {
 						nodeName,
 					)
 
-					centerLabel.SetMarkup(formattedText)
+					centerLabel.SetMarkup(html.EscapeString(formattedText))
 				})
 			}
 
