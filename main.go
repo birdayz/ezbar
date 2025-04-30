@@ -7,8 +7,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"time"
 
 	layershell "github.com/diamondburned/gotk4-layer-shell/pkg/gtk4layershell"
@@ -22,40 +20,13 @@ import (
 var workspaceLabel *gtk.Label
 var timeLabel *gtk.Label
 
-func uptimeSeconds() float64 {
-	data, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(data))
-	uptime, _ := strconv.ParseFloat(fields[0], 64)
-	return uptime
-}
-
-func watchUptime(w *gtk.Window, a *gtk.Application) {
-	last := uptimeSeconds()
-
-	for {
-		time.Sleep(2 * time.Second)
-		now := uptimeSeconds()
-
-		// If time jumps more than 5-10 seconds without us sleeping 2s -> we were suspended
-		if now-last > 2 {
-			log.Println("[ezbar] Detected large uptime jump (sleep/hibernate)! Exiting...")
-			os.Exit(1)
-		}
-
-		last = now
-	}
-}
-
 func main() {
 	// Connect to the system bus
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	app := gtk.NewApplication("com.xx", gio.ApplicationFlagsNone)
+	app := gtk.NewApplication("de.nerden.ezbar", gio.ApplicationNonUnique)
 	app.ConnectActivate(func() {
 		w := activate(app)
 		w.Show()
@@ -210,11 +181,11 @@ label {
 					// If you want to add emoji support, you can format the text with HTML-like markup
 					// For example, if nodeName contains an emoji, apply the appropriate font to it
 					formattedText := fmt.Sprintf(
-						"<span font_desc='Noto Color Emoji'>%s</span>",
-						nodeName,
+						"%s",
+						html.EscapeString(nodeName),
 					)
 
-					centerLabel.SetMarkup(html.EscapeString(formattedText))
+					centerLabel.SetMarkup(formattedText)
 				})
 			}
 
@@ -266,14 +237,7 @@ label {
 					sleeping, ok := signal.Body[0].(bool)
 					if ok {
 						if !sleeping {
-							time.Sleep(time.Second * 2)
-							layershell.InitForWindow(&window.Window)
-							layershell.SetNamespace(&window.Window, "gtk-layer-shell")
-							layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeLeft, true)
-							layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeRight, true)
-							layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeBottom, true)
-							layershell.SetLayer(&window.Window, layershell.LayerShellLayerTop)
-							layershell.AutoExclusiveZoneEnable(&window.Window)
+							app.Quit()
 						}
 					}
 				}
