@@ -1,0 +1,7 @@
+version: '3'
+
+tasks:
+  ci-image:
+    cmds:
+      - docker build . -t ghcr.io/birdayz/ezbar/ci:latest
+      - docker push ghcr.io/birdayz/ezbar/ci:latest
