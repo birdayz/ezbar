@@ -11,10 +11,10 @@ import (
 	"time"
 
 	layershell "github.com/diamondburned/gotk4-layer-shell/pkg/gtk4layershell"
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	"github.com/godbus/dbus/v5"
 	"github.com/joshuarubin/go-sway"
 )
 
@@ -232,41 +232,19 @@ label {
 	})
 	window.Show()
 
-	// go watchUptime(&window.Window, app)
-	// Start GTK main loop
-	conn, err := dbus.ConnectSystemBus()
-	if err != nil {
-		panic(err)
-	}
-	// defer conn.Close()
+	display := gdk.DisplayGetDefault()
+	if display != nil {
+		monitors := display.Monitors()
 
-	// Add a match rule for PrepareForSleep
-	call := conn.BusObject().Call(
-		"org.freedesktop.DBus.AddMatch", 0,
-		"type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
-	)
-	if call.Err != nil {
-		panic(call.Err)
-	}
-
-	// Channel for incoming signals
-	c := make(chan *dbus.Signal, 10)
-	conn.Signal(c)
-
-	go func() {
-		for signal := range c {
-			if signal.Name == "org.freedesktop.login1.Manager.PrepareForSleep" {
-				if len(signal.Body) == 1 {
-					sleeping, ok := signal.Body[0].(bool)
-					if ok {
-						if !sleeping {
-							app.Quit()
-						}
-					}
-				}
-			}
+		if monitors != nil {
+			monitors.ConnectItemsChanged(func(position, removed, added uint) {
+				fmt.Printf("[ezbar] Monitors changed: position=%d, removed=%d, added=%d\n", position, removed, added)
+				os.Stdout.Sync()
+				app.Quit()
+			})
+			fmt.Println("[ezbar] Listening for Monitor change events")
 		}
-	}()
+	}
 
 	return &window.Window
 
