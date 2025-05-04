@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,10 +22,14 @@ var workspaceLabel *gtk.Label
 var timeLabel *gtk.Label
 
 func main() {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
+
 	if os.Getenv("EZBAR_CHILD") == "1" {
-		run()
+		run(log.WithGroup("ezbar"))
 		return
 	}
+
+	log = log.WithGroup("launcher")
 
 	for {
 		cmd := exec.Command(os.Args[0])
@@ -33,22 +37,22 @@ func main() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		fmt.Println("[ezbar launcher] Spawning new bar subprocess...")
+		log.Info("Spawning new bar subprocess...")
 		if err := cmd.Run(); err != nil {
-			fmt.Println("[ezbar launcher] Child process crashed:", err)
+			log.Error("Child process crashed:", err)
 		} else {
-			fmt.Println("[ezbar launcher] Child exited cleanly.")
+			log.Info("Child exited cleanly")
 		}
 	}
 }
 
-func run() {
+func run(log *slog.Logger) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	app := gtk.NewApplication("de.nerden.ezbar", gio.ApplicationNonUnique)
 	app.ConnectActivate(func() {
-		w := activate(app)
+		w := activate(log, app)
 		w.Show()
 	})
 
@@ -63,7 +67,7 @@ func run() {
 	}
 }
 
-func activate(app *gtk.Application) *gtk.Window {
+func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	window := gtk.NewApplicationWindow(app)
 	window.SetTitle("ezbar")
 	window.SetDecorated(false)
@@ -149,7 +153,7 @@ label {
 		ctx := context.Background()
 		client, err := sway.New(ctx)
 		if err != nil {
-			log.Printf("Sway IPC error: %v", err)
+			log.Warn("Sway IPC error: %v", err)
 			return
 		}
 		for {
@@ -172,7 +176,7 @@ label {
 
 			tree, err := client.GetTree(ctx)
 			if err != nil {
-				log.Printf("Failed to get tree: %v", err)
+				log.Warn("Failed to get tree: %v", err)
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -216,11 +220,11 @@ label {
 
 		if monitors != nil {
 			monitors.ConnectItemsChanged(func(position, removed, added uint) {
-				fmt.Printf("[ezbar] Monitors changed: position=%d, removed=%d, added=%d\n", position, removed, added)
+				log.Info("Monitors changed: position=%d, removed=%d, added=%d\n", position, removed, added)
 				os.Stdout.Sync()
 				app.Quit()
 			})
-			fmt.Println("[ezbar] Listening for Monitor change events")
+			log.Info("Listening for Monitor change events")
 		}
 	}
 
