@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"html"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"strconv"
 	"time"
 
 	layershell "github.com/diamondburned/gotk4-layer-shell/pkg/gtk4layershell"
@@ -25,12 +28,15 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
 
 	if os.Getenv("EZBAR_CHILD") == "1" {
-		run(log.WithGroup("ezbar"))
+		run(log.With("component", "ezbar"))
 		return
 	}
 
-	log = log.WithGroup("launcher")
+	log = log.With("component", "launcher")
+	restartLoop(log)
+}
 
+func restartLoop(log *slog.Logger) {
 	for {
 		cmd := exec.Command(os.Args[0])
 		cmd.Env = append(os.Environ(), "EZBAR_CHILD=1")
@@ -44,6 +50,7 @@ func main() {
 			log.Info("Child exited cleanly")
 		}
 	}
+
 }
 
 func run(log *slog.Logger) {
@@ -156,24 +163,34 @@ label {
 			log.Warn("Sway IPC error: %v", err)
 			return
 		}
-		for {
 
-			workspaces, err := client.GetWorkspaces(ctx)
-			if err == nil {
-				text := "<span>"
-				for _, ws := range workspaces {
-					if ws.Focused {
-						text += fmt.Sprintf("[%d]", ws.Num)
-					} else {
-						text += fmt.Sprintf(" %d ", ws.Num)
-					}
-				}
-				text += "</span>"
-				glib.IdleAdd(func() {
-					workspaceLabel.SetMarkup(text)
-				})
+		wss := &workspaceState{}
+		// Fetch initial workspace state
+		workspaces, err := client.GetWorkspaces(ctx)
+		if err != nil {
+			log.Error("failed to get initial list of workspaces", "error", err)
+			app.Quit()
+		}
+
+		for _, ws := range workspaces {
+			wss.workspaces = append(wss.workspaces, &workspace{
+				name:    ws.Name,
+				focused: ws.Focused,
+			})
+		}
+
+		// Do initial draw
+		drawWorkspace(wss)
+
+		go func() {
+			log.Info("Listening to sway events")
+			if err := sway.Subscribe(context.Background(), &eh{wss: wss}, sway.EventTypeWorkspace); err != nil {
+				log.Error("failed to subscribe to sway", "error", err)
+				app.Quit()
 			}
+		}()
 
+		for {
 			tree, err := client.GetTree(ctx)
 			if err != nil {
 				log.Warn("Failed to get tree: %v", err)
@@ -230,4 +247,83 @@ label {
 
 	return &window.Window
 
+}
+
+type eh struct {
+	wss *workspaceState
+}
+
+func (eh *eh) Workspace(ctx context.Context, e sway.WorkspaceEvent) {
+	if e.Change == sway.WorkspaceInit {
+		eh.wss.workspaces = append(eh.wss.workspaces, &workspace{
+			name:    e.Current.Name,
+			focused: e.Current.Focused,
+		})
+	}
+	if e.Change == sway.WorkspaceEmpty {
+		eh.wss.workspaces = slices.DeleteFunc(eh.wss.workspaces, func(ws *workspace) bool {
+			return ws.name == e.Current.Name
+		})
+	}
+
+	if e.Change == sway.WorkspaceFocus {
+		newFocus := e.Current.Name
+		oldFocus := e.Old.Name
+
+		for _, ws := range eh.wss.workspaces {
+			if ws.name == newFocus {
+				ws.focused = true
+			}
+
+			if ws.name == oldFocus {
+				ws.focused = false
+			}
+
+		}
+	}
+
+	slices.SortFunc(eh.wss.workspaces, func(a, b *workspace) int {
+		aInt, errA := strconv.Atoi(a.name)
+		bInt, errB := strconv.Atoi(b.name)
+		if errA == nil && errB == nil {
+			return cmp.Compare(aInt, bInt)
+		}
+		return cmp.Compare(a.name, b.name)
+	})
+
+	drawWorkspace(eh.wss)
+}
+func (eh *eh) Mode(context.Context, sway.ModeEvent)                       {}
+func (eh *eh) Window(context.Context, sway.WindowEvent)                   {}
+func (eh *eh) BarConfigUpdate(context.Context, sway.BarConfigUpdateEvent) {}
+func (eh *eh) Binding(context.Context, sway.BindingEvent)                 {}
+func (eh *eh) Shutdown(context.Context, sway.ShutdownEvent)               {}
+func (eh *eh) Tick(context.Context, sway.TickEvent)                       {}
+func (eh *eh) BarStateUpdate(context.Context, sway.BarStateUpdateEvent)   {}
+func (eh *eh) BarStatusUpdate(context.Context, sway.BarStatusUpdateEvent) {}
+func (eh *eh) Input(context.Context, sway.InputEvent)                     {}
+
+type workspaceState struct {
+	workspaces []*workspace
+}
+
+type workspace struct {
+	name    string
+	focused bool
+}
+
+func drawWorkspace(wss *workspaceState) error {
+	text := "<span>"
+	for _, ws := range wss.workspaces {
+		if ws.focused {
+			text += fmt.Sprintf("[%s]", ws.name)
+		} else {
+			text += fmt.Sprintf(" %s ", ws.name)
+		}
+	}
+	text += "</span>"
+	glib.IdleAdd(func() {
+		workspaceLabel.SetMarkup(text)
+	})
+	return nil
 }
