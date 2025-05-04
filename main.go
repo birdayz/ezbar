@@ -45,7 +45,7 @@ func restartLoop(log *slog.Logger) {
 
 		log.Info("Spawning new bar subprocess...")
 		if err := cmd.Run(); err != nil {
-			log.Error("Child process crashed:", err)
+			log.Error("Child process crashed:", "err", err)
 		} else {
 			log.Info("Child exited cleanly")
 		}
@@ -160,7 +160,7 @@ label {
 		ctx := context.Background()
 		client, err := sway.New(ctx)
 		if err != nil {
-			log.Warn("Sway IPC error: %v", err)
+			log.Warn("Sway IPC error: %v", "err", err)
 			return
 		}
 
@@ -193,7 +193,7 @@ label {
 		for {
 			tree, err := client.GetTree(ctx)
 			if err != nil {
-				log.Warn("Failed to get tree: %v", err)
+				log.Warn("Failed to get tree: %v", "err", err)
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -237,7 +237,7 @@ label {
 
 		if monitors != nil {
 			monitors.ConnectItemsChanged(func(position, removed, added uint) {
-				log.Info("Monitors changed: position=%d, removed=%d, added=%d\n", position, removed, added)
+				log.Info("Monitor change detected. Exiting", "position", position, "removed", removed, "added", added)
 				os.Stdout.Sync()
 				app.Quit()
 			})
