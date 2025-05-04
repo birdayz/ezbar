@@ -39,9 +39,6 @@ func main() {
 		} else {
 			fmt.Println("[ezbar launcher] Child exited cleanly.")
 		}
-
-		// Optional: tiny delay to avoid tight respawn loops
-		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -67,15 +64,10 @@ func run() {
 }
 
 func activate(app *gtk.Application) *gtk.Window {
-	// window, err := gtk.New(gtk.WINDOW_POPUP)
 	window := gtk.NewApplicationWindow(app)
 	window.SetTitle("ezbar")
 	window.SetDecorated(false)
-	// window.SetBorderWidth(0)
-	// window.Bor
 	window.SetName("bar-window")
-
-	// window.get
 
 	mainBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
 	window.SetChild(mainBox)
@@ -92,33 +84,23 @@ func activate(app *gtk.Application) *gtk.Window {
 	workspaceLabel.SetMarginTop(0)
 	workspaceLabel.SetMarginBottom(0)
 
-	// workspaceLabel.SetLi(false)
 	workspaceLabel.SetSingleLineMode(true)
 
-	// Create the label you want to center
 	centerLabel := gtk.NewLabel("Centered Label")
 
-	// Left box
 	leftBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
 	leftBox.SetHAlign(gtk.AlignStart)
-	// leftBox.PackStart(workspaceLabel, false, false, 10)
 	leftBox.Append(workspaceLabel)
 
 	// Center box
 	centerBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
 	centerBox.SetHAlign(gtk.AlignCenter)
-	// centerBox.PackStart(centerLabel, false, false, 0)
 	centerBox.Append(centerLabel)
 
 	// Right box
 	rightBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
 	rightBox.SetHAlign(gtk.AlignEnd)
-	// rightBox.PackStart(timeLabel, false, false, 10)
 	rightBox.Append(timeLabel)
-
-	// mainBox.PackStart(leftBox, true, true, 0)
-	// mainBox.PackStart(centerBox, true, true, 0)
-	// mainBox.PackStart(rightBox, true, true, 0)
 
 	mainBox.Append(leftBox)
 	mainBox.Append(centerBox)
@@ -155,8 +137,6 @@ label {
 	styleContext := window.StyleContext()
 	gtk.StyleContextAddProviderForDisplay(styleContext.Display(), css, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-	// LayerShell setup
-	// Makes it possible to have this "sticky", reserved area for the bar, and other windows are pushed.
 	layershell.InitForWindow(&window.Window)
 	layershell.SetNamespace(&window.Window, "gtk-layer-shell")
 	layershell.SetAnchor(&window.Window, layershell.LayerShellEdgeLeft, true)
@@ -201,8 +181,6 @@ label {
 				glib.IdleAdd(func() {
 					nodeName := tree.FocusedNode().Name
 
-					// If you want to add emoji support, you can format the text with HTML-like markup
-					// For example, if nodeName contains an emoji, apply the appropriate font to it
 					formattedText := fmt.Sprintf(
 						"%s",
 						html.EscapeString(nodeName),
