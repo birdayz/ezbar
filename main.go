@@ -6,6 +6,7 @@ import (
 	"html"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"time"
 
@@ -21,8 +22,30 @@ var workspaceLabel *gtk.Label
 var timeLabel *gtk.Label
 
 func main() {
-	// Connect to the system bus
+	if os.Getenv("EZBAR_CHILD") == "1" {
+		run()
+		return
+	}
 
+	for {
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = append(os.Environ(), "EZBAR_CHILD=1")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		fmt.Println("[ezbar launcher] Spawning new bar subprocess...")
+		if err := cmd.Run(); err != nil {
+			fmt.Println("[ezbar launcher] Child process crashed:", err)
+		} else {
+			fmt.Println("[ezbar launcher] Child exited cleanly.")
+		}
+
+		// Optional: tiny delay to avoid tight respawn loops
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func run() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
