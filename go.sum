@@ -1,16 +1,11 @@
-git.sr.ht/~emersion/go-wayland v0.0.0-20190615083033-88014a26bc83 h1:R0E96YWyvxe4/xKye7rJS0xX4cHPmDRXdzA7R/UjrZI=
-git.sr.ht/~emersion/go-wayland v0.0.0-20190615083033-88014a26bc83/go.mod h1:FGDFAFPqkzsNC8ZHpOn45Ph06MyE5XZGTJn0mYSFmdw=
 github.com/KarpelesLab/weak v0.1.1 h1:fNnlPo3aypS9tBzoEQluY13XyUfd/eWaSE/vMvo9s4g=
 github.com/KarpelesLab/weak v0.1.1/go.mod h1:pzXsWs5f2bf+fpgHayTlBE1qJpO3MpJKo5sRaLu1XNw=
-github.com/dave/jennifer v1.3.0/go.mod h1:fIb+770HOpJ2fmN9EPPKOqm1vMGhB+TwXKMZhrIygKg=
 github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/diamondburned/gotk4-layer-shell/pkg v0.0.0-20240109211357-6efa9f6dc438 h1:Ymnl4B+Fn4srLxXbRV2RY1iHT2SH3oAkOfxeEeMI3Fg=
 github.com/diamondburned/gotk4-layer-shell/pkg v0.0.0-20240109211357-6efa9f6dc438/go.mod h1:AjrxxF6teeNWgaEg0zIUwoqFtXlVTHlEGZvrOn7RXaQ=
 github.com/diamondburned/gotk4/pkg v0.3.1 h1:uhkXSUPUsCyz3yujdvl7DSN8jiLS2BgNTQE95hk6ygg=
 github.com/diamondburned/gotk4/pkg v0.3.1/go.mod h1:DqeOW+MxSZFg9OO+esk4JgQk0TiUJJUBfMltKhG+ub4=
-github.com/godbus/dbus/v5 v5.1.0 h1:4KLkAxT3aOY8Li4FRJe/KvhoNFFxo0m6fNuFUO8QJUk=
-github.com/godbus/dbus/v5 v5.1.0/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
 github.com/joshuarubin/go-sway v1.2.0 h1:t3eqW504//uj9PDwFf0+IVfkD+WoOGaDX5gYIe0BHyM=
 github.com/joshuarubin/go-sway v1.2.0/go.mod h1:qcDd6f25vJ0++wICwA1BainIcRC67p2Mb4lsrZ0k3/k=
 github.com/joshuarubin/lifecycle v1.0.0 h1:N/lPEC8f+dBZ1Tn99vShqp36LwB+LI7XNAiNadZeLUQ=

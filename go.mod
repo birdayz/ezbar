@@ -3,10 +3,8 @@ module github.com/birdayz/ezbar
 go 1.24.1
 
 require (
-	git.sr.ht/~emersion/go-wayland v0.0.0-20190615083033-88014a26bc83
 	github.com/diamondburned/gotk4-layer-shell/pkg v0.0.0-20240109211357-6efa9f6dc438
 	github.com/diamondburned/gotk4/pkg v0.3.1
-	github.com/godbus/dbus/v5 v5.1.0
 	github.com/joshuarubin/go-sway v1.2.0
 )
 
