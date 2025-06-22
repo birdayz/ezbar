@@ -5,12 +5,14 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"io/ioutil"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	layershell "github.com/diamondburned/gotk4-layer-shell/pkg/gtk4layershell"
@@ -23,6 +25,8 @@ import (
 
 var workspaceLabel *gtk.Label
 var timeLabel *gtk.Label
+var batteryLabel *gtk.Label
+var batterySeparator *gtk.Label
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
@@ -84,6 +88,7 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	window.SetChild(mainBox)
 
 	timeLabel = gtk.NewLabel("Loading…")
+	batteryLabel = gtk.NewLabel("🔋 --")
 
 	workspaceLabel = gtk.NewLabel("Starting...")
 	workspaceLabel.AddCSSClass("bar-label")
@@ -111,6 +116,15 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	// Right box
 	rightBox := gtk.NewBox(gtk.OrientationHorizontal, 0)
 	rightBox.SetHAlign(gtk.AlignEnd)
+	
+	batterySeparator = gtk.NewLabel("|")
+	
+	// Only add battery components if battery exists
+	if hasBattery() {
+		rightBox.Append(batteryLabel)
+		rightBox.Append(batterySeparator)
+	}
+	
 	rightBox.Append(timeLabel)
 
 	mainBox.Append(leftBox)
@@ -226,6 +240,18 @@ label {
 		}
 	}()
 
+	if hasBattery() {
+		go func() {
+			for {
+				batteryStatus := getBatteryStatus()
+				glib.IdleAdd(func() {
+					batteryLabel.SetText(batteryStatus)
+				})
+				time.Sleep(5 * time.Second)
+			}
+		}()
+	}
+
 	glib.IdleAdd(func() {
 		window.Show()
 	})
@@ -247,6 +273,40 @@ label {
 
 	return &window.Window
 
+}
+
+func getBatteryStatus() string {
+	capacity, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/capacity")
+	if err != nil {
+		return "🔋 --"
+	}
+
+	status, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/status")
+	if err != nil {
+		return "🔋 --"
+	}
+
+	capacityStr := strings.TrimSpace(string(capacity))
+	statusStr := strings.TrimSpace(string(status))
+
+	var icon string
+	switch statusStr {
+	case "Charging":
+		icon = "🔌"
+	case "Discharging":
+		icon = "🔋"
+	case "Full":
+		icon = "🔋"
+	default:
+		icon = "🔋"
+	}
+
+	return fmt.Sprintf("%s %s%%", icon, capacityStr)
+}
+
+func hasBattery() bool {
+	_, err := os.Stat("/sys/class/power_supply/BAT0")
+	return err == nil
 }
 
 type eh struct {
