@@ -5,6 +5,7 @@ go 1.24.1
 require (
 	github.com/diamondburned/gotk4-layer-shell/pkg v0.0.0-20240109211357-6efa9f6dc438
 	github.com/diamondburned/gotk4/pkg v0.3.1
+	github.com/dustin/go-humanize v1.0.1
 	github.com/joshuarubin/go-sway v1.2.0
 )
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	layershell "github.com/diamondburned/gotk4-layer-shell/pkg/gtk4layershell"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
@@ -27,6 +28,9 @@ var workspaceLabel *gtk.Label
 var timeLabel *gtk.Label
 var batteryLabel *gtk.Label
 var batterySeparator *gtk.Label
+var cpuLabel *gtk.Label
+var cpuTempLabel *gtk.Label
+var memoryLabel *gtk.Label
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
@@ -89,6 +93,9 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 
 	timeLabel = gtk.NewLabel("Loading…")
 	batteryLabel = gtk.NewLabel("🔋 --")
+	cpuLabel = gtk.NewLabel("🖥️ --")
+	cpuTempLabel = gtk.NewLabel("🌡️ --")
+	memoryLabel = gtk.NewLabel("💾 --")
 
 	workspaceLabel = gtk.NewLabel("Starting...")
 	workspaceLabel.AddCSSClass("bar-label")
@@ -118,6 +125,13 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	rightBox.SetHAlign(gtk.AlignEnd)
 	
 	batterySeparator = gtk.NewLabel("|")
+	
+	rightBox.Append(cpuLabel)
+	rightBox.Append(gtk.NewLabel("|"))
+	rightBox.Append(cpuTempLabel)
+	rightBox.Append(gtk.NewLabel("|"))
+	rightBox.Append(memoryLabel)
+	rightBox.Append(gtk.NewLabel("|"))
 	
 	// Only add battery components if battery exists
 	if hasBattery() {
@@ -240,6 +254,36 @@ label {
 		}
 	}()
 
+	go func() {
+		for {
+			cpuUsage := getCPUUsage()
+			glib.IdleAdd(func() {
+				cpuLabel.SetText(cpuUsage)
+			})
+			time.Sleep(2 * time.Second)
+		}
+	}()
+
+	go func() {
+		for {
+			cpuTemp := getCPUTemperature()
+			glib.IdleAdd(func() {
+				cpuTempLabel.SetText(cpuTemp)
+			})
+			time.Sleep(2 * time.Second)
+		}
+	}()
+
+	go func() {
+		for {
+			memoryUsage := getMemoryUsage()
+			glib.IdleAdd(func() {
+				memoryLabel.SetText(memoryUsage)
+			})
+			time.Sleep(3 * time.Second)
+		}
+	}()
+
 	if hasBattery() {
 		go func() {
 			for {
@@ -307,6 +351,139 @@ func getBatteryStatus() string {
 func hasBattery() bool {
 	_, err := os.Stat("/sys/class/power_supply/BAT0")
 	return err == nil
+}
+
+func getCPUUsage() string {
+	stat1, err := ioutil.ReadFile("/proc/stat")
+	if err != nil {
+		return "🖥️ --"
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	stat2, err := ioutil.ReadFile("/proc/stat")
+	if err != nil {
+		return "🖥️ --"
+	}
+
+	cpu1 := parseCPUStat(string(stat1))
+	cpu2 := parseCPUStat(string(stat2))
+
+	if cpu1 == nil || cpu2 == nil {
+		return "🖥️ --"
+	}
+
+	idle := cpu2[3] - cpu1[3]
+	total := (cpu2[0] + cpu2[1] + cpu2[2] + cpu2[3]) - (cpu1[0] + cpu1[1] + cpu1[2] + cpu1[3])
+
+	if total == 0 {
+		return "🖥️ 0%"
+	}
+
+	usage := 100 - (idle*100)/total
+	return fmt.Sprintf("🖥️ %d%%", usage)
+}
+
+func parseCPUStat(stat string) []int64 {
+	lines := strings.Split(stat, "\n")
+	if len(lines) == 0 {
+		return nil
+	}
+
+	fields := strings.Fields(lines[0])
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return nil
+	}
+
+	values := make([]int64, 4)
+	for i := 0; i < 4; i++ {
+		val, err := strconv.ParseInt(fields[i+1], 10, 64)
+		if err != nil {
+			return nil
+		}
+		values[i] = val
+	}
+
+	return values
+}
+
+func getMemoryUsage() string {
+	meminfo, err := ioutil.ReadFile("/proc/meminfo")
+	if err != nil {
+		return "💾 --"
+	}
+
+	lines := strings.Split(string(meminfo), "\n")
+	var memTotal, memAvailable int64
+
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		switch fields[0] {
+		case "MemTotal:":
+			if val, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				memTotal = val
+			}
+		case "MemAvailable:":
+			if val, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				memAvailable = val
+			}
+		}
+	}
+
+	if memTotal == 0 {
+		return "💾 --"
+	}
+
+	// Calculate used memory like free -h does: total - available
+	memUsed := memTotal - memAvailable
+	
+	// Convert from KB to bytes for go-humanize
+	usedBytes := uint64(memUsed * 1024)
+	totalBytes := uint64(memTotal * 1024)
+	
+	return fmt.Sprintf("💾 %s/%s", humanize.Bytes(usedBytes), humanize.Bytes(totalBytes))
+}
+
+func getCPUTemperature() string {
+	// Try to find CPU temperature from various sources
+	tempPaths := []string{
+		"/sys/class/thermal/thermal_zone0/temp",
+		"/sys/class/thermal/thermal_zone1/temp",
+		"/sys/devices/platform/thinkpad_hwmon/hwmon/hwmon7/temp1_input",
+		"/sys/devices/platform/coretemp.0/hwmon/hwmon*/temp1_input",
+	}
+	
+	for _, path := range tempPaths {
+		if temp, err := ioutil.ReadFile(path); err == nil {
+			tempStr := strings.TrimSpace(string(temp))
+			if tempVal, err := strconv.ParseFloat(tempStr, 64); err == nil {
+				// Temperature is usually in millidegrees Celsius
+				tempCelsius := tempVal / 1000.0
+				return fmt.Sprintf("🌡️ %.0f°C", tempCelsius)
+			}
+		}
+	}
+	
+	// Try to find temperature from hwmon sensors
+	hwmonFiles, err := ioutil.ReadDir("/sys/class/hwmon")
+	if err == nil {
+		for _, hwmon := range hwmonFiles {
+			tempPath := fmt.Sprintf("/sys/class/hwmon/%s/temp1_input", hwmon.Name())
+			if temp, err := ioutil.ReadFile(tempPath); err == nil {
+				tempStr := strings.TrimSpace(string(temp))
+				if tempVal, err := strconv.ParseFloat(tempStr, 64); err == nil {
+					tempCelsius := tempVal / 1000.0
+					return fmt.Sprintf("🌡️ %.0f°C", tempCelsius)
+				}
+			}
+		}
+	}
+	
+	return "🌡️ --"
 }
 
 type eh struct {
