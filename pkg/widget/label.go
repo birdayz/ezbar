@@ -21,6 +21,7 @@ type LabelWidget struct {
 	isSpotifyWidget  bool
 	customClickHandler func()
 	rightClickHandler func()
+	scrollHandler func(direction int) // 1 for up, -1 for down
 }
 
 func NewLabelWidget(initialText string) *LabelWidget {
@@ -52,6 +53,21 @@ func NewLabelWidget(initialText string) *LabelWidget {
 		}
 	})
 	widget.label.AddController(rightGesture)
+	
+	// Add scroll gesture
+	scrollController := gtk.NewEventControllerScroll(gtk.EventControllerScrollVertical)
+	scrollController.ConnectScroll(func(dx, dy float64) bool {
+		if widget.scrollHandler != nil {
+			if dy > 0 {
+				widget.scrollHandler(-1) // Scroll down
+			} else if dy < 0 {
+				widget.scrollHandler(1) // Scroll up
+			}
+			return true
+		}
+		return false
+	})
+	widget.label.AddController(scrollController)
 	
 	return widget
 }
@@ -99,6 +115,10 @@ func (w *LabelWidget) Update(value interface{}) {
 				w.label.RemoveCSSClass("production-context")
 			}
 		})
+	case datasource.VolumeData:
+		glib.IdleAdd(func() {
+			w.label.SetText(data.VolumeString)
+		})
 	}
 }
 
@@ -119,6 +139,10 @@ func (w *LabelWidget) SetClickHandler(handler func()) {
 
 func (w *LabelWidget) SetRightClickHandler(handler func()) {
 	w.rightClickHandler = handler
+}
+
+func (w *LabelWidget) SetScrollHandler(handler func(direction int)) {
+	w.scrollHandler = handler
 }
 
 func (w *LabelWidget) SetSpotifyClickHandler(handler func()) {

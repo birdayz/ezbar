@@ -43,17 +43,12 @@ func (p *KubectlPopup) setupUI() {
 	p.popover.SetFocusable(true)
 	p.popover.AddCSSClass("kubectl-popup")
 	
-	// Apply aggressive CSS directly
-	p.applyCSSToWidget(&p.popover.Widget)
-	
 	// Create main container
 	vbox := gtk.NewBox(gtk.OrientationVertical, 3)
 	vbox.SetMarginTop(5)
 	vbox.SetMarginBottom(5)
 	vbox.SetMarginStart(8)
 	vbox.SetMarginEnd(8)
-	vbox.AddCSSClass("kubectl-box")
-	p.applyCSSToWidget(&vbox.Widget)
 	p.popover.SetChild(vbox)
 	
 	// Create search entry
@@ -78,16 +73,12 @@ func (p *KubectlPopup) setupUI() {
 	p.scrolled.SetHExpand(true)
 	p.scrolled.SetVExpand(true)
 	p.scrolled.SetMarginTop(2)
-	p.scrolled.AddCSSClass("kubectl-scrolled")
-	p.applyCSSToWidget(&p.scrolled.Widget)
 	vbox.Append(p.scrolled)
 	
 	// Create list box
 	p.listBox = gtk.NewListBox()
 	p.listBox.SetSelectionMode(gtk.SelectionSingle)
 	p.listBox.SetVExpand(true)
-	p.listBox.AddCSSClass("kubectl-list")
-	p.applyCSSToWidget(&p.listBox.Widget)
 	p.scrolled.SetChild(p.listBox)
 	
 	// Connect search entry to filter function
@@ -254,7 +245,6 @@ func (p *KubectlPopup) addContextRow(context string) {
 	label.SetMarginEnd(8)
 	label.SetMarginTop(3)
 	label.SetMarginBottom(3)
-	label.AddCSSClass("kubectl-label")
 	
 	// Check if this is a production context and style accordingly
 	if isProductionContextLocal(context) {
@@ -262,9 +252,6 @@ func (p *KubectlPopup) addContextRow(context string) {
 	}
 	
 	row := gtk.NewListBoxRow()
-	row.AddCSSClass("kubectl-row")
-	p.applyCSSToWidget(&row.Widget)
-	p.applyCSSToWidget(&label.Widget)
 	row.SetChild(label)
 	
 	p.listBox.Append(row)
@@ -294,20 +281,3 @@ func isProductionContextLocal(context string) bool {
 	return strings.Contains(contextLower, "prod") || strings.Contains(contextLower, "prd")
 }
 
-func (p *KubectlPopup) applyCSSToWidget(widget *gtk.Widget) {
-	// Create a CSS provider with high priority
-	provider := gtk.NewCSSProvider()
-	provider.LoadFromData(`
-		* {
-			background-color: rgba(0, 0, 0, 0.8) !important;
-			background: rgba(0, 0, 0, 0.8) !important;
-			background-image: none !important;
-			color: #ffffff !important;
-			font: 14px "Monospace" !important;
-		}
-	`)
-	
-	// Apply with highest priority
-	styleContext := widget.StyleContext()
-	styleContext.AddProvider(provider, gtk.STYLE_PROVIDER_PRIORITY_USER+1)
-}

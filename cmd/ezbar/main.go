@@ -47,6 +47,7 @@ var (
 	timeLabelWidget    *widget.LabelWidget
 	spotifyWidget      *widget.SpotifyNativeWidget
 	stockWidget        *widget.StockWidget
+	volumeLabelWidget  *widget.LabelWidget
 )
 
 // Data sources
@@ -59,6 +60,7 @@ var (
 	timeDataSource        *datasource.TimeDataSource
 	spotifyDataSource     *datasource.SpotifyDataSource
 	stockDataSource       *datasource.StockDataSource
+	volumeDataSource      *datasource.VolumeDataSource
 )
 
 func main() {
@@ -134,6 +136,7 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	timeLabelWidget = widget.NewLabelWidget("Loading…")
 	spotifyWidget = widget.NewSpotifyNativeWidget()
 	stockWidget = widget.NewStockWidget()
+	volumeLabelWidget = widget.NewLabelWidget("🔇 --")
 
 	// Create data sources
 	kubectlDataSource = datasource.NewKubectlDataSource()
@@ -143,6 +146,7 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	pingDataSource = datasource.NewPingDataSource("8.8.8.8")
 	timeDataSource = datasource.NewTimeDataSource()
 	spotifyDataSource = datasource.NewSpotifyDataSource()
+	volumeDataSource = datasource.NewVolumeDataSource()
 
 	// Create stock data source (configurable via environment variables)
 	stockSymbol := os.Getenv("EZBAR_STOCK_SYMBOL")
@@ -194,6 +198,18 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	spotifyDataSource.Subscribe(spotifyWidget.Update)
 
 	stockDataSource.Subscribe(stockWidget.Update)
+
+	volumeDataSource.Subscribe(volumeLabelWidget.Update)
+
+	// Connect volume click to toggle mute
+	volumeLabelWidget.SetClickHandler(func() {
+		volumeDataSource.ToggleMute()
+	})
+
+	// Connect volume scroll to change volume
+	volumeLabelWidget.SetScrollHandler(func(direction int) {
+		volumeDataSource.ChangeVolume(direction)
+	})
 
 	// Connect Spotify click to OAuth trigger and scroll controls
 	spotifyWidget.SetClickHandler(func() {
@@ -248,6 +264,8 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	rightBox.Append(spotifyWidget.GetGTKWidget())
 	rightBox.Append(gtk.NewLabel("|"))
 	rightBox.Append(stockWidget.GetGTKWidget())
+	rightBox.Append(gtk.NewLabel("|"))
+	rightBox.Append(volumeLabelWidget.GetGTKWidget())
 	rightBox.Append(gtk.NewLabel("|"))
 
 	// Only add battery components if battery exists
@@ -326,148 +344,6 @@ label {
   border: 1px solid #333;
   border-radius: 8px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-}
-
-.kubectl-popup box {
-  background-color: rgba(0, 0, 0, 0.8);
-}
-
-.kubectl-popup entry {
-  background-color: rgba(0, 0, 0, 0.8);
-  color: #ffffff;
-  font: 14px "Monospace";
-  border: 1px solid #444;
-  border-radius: 4px;
-  padding: 5px;
-}
-
-.kubectl-popup entry text {
-  background-color: rgba(0, 0, 0, 0.8);
-  color: #ffffff;
-  font: 14px "Monospace";
-}
-
-.kubectl-popup scrolledwindow {
-  background-color: rgba(0, 0, 0, 0.8);
-  padding: 0;
-  margin: 0;
-}
-
-.kubectl-popup listbox {
-  background-color: rgba(0, 0, 0, 0.8);
-  padding: 0;
-  margin: 0;
-}
-
-.kubectl-popup listbox row {
-  background-color: rgba(0, 0, 0, 0.8);
-  color: #ffffff;
-  font: 14px "Monospace";
-  border-bottom: 1px solid #333;
-  min-height: 30px;
-  padding: 5px;
-}
-
-.kubectl-popup listbox row:hover {
-  background-color: rgba(255, 255, 255, 0.1);
-}
-
-.kubectl-popup listbox row:selected {
-  background-color: rgba(255, 255, 255, 0.2);
-  color: #ffffff;
-}
-
-.kubectl-popup listbox row label {
-  color: #ffffff;
-  font: 14px "Monospace";
-  background-color: transparent;
-  padding: 5px;
-  margin: 0;
-}
-
-/* Force override GTK theme colors */
-popover.kubectl-popup {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-}
-
-popover.kubectl-popup * {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  color: #ffffff !important;
-}
-
-popover.kubectl-popup scrolledwindow,
-popover.kubectl-popup scrolledwindow *,
-popover.kubectl-popup listbox,
-popover.kubectl-popup listbox *,
-popover.kubectl-popup row,
-popover.kubectl-popup row * {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  color: #ffffff !important;
-}
-
-popover.kubectl-popup entry,
-popover.kubectl-popup entry * {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  color: #ffffff !important;
-  font: 14px "Monospace" !important;
-}
-
-/* Specific targeting for our custom classes */
-.kubectl-list {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  background: rgba(0, 0, 0, 0.8) !important;
-}
-
-.kubectl-row {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  background: rgba(0, 0, 0, 0.8) !important;
-  color: #ffffff !important;
-}
-
-.kubectl-row:hover {
-  background-color: rgba(255, 255, 255, 0.1) !important;
-  background: rgba(255, 255, 255, 0.1) !important;
-}
-
-.kubectl-row:selected {
-  background-color: rgba(255, 255, 255, 0.2) !important;
-  background: rgba(255, 255, 255, 0.2) !important;
-}
-
-.kubectl-label {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  background: rgba(0, 0, 0, 0.8) !important;
-  color: #ffffff !important;
-  font: 14px "Monospace" !important;
-}
-
-.kubectl-box {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  background: rgba(0, 0, 0, 0.8) !important;
-}
-
-.kubectl-scrolled {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  background: rgba(0, 0, 0, 0.8) !important;
-}
-
-/* Nuclear option - override everything inside the popup */
-.kubectl-popup,
-.kubectl-popup *,
-.kubectl-box,
-.kubectl-box *,
-.kubectl-scrolled,
-.kubectl-scrolled *,
-.kubectl-list,
-.kubectl-list *,
-.kubectl-row,
-.kubectl-row *,
-.kubectl-label,
-.kubectl-label * {
-  background-color: rgba(0, 0, 0, 0.8) !important;
-  background: rgba(0, 0, 0, 0.8) !important;
-  background-image: none !important;
-  border-color: #333 !important;
 }
 
 
@@ -552,6 +428,7 @@ popover.kubectl-popup entry * {
 	timeDataSource.Start(ctx)
 	spotifyDataSource.Start(ctx)
 	stockDataSource.Start(ctx)
+	volumeDataSource.Start(ctx)
 
 	if hasBattery() {
 		go func() {

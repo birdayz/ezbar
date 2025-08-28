@@ -69,3 +69,9 @@ type KubectlData struct {
 	ContextString string
 	IsProduction  bool
 }
+
+type VolumeData struct {
+	Volume       int
+	VolumeString string
+	IsMuted      bool
+}
