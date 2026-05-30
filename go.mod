@@ -1,19 +1,27 @@
 module github.com/birdayz/ezbar
 
-go 1.24.1
+go 1.25.0
 
 require (
+	github.com/apognu/gocal v0.9.1
+	github.com/cli/go-gh/v2 v2.13.0
 	github.com/diamondburned/gotk4-layer-shell/pkg v0.0.0-20240109211357-6efa9f6dc438
 	github.com/diamondburned/gotk4/pkg v0.3.1
-	github.com/dustin/go-humanize v1.0.1
+	github.com/google/go-github/v72 v72.0.0
 	github.com/joshuarubin/go-sway v1.2.0
 )
 
 require (
+	github.com/ChannelMeter/iso8601duration v0.0.0-20150204201828-8da3af7a2a61 // indirect
 	github.com/KarpelesLab/weak v0.1.1 // indirect
+	github.com/cli/safeexec v1.0.0 // indirect
+	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/joshuarubin/lifecycle v1.0.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
+	github.com/stretchr/testify v1.9.0 // indirect
 	go.uber.org/atomic v1.3.2 // indirect
 	go.uber.org/multierr v1.1.0 // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20231121144256-b99613f794b6 // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

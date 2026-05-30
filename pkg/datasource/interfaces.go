@@ -75,3 +75,22 @@ type VolumeData struct {
 	VolumeString string
 	IsMuted      bool
 }
+
+type CalendarEvent struct {
+	Title     string
+	StartTime time.Time
+	EndTime   time.Time
+	IsAllDay  bool
+	Location  string
+}
+
+type CalendarData struct {
+	Events         []CalendarEvent
+	NextEvent      *CalendarEvent
+	DisplayText    string
+	TimeUntilNext  string
+	IsUrgent       bool // Meeting starting within 5 minutes
+	IsOverdue      bool // Meeting already started
+	NeedsAuth      bool
+	TodayEvents    []CalendarEvent
+}

@@ -34,6 +34,8 @@ var (
 
 // New widget-based components
 var (
+	calendarWidget     *widget.CalendarWidget
+	githubWidget       *widget.GitHubWidget
 	kubectlLabelWidget *widget.LabelWidget
 	kubectlPopup       *widget.KubectlPopup
 	cpuLabelWidget     *widget.LabelWidget
@@ -52,6 +54,8 @@ var (
 
 // Data sources
 var (
+	calendarDataSource    *datasource.GoogleCalendarDataSource
+	githubDataSource      *datasource.GitHubDataSource
 	kubectlDataSource     *datasource.KubectlDataSource
 	cpuDataSource         *datasource.CPUDataSource
 	memoryDataSource      *datasource.MemoryDataSource
@@ -124,8 +128,10 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	batteryLabel = gtk.NewLabel("🔋 --")
 
 	// Create new architecture widgets and data sources
-	kubectlLabelWidget = widget.NewLabelWidget("⚙️ --")
-	cpuLabelWidget = widget.NewLabelWidget("🖥️ --")
+	calendarWidget = widget.NewCalendarWidget()
+	githubWidget = widget.NewGitHubWidget()
+	kubectlLabelWidget = widget.NewLabelWidget("K8s --")
+	cpuLabelWidget = widget.NewLabelWidget("CPU --")
 	cpuGraphWidget = widget.NewGraphWidget("cpu", 30)
 	tempLabelWidget = widget.NewLabelWidget("🌡️ --")
 	tempGraphWidget = widget.NewGraphWidget("temperature", 60)
@@ -139,6 +145,8 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	volumeLabelWidget = widget.NewLabelWidget("🔇 --")
 
 	// Create data sources
+	calendarDataSource = datasource.NewGoogleCalendarDataSource()
+	githubDataSource = datasource.NewGitHubDataSource()
 	kubectlDataSource = datasource.NewKubectlDataSource()
 	cpuDataSource = datasource.NewCPUDataSource()
 	memoryDataSource = datasource.NewMemoryDataSource()
@@ -163,18 +171,28 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	pingLabelWidget.SetAssociatedGraph(pingGraphWidget)
 
 	// Connect data sources to widgets
+	calendarDataSource.Subscribe(calendarWidget.Update)
+
+	// Connect calendar click handler for OAuth
+	calendarWidget.SetClickHandler(func() {
+		calendarDataSource.HandleClick()
+	})
+
+	githubWidget.SetDataSource(githubDataSource)
+	githubDataSource.Subscribe(githubWidget.Update)
+
 	kubectlDataSource.Subscribe(kubectlLabelWidget.Update)
 
 	// Set kubectl click handler to clear context
 	kubectlLabelWidget.SetClickHandler(func() {
 		kubectlDataSource.ClearContext()
 	})
-	
+
 	// Create kubectl context selection popup
 	kubectlPopup = widget.NewKubectlPopup(kubectlDataSource, func(context string) {
 		kubectlDataSource.SetContext(context)
 	})
-	
+
 	// Set kubectl right-click handler to show context selection popup
 	kubectlLabelWidget.SetRightClickHandler(func() {
 		widget := kubectlLabelWidget.GetGTKWidget()
@@ -247,6 +265,10 @@ func activate(log *slog.Logger, app *gtk.Application) *gtk.Window {
 	batterySeparator = gtk.NewLabel("|")
 
 	// Add new architecture widgets to UI
+	rightBox.Append(calendarWidget.GetGTKWidget())
+	rightBox.Append(gtk.NewLabel("|"))
+	rightBox.Append(githubWidget.GetGTKWidget())
+	rightBox.Append(gtk.NewLabel("|"))
 	rightBox.Append(kubectlLabelWidget.GetGTKWidget())
 	rightBox.Append(gtk.NewLabel("|"))
 	rightBox.Append(cpuLabelWidget.GetGTKWidget())
@@ -346,6 +368,97 @@ label {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 
+.calendar-urgent {
+  color: #ffaa00;
+  font-weight: bold;
+}
+
+.calendar-overdue {
+  color: #ff4444;
+  font-weight: bold;
+}
+
+.calendar-popup {
+  background-color: rgba(0, 0, 0, 0.9);
+  border: 1px solid #333;
+  border-radius: 8px;
+}
+
+.calendar-popup-title {
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.calendar-event-past {
+  color: #666666;
+}
+
+.calendar-event-ongoing {
+  color: #00ff00;
+  font-weight: bold;
+}
+
+.calendar-event-soon {
+  color: #ffaa00;
+  font-weight: bold;
+}
+
+.github-has-notifications {
+  color: #58a6ff;
+}
+
+.github-new-notifications {
+  color: #ff4444;
+  font-weight: bold;
+}
+
+.github-popup {
+  background-color: rgba(0, 0, 0, 0.9);
+  border: 1px solid #333;
+  border-radius: 8px;
+}
+
+.github-popup-title {
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.github-reason-header {
+  color: #58a6ff;
+  font-weight: bold;
+  margin-top: 4px;
+}
+
+.github-type-icon {
+  color: #8b949e;
+}
+
+.github-repo {
+  color: #8b949e;
+}
+
+.github-more {
+  color: #666666;
+}
+
+.github-mark-all-read {
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.github-mark-all-read:hover {
+  color: #58a6ff;
+}
+
+.github-time-ago {
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.github-row-clickable:hover {
+  background-color: rgba(88, 166, 255, 0.15);
+  border-radius: 4px;
+}
 
 `)
 	styleContext := window.StyleContext()
@@ -420,6 +533,8 @@ label {
 
 	// Start data sources with context
 	ctx := context.Background()
+	calendarDataSource.Start(ctx)
+	githubDataSource.Start(ctx)
 	kubectlDataSource.Start(ctx)
 	cpuDataSource.Start(ctx)
 	memoryDataSource.Start(ctx)
@@ -492,7 +607,73 @@ func getBatteryStatus() string {
 		icon = "🔋"
 	}
 
-	return fmt.Sprintf("%s %s%%", icon, capacityStr)
+	// Get time remaining
+	timeStr := getTimeRemaining(statusStr)
+
+	return fmt.Sprintf("%s %s%% [%s]", icon, capacityStr, timeStr)
+}
+
+func getTimeRemaining(status string) string {
+	// Read energy and power values
+	energyNowBytes, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/energy_now")
+	if err != nil {
+		return "--"
+	}
+
+	powerNowBytes, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/power_now")
+	if err != nil {
+		return "--"
+	}
+
+	energyNow, err := strconv.ParseFloat(strings.TrimSpace(string(energyNowBytes)), 64)
+	if err != nil {
+		return "--"
+	}
+
+	powerNow, err := strconv.ParseFloat(strings.TrimSpace(string(powerNowBytes)), 64)
+	if err != nil || powerNow == 0 {
+		return "--"
+	}
+
+	var hours float64
+
+	switch status {
+	case "Charging":
+		// For charging: (energy_full - energy_now) / power_now
+		energyFullBytes, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/energy_full")
+		if err != nil {
+			return "--"
+		}
+
+		energyFull, err := strconv.ParseFloat(strings.TrimSpace(string(energyFullBytes)), 64)
+		if err != nil {
+			return "--"
+		}
+
+		hours = (energyFull - energyNow) / powerNow
+	case "Discharging":
+		// For discharging: energy_now / power_now
+		hours = energyNow / powerNow
+	case "Not charging", "Full":
+		return "∞"
+	default:
+		return "--"
+	}
+
+	// Convert to hours and minutes
+	totalMinutes := int(hours * 60)
+	if totalMinutes < 0 {
+		return "--"
+	}
+
+	hours = float64(totalMinutes / 60)
+	minutes := totalMinutes % 60
+
+	if totalMinutes < 60 {
+		return fmt.Sprintf("%dm", minutes)
+	} else {
+		return fmt.Sprintf("%dh%dm", int(hours), minutes)
+	}
 }
 
 func hasBattery() bool {
@@ -578,4 +759,3 @@ func drawWorkspace(wss *workspaceState) error {
 	})
 	return nil
 }
-
