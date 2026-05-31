@@ -1,0 +1,19 @@
+# Nord — community palette, ezbar's square/dark chrome.
+# Colours: nordtheme.com.
+
+palette = { base = "#2e3440", surface = "#3b4252", over = "#434c5e",
+            text = "#eceff4", muted = "#8b95a7",
+            blue = "#88c0d0", green = "#a3be8c", yellow = "#ebcb8b",
+            red = "#bf616a", grey = "#4c566a" }
+
+style = "solid"
+opacity = 0.95
+radius = 0
+background = { base = "$base", weak = "$surface", strong = "$over" }
+text = "$text"; dim = "$muted"
+primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+separator = { color = "$grey", width = 1 }
+
+[workspaces]
+style = "boxed"
+focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"

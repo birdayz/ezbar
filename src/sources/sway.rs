@@ -6,12 +6,17 @@ use std::time::Duration;
 
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
-use swayipc::{Connection, Event, EventType, Node, WorkspaceChange};
+use swayipc::{Connection, Event, EventType, Node};
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub name: String,
+    /// focused on the focused output (the active workspace)
     pub focused: bool,
+    /// visible on *some* output (focused, or active on another monitor)
+    pub visible: bool,
+    /// flagged urgent by a client
+    pub urgent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -61,60 +66,39 @@ fn sort_workspaces(ws: &mut [Workspace]) {
     );
 }
 
-fn run_workspaces(tx: &tokio::sync::mpsc::Sender<SwayUpdate>) -> swayipc::Fallible<()> {
-    let mut conn = Connection::new()?;
+/// Snapshot the full workspace list (name + focused/visible/urgent state).
+fn fetch_workspaces(conn: &mut Connection) -> swayipc::Fallible<Vec<Workspace>> {
     let mut state: Vec<Workspace> = conn
         .get_workspaces()?
         .into_iter()
         .map(|w| Workspace {
             name: w.name,
             focused: w.focused,
+            visible: w.visible,
+            urgent: w.urgent,
         })
         .collect();
     sort_workspaces(&mut state);
-    let _ = tx.blocking_send(SwayUpdate::Workspaces(state.clone()));
+    Ok(state)
+}
 
-    let conn = Connection::new()?;
-    let events = conn.subscribe([EventType::Workspace])?;
+fn run_workspaces(tx: &tokio::sync::mpsc::Sender<SwayUpdate>) -> swayipc::Fallible<()> {
+    let mut conn = Connection::new()?;
+    let state = fetch_workspaces(&mut conn)?;
+    let _ = tx.blocking_send(SwayUpdate::Workspaces(state));
+
+    // Re-snapshot on every workspace event. Sway workspace events are infrequent
+    // (focus/init/empty/urgent), so a full re-query is cheaper than tracking
+    // visible/urgent deltas by hand — and it can never drift out of sync.
+    let mut q = Connection::new()?;
+    let events = Connection::new()?.subscribe([EventType::Workspace])?;
     for event in events {
-        let we = match event? {
+        let _we = match event? {
             Event::Workspace(we) => *we,
             _ => continue,
         };
-        match we.change {
-            WorkspaceChange::Init => {
-                if let Some(c) = we.current {
-                    state.push(Workspace {
-                        name: c.name.unwrap_or_default(),
-                        focused: c.focused,
-                    });
-                }
-            }
-            WorkspaceChange::Empty => {
-                if let Some(c) = we.current {
-                    let name = c.name.unwrap_or_default();
-                    state.retain(|w| w.name != name);
-                }
-            }
-            WorkspaceChange::Focus => {
-                let cur = we.current.and_then(|c| c.name).unwrap_or_default();
-                let old = we.old.and_then(|c| c.name).unwrap_or_default();
-                for w in state.iter_mut() {
-                    if w.name == cur {
-                        w.focused = true;
-                    }
-                    if w.name == old {
-                        w.focused = false;
-                    }
-                }
-            }
-            _ => {}
-        }
-        sort_workspaces(&mut state);
-        if tx
-            .blocking_send(SwayUpdate::Workspaces(state.clone()))
-            .is_err()
-        {
+        let state = fetch_workspaces(&mut q)?;
+        if tx.blocking_send(SwayUpdate::Workspaces(state)).is_err() {
             break;
         }
     }
@@ -156,22 +140,18 @@ fn focused_name(node: &Node) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn ws(name: &str) -> Workspace {
+        Workspace {
+            name: name.into(),
+            focused: false,
+            visible: false,
+            urgent: false,
+        }
+    }
+
     #[test]
     fn sorts_numerically_not_lexically() {
-        let mut ws = vec![
-            Workspace {
-                name: "10".into(),
-                focused: false,
-            },
-            Workspace {
-                name: "2".into(),
-                focused: false,
-            },
-            Workspace {
-                name: "1".into(),
-                focused: true,
-            },
-        ];
+        let mut ws = vec![ws("10"), ws("2"), ws("1")];
         sort_workspaces(&mut ws);
         let names: Vec<&str> = ws.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, vec!["1", "2", "10"]);
@@ -179,16 +159,7 @@ mod tests {
 
     #[test]
     fn named_workspaces_sort_as_strings() {
-        let mut ws = vec![
-            Workspace {
-                name: "web".into(),
-                focused: false,
-            },
-            Workspace {
-                name: "code".into(),
-                focused: false,
-            },
-        ];
+        let mut ws = vec![ws("web"), ws("code")];
         sort_workspaces(&mut ws);
         let names: Vec<&str> = ws.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, vec!["code", "web"]);

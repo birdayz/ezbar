@@ -1,0 +1,19 @@
+# Gruvbox dark — community palette, ezbar's square/dark chrome.
+# Colours: github.com/morhetz/gruvbox.
+
+palette = { base = "#1d2021", surface = "#282828", over = "#3c3836",
+            text = "#ebdbb2", muted = "#a89984",
+            blue = "#83a598", green = "#b8bb26", yellow = "#fabd2f",
+            red = "#fb4934", grey = "#504945" }
+
+style = "solid"
+opacity = 0.94
+radius = 0
+background = { base = "$base", weak = "$surface", strong = "$over" }
+text = "$text"; dim = "$muted"
+primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+separator = { color = "$grey", width = 1 }
+
+[workspaces]
+style = "boxed"
+focused = "$yellow"; occupied = "$muted"; empty = "$over"; urgent = "$red"

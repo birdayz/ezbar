@@ -11,7 +11,7 @@ use iced_layershell::reexport::{
 use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 
-use ezbar::config::{self, Config};
+use ezbar::config::{self, Config, Style};
 use ezbar::history::History;
 use ezbar::modules;
 use ezbar::sources::sway::{SwayUpdate, Workspace};
@@ -182,6 +182,9 @@ struct Bar {
     // config + resolved module theme (RFC 0002)
     config: Config,
     theme: ThemeTokens,
+
+    // temporary A/B switch for the workspace-chip style (env EZBAR_WS_STYLE)
+    ws_style: u8,
 }
 
 #[to_layer_message(multi)]
@@ -208,6 +211,7 @@ enum Message {
     KubectlSelect(String),
     SpotifyClick,
     SpotifyScroll(bool),
+    SwitchWorkspace(String),
     OpenPopup(PopupKind),
     ClosePopup,
     BlinkTick,
@@ -325,6 +329,10 @@ impl Bar {
             cursor_x: 0.0,
             config,
             theme,
+            ws_style: std::env::var("EZBAR_WS_STYLE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2),
         };
         (bar, open)
     }
@@ -476,6 +484,17 @@ impl Bar {
                     spotify::poll().await
                 },
                 Message::Spotify,
+            ),
+            Message::SwitchWorkspace(name) => Task::perform(
+                async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(mut conn) = swayipc::Connection::new() {
+                            let _ = conn.run_command(format!("workspace {name}"));
+                        }
+                    })
+                    .await;
+                },
+                |()| Message::Noop,
             ),
             Message::OpenPopup(kind) => {
                 // One popup at a time: a hardcoded popup also closes any module popup.
@@ -691,6 +710,118 @@ impl Bar {
         }
     }
 
+    /// One workspace rendered as a square, state-filled chip (our square/dark
+    /// identity — not ashell's rounded morphing pill). State drives the *fill*,
+    /// not the width; `cell_w` is a shared, uniform cell width so `1` and `10`
+    /// read as the same square cell. `variant` (env `EZBAR_WS_STYLE`, 1-4) is a
+    /// temporary A/B switch for design selection; the winner becomes the default.
+    fn ws_chip<'a>(&'a self, w: &'a Workspace, variant: u8, cell_w: f32) -> Element<'a, Message> {
+        let th = &self.config.theme;
+        let accent = th.primary.iced();
+        let fg = th.text.iced();
+        let dim = th.dim.iced();
+        let urg = th.urgent.iced();
+        let base = th.background.base().iced(); // dark text on a bright fill
+        let radius: f32 = 0.0; // square identity (theme.radius.item once wired)
+        let fs = th.font_size;
+        let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
+
+        let focused = w.focused;
+        let visible = w.visible && !w.focused;
+        let urgent = w.urgent;
+        let blink = urgent && !self.blink_on;
+        let fade = |c: Color| if blink { Color { a: 0.4, ..c } } else { c };
+        let tint = |c: Color, a: f32| Color { a, ..c };
+
+        // 4 — accent underbar: numbers + a 2px bar under the active ws.
+        if variant == 4 {
+            let (txt, bar_color) = if urgent {
+                (fade(urg), fade(urg))
+            } else if focused {
+                (fg, accent)
+            } else if visible {
+                (fg, Color::TRANSPARENT)
+            } else {
+                (dim, Color::TRANSPARENT)
+            };
+            let label = container(text(w.name.clone()).size(fs).color(txt))
+                .width(Length::Fixed(cell_w))
+                .height(Length::Fill)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center);
+            let underbar = container(Space::new().height(Length::Fixed(2.0)))
+                .width(Length::Fixed(cell_w))
+                .style(move |_: &iced::Theme| container::Style {
+                    background: Some(Background::Color(bar_color)),
+                    ..Default::default()
+                });
+            return mouse_area(column![label, underbar].height(Length::Fixed(chip_h)))
+                .on_press(Message::SwitchWorkspace(w.name.clone()))
+                .into();
+        }
+
+        // (background, border_width, border_color, text_color) per state.
+        let (bg, bw, bc, txt): (Option<Color>, f32, Color, Color) = match variant {
+            // 1 — filled focus only: just the active ws is a solid square.
+            1 => {
+                if urgent {
+                    (Some(fade(urg)), 0.0, urg, base)
+                } else if focused {
+                    (Some(accent), 0.0, accent, base)
+                } else if visible {
+                    (None, 0.0, fg, fg)
+                } else {
+                    (None, 0.0, dim, dim)
+                }
+            }
+            // 3 — outlined focus: square accent border, transparent fill.
+            3 => {
+                if urgent {
+                    (None, 1.5, fade(urg), fade(urg))
+                } else if focused {
+                    (None, 1.5, accent, accent)
+                } else if visible {
+                    (None, 1.0, tint(fg, 0.35), fg)
+                } else {
+                    (None, 1.0, tint(fg, 0.12), dim)
+                }
+            }
+            // 2 — all boxed (default): every ws a defined cell, tiered by state.
+            // Each idle cell carries a hairline border so it separates cleanly
+            // from the panel even at low fill (the v1 boxes were too muddy).
+            _ => {
+                if urgent {
+                    (Some(fade(urg)), 0.0, urg, base)
+                } else if focused {
+                    (Some(accent), 0.0, accent, base)
+                } else if visible {
+                    (Some(tint(accent, 0.28)), 1.0, tint(accent, 0.55), fg)
+                } else {
+                    (Some(tint(fg, 0.10)), 1.0, tint(fg, 0.16), tint(fg, 0.78))
+                }
+            }
+        };
+
+        let inner = container(text(w.name.clone()).size(fs).color(txt))
+            .width(Length::Fixed(cell_w))
+            .height(Length::Fixed(chip_h))
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center)
+            .style(move |_: &iced::Theme| container::Style {
+                background: bg.map(Background::Color),
+                border: Border {
+                    color: bc,
+                    width: bw,
+                    radius: radius.into(),
+                },
+                text_color: Some(txt),
+                ..Default::default()
+            });
+        mouse_area(inner)
+            .on_press(Message::SwitchWorkspace(w.name.clone()))
+            .into()
+    }
+
     fn close_popup_task(&mut self) -> Task<Message> {
         if let Some((pid, _)) = self.popup.take() {
             iced::window::close(pid)
@@ -741,31 +872,29 @@ impl Bar {
     }
 
     fn bar_view(&self) -> Element<'_, Message> {
-        // ---- left: workspaces ----
-        let mut ws_items: Vec<Element<Message>> = Vec::new();
-        for w in &self.workspaces {
-            let label = if w.focused {
-                format!("[{}]", w.name)
-            } else {
-                format!(" {} ", w.name)
-            };
-            let color = if w.focused {
-                Color::WHITE
-            } else {
-                Color::from_rgb(0.55, 0.55, 0.55)
-            };
-            ws_items.push(text(label).color(color).into());
-        }
-        let left = container(row(ws_items))
-            .width(Length::FillPortion(1))
-            .align_x(Horizontal::Left)
-            .center_y(Length::Fill);
+        // ---- left: workspaces (square state-chips) ----
+        // One shared, uniform cell width so single- and multi-digit names read as
+        // the same square cell (fixes the "10 is a wide rectangle" wobble).
+        let variant = self.ws_style;
+        let fs = self.config.theme.font_size;
+        let max_chars = self
+            .workspaces
+            .iter()
+            .map(|w| w.name.chars().count())
+            .max()
+            .unwrap_or(1)
+            .max(1) as f32;
+        let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
+        let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
+        let ws_items: Vec<Element<Message>> = self
+            .workspaces
+            .iter()
+            .map(|w| self.ws_chip(w, variant, cell_w))
+            .collect();
+        let ws_row: Element<Message> = row(ws_items).spacing(4).align_y(Vertical::Center).into();
 
         // ---- center: focused window title ----
-        let center = container(text(self.title.clone()))
-            .width(Length::FillPortion(1))
-            .align_x(Horizontal::Center)
-            .center_y(Length::Fill);
+        let title_el: Element<Message> = text(self.title.clone()).into();
 
         // ---- right: widgets ----
         let mut right: Vec<Element<Message>> = Vec::new();
@@ -924,16 +1053,72 @@ impl Bar {
 
         right.push(text(self.time_str.clone()).into());
 
-        let right_row = container(row(right).spacing(6).align_y(Vertical::Center))
-            .width(Length::FillPortion(1))
-            .align_x(Horizontal::Right)
-            .center_y(Length::Fill);
+        let right_inner: Element<Message> = row(right).spacing(6).align_y(Vertical::Center).into();
 
-        container(row![left, center, right_row].align_y(Vertical::Center))
+        if matches!(self.config.theme.style, Style::Islands) {
+            // Floating SQUARE islands over a transparent surface — our take on
+            // the islands look (ashell's are rounded; ours stay square/flat).
+            let t = &self.config.theme;
+            let base = t.background.base().0;
+            let pillbg = Color::from_rgba(base[0], base[1], base[2], t.opacity);
+            let r = t.radius.group();
+            let bw = t.border.width.max(1.0);
+            let bc = t.border.color.iced();
+            let pill_style = move |_: &iced::Theme| container::Style {
+                background: Some(Background::Color(pillbg)),
+                border: Border {
+                    color: bc,
+                    width: bw,
+                    radius: r.into(),
+                },
+                ..Default::default()
+            };
+            let ws_pill = container(ws_row)
+                .padding([2, 10])
+                .center_y(Length::Fill)
+                .style(pill_style);
+            let title_pill = container(title_el)
+                .padding([2, 12])
+                .center_y(Length::Fill)
+                .style(pill_style);
+            let right_pill = container(right_inner)
+                .padding([2, 10])
+                .center_y(Length::Fill)
+                .style(pill_style);
+            container(
+                row![
+                    ws_pill,
+                    Space::new().width(Length::Fill),
+                    title_pill,
+                    Space::new().width(Length::Fill),
+                    right_pill,
+                ]
+                .align_y(Vertical::Center),
+            )
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding([0, 8])
+            .padding([4, 10])
             .into()
+        } else {
+            let left = container(ws_row)
+                .width(Length::FillPortion(1))
+                .align_x(Horizontal::Left)
+                .center_y(Length::Fill)
+                .padding([0, 8]);
+            let center = container(title_el)
+                .width(Length::FillPortion(1))
+                .align_x(Horizontal::Center)
+                .center_y(Length::Fill);
+            let right_row = container(right_inner)
+                .width(Length::FillPortion(1))
+                .align_x(Horizontal::Right)
+                .center_y(Length::Fill);
+            container(row![left, center, right_row].align_y(Vertical::Center))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([0, 8])
+                .into()
+        }
     }
 
     /// A metric label plus optional canvas graph; click toggles graph visibility.
@@ -1047,8 +1232,14 @@ impl Bar {
 
     fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
         let bg = self.config.theme.background.base().0;
+        // Islands draw their own pills over a transparent surface; solid paints
+        // the whole bar background.
+        let bar_bg = match self.config.theme.style {
+            Style::Islands => Color::TRANSPARENT,
+            Style::Solid => Color::from_rgba(bg[0], bg[1], bg[2], self.config.theme.opacity),
+        };
         iced::theme::Style {
-            background_color: Color::from_rgba(bg[0], bg[1], bg[2], self.config.theme.opacity),
+            background_color: bar_bg,
             text_color: self.config.theme.text.iced(),
         }
     }

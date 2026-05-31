@@ -1,9 +1,25 @@
 # RFC 0003: Built-in modules & visual system
 
-- **Status:** Draft (v2 — addresses round-1 review: ashell-maintainer, iced/runtime, ricer/visual)
+- **Status:** Draft (v3 — real screenshots, square workspace chips, the preset
+  switcher widget, and graph knobs; addresses the r/unixporn review)
 - **Created:** 2026-05-31
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
-- **Depends on:** RFC 0001 (module SDK), RFC 0002 (config, theme tokens, `ezbar msg`)
+- **Depends on:** RFC 0001 (module SDK), RFC 0002 (config, theme tokens, presets, `ezbar msg`)
+
+## Changelog (v3)
+
+- **Real screenshots** of the running bar replace v2's "screenshot lands later" IOU —
+  see *Default appearance*. The flat-vs-ashell and "designed default" claims are now
+  shown, not asserted.
+- **Workspaces become square state-chips** (state drives the *fill*, our square/dark
+  identity — deliberately not ashell's rounded width-morphing pill), with **4
+  selectable styles** (`boxed|filled|outlined|underbar`), click-to-switch, urgent
+  blink, and per-workspace colors. Implemented; captured below.
+- **Preset switcher widget** (`▾`) added to the component library and the OSD/popup
+  family — the live theme switch from RFC 0002, a feature ashell has no equivalent of.
+- **`metric_graph` knobs exposed** via `[modules.<id>.graph]` (RFC 0002): samples,
+  height, line color/width, gradient fill, smoothing — the identity widget is now the
+  most configurable thing, not a sentence.
 
 ## Changelog (v2)
 
@@ -102,26 +118,73 @@ rather than copy a style matrix:
 | `toggle` | on/off + optional submenu in the settings panel |
 | `popup_frame` | the dark rounded popup chrome (one themed definition; `[theme.popup]`) |
 | `metric` | "icon + value", threshold-colored |
-| **`metric_graph`** | **icon + value + inline GPU sparkline** — themed fill (gradient-under-line at low alpha), fixed graph **height + width (sample-count)** tokens. The graph-forward identity, shared so cpu/mem/temp/ping/net/disk are visually identical, not bespoke. |
+| **`metric_graph`** | **icon + value + inline GPU sparkline**, fully tunable via `[modules.<id>.graph]` (RFC 0002): `samples`, `height`, `line_color` (token/`$ref`/hex; default = threshold color), `line_width`, `fill = {gradient, alpha}`, `smooth`. The graph-forward identity, shared so cpu/mem/temp/ping/net/disk are visually identical, not bespoke. |
+| `ws_chip` | one workspace as a **square, state-filled cell** (§1e) |
+| `switcher` | the `▾` preset button + its popup list (§1f) |
 | `pill` | the islands container |
+
+### 1e. Workspaces — square state-chips (our identity)
+ashell's technique (studied, not copied): each workspace is a button whose **width**
+encodes state (active `xl` > visible `lg` > hidden `md`) and **animates** between
+them — a rounded, morphing pill. We take the *idea* (state-aware, clickable) and make
+it ours: a **square cell where state drives the fill**, not the width.
+
+- States from sway IPC: `focused` (active on the focused output), `visible` (active on
+  another monitor), `urgent`, and idle. Colors are `[theme.workspaces]` tokens, with
+  an optional per-workspace `colors=[…]`/`special=[…]` palette (indexed by sort order;
+  documented, not magic).
+- Four selectable styles via `[theme.workspaces].style` — all square, all live-
+  switchable, captured here on the Mocha preset:
+
+  ![workspace chip styles](assets/workspaces.png)
+
+  | style | look |
+  |---|---|
+  | `filled` | only the active ws is a solid accent square; others plain text |
+  | `boxed` *(default)* | every ws is a square cell; active = accent fill, others = subtle box |
+  | `outlined` | active = square accent **border** (no fill); others plain |
+  | `underbar` | numbers + a 2px accent bar under the active ws |
+- **Clickable** (click → switch workspace via sway IPC), **urgent blinks**, scroll-to-
+  cycle (trackpad pixel-accumulator, learned from ashell) is a follow-up. Width-morph
+  animation is *available* but **off by default** — the square fill already reads
+  instantly and motion is gated by `theme.animations`.
+
+### 1f. Preset switcher (the `▾`)
+The live theme switch from RFC 0002, surfaced on the bar. A small `▾` `icon_button`
+(`[bar].switcher`, default right end) opens a `popup_frame` list of presets (inline +
+the `presets/*.toml` drop-ins), current one marked; selecting one applies **live** via
+the theme-only hot-reload path (no module churn, feels instant) and persists to the
+state file. Also driven headless by `ezbar msg preset <name|next|prev>`. This is a
+front-page feature with **no ashell equivalent**; it's why presets are worth the
+machinery.
 
 ## Default appearance (what 90% see)
 
-Zero-config must look **designed**, not "today's emoji bar":
-- `style = solid`, ezbar's own dark palette (RFC 0002 example: `#0d1117` bg, `#58a6ff`
-  primary, `#3fb950/#d29922/#f85149` ok/warn/urgent), hairline `separator`, `spacing
-  6`, the icon font (no emoji).
+Zero-config must look **designed**, not "today's emoji bar". This is the **actual
+running default** (sway, wgpu/Vulkan), not a mockup:
+
+![default bar](assets/default-bar.png)
+
+- `style = solid`, ezbar's own dark palette (`#0d1117` bg, `#58a6ff` primary,
+  `#3fb950/#d29922/#f85149` ok/warn/urgent), hairline `separator`, the icon font (no
+  emoji), and **GPU sparklines** filled under the line (red cpu, orange temp above).
 - Default modules on: `workspaces · title │ cpu mem temp(graphs) · ping · clock ·
   volume battery`. Dev widgets (github/stock/claude/kubectl/calendar/spotify) ship but
-  are **opt-in** in config (they need tokens/setup).
+  are **opt-in** in config (they need tokens/setup); the capture shows them enabled.
+- Re-theming is one preset away and **live** — same bar, Catppuccin Mocha, hot-
+  reloaded with no restart:
 
-```
- 1  2  3   code — main.rs          ▁▃▅ 12%  ▂▂▃ 41%  ▁▁▂ 47°   28ms   14:23   ◢ 62%  ▮ 88%
-└ workspaces ┘└ title ┘           └ cpu ──── mem ──── temp(sparklines) ┘ ping  clock  vol  bat
-```
+  ![theme hot-swap](assets/theme-swap.png)
 
-(`islands` flips the look to floating rounded pills with `border` + `backdrop` popups.
-A real screenshot lands with the implementation.)
+`style = "islands"` flips the look to **floating square panels** over the wallpaper —
+ours stay square/flat, deliberately not ashell's rounded pills (real capture):
+
+![islands mode](assets/islands.png)
+
+And because theming is a token layer, any palette round-trips — same chrome, different
+scheme (Mocha and Gruvbox shown, from the shipped `presets/`):
+
+![palette round-trip](assets/palettes.png)
 
 ## Part 2 — Built-in catalog
 
@@ -131,7 +194,7 @@ Every entry is an RFC 0001 `Module`, placed/configured via RFC 0002.
 
 | module | origin | does | popup |
 |---|---|---|---|
-| workspaces | have | sway ws; **state colors** (focused/empty/urgent), **special/scratchpad** ws, **visibility modes** (all/monitor/exclusive), click-switch, **scroll with trackpad pixel-accumulator** | — |
+| workspaces | have→**chips** | sway ws as **square state-chips** (§1e), 4 styles, click-switch, urgent blink; **special/scratchpad**, **visibility modes**, **scroll pixel-accumulator** are follow-ups | — |
 | window_title | have | focused title/app-id; truncate modes; feeds center re-balance | — |
 | clock | have→extend | time/date **+ calendar + weather** | calendar+forecast |
 | cpu / memory / temperature | **have (graphs)** | `metric_graph` (GPU sparkline + threshold color) | — |
@@ -188,7 +251,9 @@ trait Service { type Event; fn run(&self) -> Subscription<Self::Event>; }
 | | ezbar | ashell |
 |---|---|---|
 | islands / solid / icons / animations / components | ✅ (ours) | ✅ |
-| **system graphs** | **GPU `metric_graph`** | text indicators |
+| **system graphs** | **GPU `metric_graph`** (tunable) | text indicators |
+| **preset switcher (`▾`)** | ✅ live, on-bar + `msg` | ⛔ |
+| workspace chips | ✅ square, 4 styles | ✅ rounded width-morph |
 | tray / media / privacy / OSD | 🟡 Tier B cheap (planned) | ✅ shipped |
 | settings panel (audio+brightness) | 🟡 Tier B (planned) | ✅ shipped |
 | settings: network/bluetooth/VPN | 🟠 demand-gated | ✅ shipped |

@@ -1,0 +1,19 @@
+# Catppuccin Mocha — community palette, ezbar's square/dark chrome.
+# Colours: catppuccin.com (Mocha). Layout/chrome stays ezbar's own.
+
+palette = { base = "#1e1e2e", surface = "#313244", over = "#45475a",
+            text = "#cdd6f4", muted = "#a6adc8",
+            mauve = "#cba6f7", green = "#a6e3a1", yellow = "#f9e2af",
+            red = "#f38ba8", overlay = "#585b70" }
+
+style = "solid"
+opacity = 0.96
+radius = 0
+background = { base = "$base", weak = "$surface", strong = "$over" }
+text = "$text"; dim = "$muted"
+primary = "$mauve"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+separator = { color = "$overlay", width = 1 }
+
+[workspaces]
+style = "boxed"
+focused = "$mauve"; occupied = "$muted"; empty = "$over"; urgent = "$red"

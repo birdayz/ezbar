@@ -1,0 +1,24 @@
+# ezbar-dark — the default identity: flat, square, dark.
+# A preset is a theme-only bundle. Drop into ~/.config/ezbar/presets/ and pick it
+# from the ▾ switcher, or set `[theme] preset = "ezbar-dark"`.
+
+palette = { base = "#0d1117", surface = "#161b22", over = "#21262d",
+            text = "#e6edf3", muted = "#7d8590",
+            blue = "#58a6ff", green = "#3fb950", yellow = "#d29922", red = "#f85149" }
+
+style = "solid"
+opacity = 0.85
+radius = 0                       # square
+background = { base = "$base", weak = "$surface", strong = "$over" }
+text = "$text"; dim = "$muted"
+primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+separator = { color = "$over", width = 1 }
+
+[popup]
+opacity = 0.92
+backdrop = 0.0
+radius = 0
+
+[workspaces]
+style = "boxed"
+focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"

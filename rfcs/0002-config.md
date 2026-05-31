@@ -1,64 +1,94 @@
-# RFC 0002: Configuration & theming
+# RFC 0002: Configuration, theming & presets
 
-- **Status:** Draft (v2 — addresses round-1 review: ashell-maintainer, iced/runtime, ricer/visual)
+- **Status:** Draft (v3 — adds presets + live switcher, palette variables, floating
+  geometry, graph knobs, and real visual proof; addresses the r/unixporn review)
 - **Created:** 2026-05-31
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
 - **Depends on:** RFC 0001 (modules) — supersedes its `[bar]`/`[[module]]` sketch.
 
-## Changelog (v2)
+## Changelog (v3)
 
-Round-1 was NACK'd on real holes. Map of fixes:
+A ricer-perspective review scored v2 6/10: the engineering was sound but the
+*ricing* story was thin. v3 closes every blocking gap and adds the feature that
+turns two of them into a strength:
 
-- **Stable instance identity, fixed.** `(zone, id, occurrence-index)` reordered/
-  renumbered on duplicate ids and changed identity across zones — reintroducing the
-  ashell teardown it claimed to beat. v2: identity is a user-controllable **`key`**
-  (explicit, else `id` for the single-instance common case), **independent of zone
-  and position**. Moving/reordering never changes identity.
-- **Hot-reload subscriptions, made sound against the iced 0.14 runtime.** Recipe
-  identity is `(TypeId, hashed-data, fn-ptr)` — *config is not in it*, so a changed
-  poll-interval/symbol baked in a stream closure would be **silently ignored** while
-  the module reports "Applied". Fix (v2, round-2): the **host** owns a per-instance
-  generation counter and re-keys each module's subscription through its **existing**
-  `.with((instance_id, generation))` wrap (`main.rs` already does `.with(instance)`).
-  No `Ctx`/trait change — `subscription(&self)` takes no `Ctx`, so the counter must
-  live host-side. `reconfigure` returns `Applied { resubscribe } | Reconstruct`.
-- **`Factory` hands an *owned* `instance_id`,** not a borrowed `Ctx` (the borrow
-  can't be stored). Registry/`Factory`/`reconfigure` are new and **must land in the
-  RFC 0001 migration before** hot-reload has anything to call.
-- **Theme model rebuilt** from one-scalar-each to a real token set: tiered/structured
-  `radius`, a `border` token, an independent `[theme.popup]` (opacity + dim
-  `backdrop` scrim — *not* blur), split `spacing`/`padding`, **per-module color
-  override**, workspace state colors.
-- **Originality fixed.** The v1 example palette was ashell's Tokyo-Night defaults
-  byte-for-byte while the prose said "ours". v2's example uses **ezbar's own**
-  palette; Tokyo Night is moved to the community-theme bucket. We no longer frame
-  the (convergent) semantic-color schema as a differentiator.
-- **Added `ezbar msg` IPC** (our own action set) so keybinds drive bar actions +
-  the OSD — flagged missing from both RFCs.
-- **Surface re-roll honesty:** double-buffered, distinguished from output-removal
-  (must not trip the exit-on-bar-close path), closes the popup.
+- **Presets + live switcher (headline).** A **preset** is a named bundle of every
+  visual token. They live inline *or* as drop-in files (`presets/*.toml`), are
+  switched **live** from a `▾` button on the bar (or `ezbar msg preset …`), and are
+  self-contained ⇒ shareable. This subsumes the "no shareable theme file" gap and
+  the "where's the live theme switcher" gap in one move — and ashell has neither.
+- **Palette variables.** A `[palette]` block of named anchors that tokens reference
+  with `$name`. Drop a scheme by editing anchors once, not 18 scattered hex values.
+- **Floating-bar geometry.** `[bar].margin` (per-side) + `[bar].radius` so the bar
+  can detach from the edge with rounded corners — the front-page silhouette. The
+  flat slab was previously unavoidable.
+- **Graph knobs.** The sparkline is our identity but had zero config surface. v3
+  adds `[modules.<id>.graph]` (samples/height/line color/fill/width/smoothing).
+- **Per-module font + padding, font weight, per-zone spacing, glyph separators,
+  per-side/per-state border, a `shadow` token.** The knobs ricers actually demand.
+- **Real visual proof.** v2 said "screenshot lands later." v3 embeds **actual
+  captures** of the running bar — default, a live preset swap, and the workspace
+  chips — below. The "designed default" and "live swap" claims are now shown, earned.
+- **Scrim-not-blur is stated as a deliberate aesthetic,** not an omission.
+
+(v2 already fixed: key-based stable identity, host-owned `config_generation`
+subscription re-keying, `Factory(owned id, &cfg)`, tonal/OkLab tiers, `ezbar msg`.)
 
 ## Summary
 
 A single TOML config — `~/.config/ezbar/config.toml` — driving **placement**,
-**per-instance options**, a **token-based theme**, with **hot-reload**, plus an
-**`ezbar msg` IPC** for keybind actions. **Zero config == today's bar.** Match or
-beat ashell's configurability and looks, on sway, our own way.
+**per-instance options**, a **token-based theme**, **presets with a live switcher**,
+**hot-reload**, and an **`ezbar msg` IPC**. **Zero config == today's bar.** Match or
+beat ashell's configurability and looks, on sway, our own square/dark/flat way.
+
+## Visual proof
+
+Captures of the running bar (sway, wgpu/Vulkan, JetBrainsMono Nerd Font).
+
+**Zero-config default** — flat, square, dark `#0d1117`; Nerd glyphs; GPU sparklines
+(red cpu, orange temp) inline with the values. No emoji, no rounded chrome:
+
+![default bar](assets/default-bar.png)
+
+**Live preset swap** — the *same running bar* re-themed to Catppuccin Mocha by a
+~9-line `[theme]` override, applied by hot-reload with **no restart** (background,
+separators, text recolor; semantic graph colors are pinned by default — see
+`[modules.<id>.graph]`):
+
+![theme hot-swap](assets/theme-swap.png)
+
+**Workspace chips** — square, state-filled (focused = solid accent square), four
+selectable styles via `[theme.workspaces].style`, uniform cell width (real captures,
+Mocha palette):
+
+![workspace chip styles](assets/workspaces.png)
+
+**Islands** — `style = "islands"` floats each zone as a **square** panel over the
+wallpaper (transparent surface), our flat take on islands (not ashell's rounded pills):
+
+![islands mode](assets/islands.png)
+
+> These are captures of the **current implementation** (config parsing, theme
+> hot-reload, square chips, islands, GPU graphs all run today). The **preset
+> switcher `▾`**, `[palette]` `$ref` resolution, and `ezbar msg` are the *proposed*
+> additions this RFC specifies; they're built on the proven hot-reload path above.
 
 ## Motivation
 
-Layout is hardcoded; theming is three `const` arrays; no hot-reload; no keybind
-IPC. ashell has all four. We close the gap without copying their identity.
+Layout is hardcoded; theming was three `const` arrays; no hot-reload; no keybind
+IPC; no theme switcher. ashell has the first four. We close the gap and add the
+switcher, without copying their identity.
 
 ## Relationship to ashell (learn, don't copy)
 
 Study their source for *technique*; implement our **own**. No ashell code, assets,
 fonts, or default palette is copied. We **deliberately differ**: default style is
 ezbar's flat `solid` (islands opt-in); default palette is ezbar's own; placement and
-options are co-located; identity leans on graphs (RFC 0003), not a control panel.
-Where a choice is just good engineering (tonal palette, file-watch reload), we adopt
-the *idea*. We do **not** claim the semantic-color schema as ours — it's convergent
-with ashell and with iced's `palette`.
+options are co-located; identity leans on **GPU graphs** and **square chips**, plus a
+**preset switcher** ashell lacks. Where a choice is just good engineering (tonal
+palette, file-watch reload, width-state workspaces) we adopt the *idea*, our way. We
+do **not** claim the semantic-color schema as ours — it's convergent with ashell and
+iced's `palette`.
 
 ## Design
 
@@ -66,7 +96,82 @@ with ashell and with iced's `palette`.
 
 `$XDG_CONFIG_HOME/ezbar/config.toml`, parsed with `serde` + `#[serde(default)]`
 throughout: missing keys fall back to defaults; **no file == the shipped layout**.
-`--config <path>` overrides. Secrets/data files stay separate (not in this file).
+`--config <path>` overrides. Resolution order for any theme token:
+
+```
+default  <  active preset  <  top-level [theme]  <  [modules.<id>.theme] (per-instance)
+```
+
+so a preset is a *base layer* you can override one key at a time. Secrets/data files
+stay separate (not in this file).
+
+### Presets & the live switcher (headline)
+
+A **preset** is a named bundle of *theme-only* tokens (everything under `[theme]`,
+incl. `[theme.workspaces]`, `[theme.popup]`, `[palette]`, graph defaults, font). It
+is **not** placement — switching your look never reorders your modules.
+
+```toml
+[theme]
+preset = "tokyo-night"     # the default preset on launch (optional)
+
+# inline preset (same shape as a presets/*.toml file, just nested under [presets.<name>]):
+[presets.tokyo-night]
+palette = { bg = "#1a1b26", surface = "#1f2335", over = "#24283b",
+            fg = "#c0caf5", muted = "#565f89", blue = "#7aa2f7", green = "#9ece6a",
+            yellow = "#e0af68", red = "#f7768e", grey = "#414868" }
+background = { base = "$bg", weak = "$surface", strong = "$over" }
+text = "$fg"; dim = "$muted"
+primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+separator = { color = "$grey", width = 1 }
+[presets.tokyo-night.workspaces]
+style = "boxed"; focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"
+```
+
+**Two sources, both shareable — identical schema:**
+
+- inline `[presets.<name>]` tables, and
+- drop-in files `~/.config/ezbar/presets/<name>.toml` whose **body is exactly the
+  preset table** (top-level `palette`/`style`/`background`/…, with `[workspaces]` /
+  `[popup]` sub-tables) — i.e. the inline form minus the `[presets.<name>]` prefix.
+  See `presets/*.toml` in-repo (ezbar-dark, catppuccin-mocha, gruvbox-dark, nord,
+  tokyo-night) for the canonical shape. Download a community preset, drop the file in,
+  and it appears in the switcher on the next reload — no edit to `config.toml`.
+
+**The switcher (UI in RFC 0003):** a small `▾` button (default: right end of the
+bar; `[bar].switcher = "off" | "left" | "right"`). Click → a popup list of presets,
+current one marked; click one → **apply live** through the hot-reload theme path
+(§Hot-reload). Also driven by IPC: `ezbar msg preset <name|next|prev>`.
+
+**Persistence without touching user config:** the switcher writes the chosen preset
+name to `$XDG_STATE_HOME/ezbar/state.toml` (a single `preset = "…"`). On launch the
+state file wins over `[theme].preset`; we **never rewrite `config.toml`**. Deleting
+the state file falls back to the configured default.
+
+**Sharing (later, out of scope here):** because a preset is one self-contained TOML
+file, a community gallery is just a folder/repo of files + a thumbnail; an
+`ezbar preset add <url>` fetch helper is a future RFC.
+
+### Palette variables
+
+Authoring a scheme means editing *anchors*, not every semantic token. `[palette]`
+(or a preset's `palette = {…}`) defines named colors; any color value may be
+`"$name"`, resolved after merge. `$name` not found ⇒ validation error with the line.
+
+```toml
+[palette]
+base = "#0d1117"; surface = "#161b22"; over = "#21262d"
+text = "#e6edf3"; muted = "#7d8590"
+blue = "#58a6ff"; green = "#3fb950"; yellow = "#d29922"; red = "#f85149"
+
+[theme]
+background = { base = "$base", weak = "$surface", strong = "$over" }
+text = "$text"; dim = "$muted"
+primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"; separator = "$over"
+```
+
+Anchors are *optional*: every token still accepts a literal hex. This is the
+indirection v2 lacked — semantic tokens, but no variables behind them.
 
 ### Top-level shape
 
@@ -75,11 +180,15 @@ throughout: missing keys fall back to defaults; **no file == the shipped layout*
 position = "bottom"          # top | bottom
 layer    = "top"
 height   = 34
-outputs  = "all"             # "all" | ["DP-1"]   (per-output scale/height: deferred)
+outputs  = "all"             # "all" | ["DP-1"]
 font     = "JetBrainsMono Nerd Font"
+weight   = "medium"          # thin|light|normal|medium|semibold|bold
 scale    = 1.0               # 0 < x ≤ 2
+margin   = { top = 0, bottom = 0, left = 0, right = 0 }   # floating gap from edges
+radius   = 0                 # round the BAR SURFACE itself (square identity = 0)
+switcher = "right"           # off | left | right  — the ▾ preset button
 
-# placement: ordered; nested array = an island group; entry = id | {id,key,config}
+# placement: ordered; nested array = an island/solid group; entry = id | {id,key,config}
 left   = [ "workspaces", "window_title" ]
 center = [ "clock" ]
 right  = [
@@ -90,136 +199,154 @@ right  = [
   ["volume", "battery"],
 ]
 
-[modules.cpu]        # per-id defaults (merged under each instance's inline config)
-show_graph = true
-[modules.cpu.theme]  # per-module color override (shadows global tokens)
-primary = "#9ece6a"
-
 [theme]
+preset    = "ezbar-dark"                 # optional; default look if omitted
 style     = "solid"                      # solid (default) | islands
 opacity   = 0.95
-font_size = 14                           # bar text size (independent of bar.scale)
-spacing   = 6                            # gap BETWEEN items in a zone
-padding = 6                              # space INSIDE an island / popup
-radius  = { item = 4, group = 8, popup = 10 }   # scalar also allowed
-border  = { width = 1, color = "#ffffff14" }    # hairline; separates island from wallpaper
+font_size = 14
+spacing   = { zone = 8, group = 4 }      # between groups vs within a group (scalar ok)
+padding   = { x = 8, y = 2 }             # inside an island / popup (scalar ok)
+radius    = { item = 4, group = 8, popup = 10 }   # scalar also allowed
+border    = { width = 1, color = "#ffffff14" }    # hairline; or per-side/per-state below
+shadow    = { blur = 8, color = "#0008", y = 2 }  # island/popup drop shadow; off by default
+separator = { color = "#30363d", glyph = "", width = 1 }   # color | glyph (e.g. "" "|") | both
 background = { base = "#0d1117", weak = "#161b22", strong = "#21262d" }
-text="#e6edf3"; dim="#7d8590"
-primary="#58a6ff"; ok="#3fb950"; warn="#d29922"; urgent="#f85149"; separator="#30363d"
+text = "#e6edf3"; dim = "#7d8590"
+primary = "#58a6ff"; ok = "#3fb950"; warn = "#d29922"; urgent = "#f85149"
 
 [theme.popup]                # the detail surface is its own thing
 opacity  = 1.0               # opaque even if the bar is translucent
-backdrop = 0.3               # dim SCRIM behind the popup (a quad, NOT gaussian blur)
+backdrop = 0.3               # dim SCRIM behind the popup (a quad — see below; NOT blur)
 radius   = 12
 
-[theme.workspaces]           # state-aware, not a flat list
+[theme.workspaces]           # state-aware + a style for the chip shape
+style    = "boxed"           # boxed | filled | outlined | underbar  (see RFC 0003)
 focused="#58a6ff"; occupied="#7d8590"; empty="#30363d"; urgent="#f85149"
 colors=["#58a6ff","#3fb950"]; special=["#bc8cff"]
+
+[modules.cpu]                # per-id defaults (merged under each instance's config)
+show_graph = true
+[modules.cpu.theme]          # per-instance color/font override (shadows global tokens)
+primary  = "#9ece6a"
+font     = "Iosevka"         # per-module font/size/weight allowed here
+[modules.cpu.graph]          # the sparkline knobs (our identity, now tunable)
+samples    = 48              # history width
+height     = 16
+line_color = "$green"        # or a token / hex; default = the module's threshold color
+line_width = 1.5
+fill       = { gradient = true, alpha = 0.18 }   # area under the line; off = stroke only
+smooth     = true            # catmull-rom vs polyline
 ```
 
-The example palette above is **ezbar's own** (its current dark identity). Tokyo
-Night, Catppuccin, … are community themes you *drop in*, not the default.
+The example palette above is **ezbar's own** dark identity. Tokyo Night, Catppuccin,
+Gruvbox, Nord ship as **reference presets** in `presets/`, not as the default.
+
+**Text & markup.** Module text is plain by default. `window_title` and the `custom`
+module (RFC 0003) accept a `format` string with `{field}` placeholders and a small
+inline-markup subset — `[c=token]…[/c]` colour and `[b]…[/b]` weight spans, resolved
+against the active theme (not raw Pango, so it stays renderer-agnostic and themeable).
+A ricer can colour a substring without writing Rust.
+
+**Scrim, not blur — on purpose.** `backdrop` dims behind a popup with a flat quad.
+We do **not** do gaussian blur: it fights the flat/square identity, costs a render
+pass + damage tracking on every frame the popup is open, and reads as "frosted glass"
+— a different aesthetic. A ricer who wants blur uses the compositor's layer rules;
+the bar stays crisp. Stated so it's a choice, not a hole.
 
 ### Placement → instances (RFC 0001 bridge)
 
 Each zone flattens to ordered **entries**: `"id"`, `{ id, key?, config? }`, or a
 group array. For each:
 
-- **Identity = `key` if given, else `id`** (good for the common single-instance
-  case). Identity is **independent of zone and position** — moving `clock` from
-  center to left, or reordering, keeps the same `instance_id = hash(key)` and
+- **Identity = `key` if given, else `id`.** Independent of zone and position — moving
+  `clock` center→left, or reordering, keeps the same `instance_id = hash(key)` and
   therefore the **same live module, subscriptions, and state**. Two instances of one
   module **must** carry distinct `key`s (validated; duplicate identity = error with
   the offending line).
 - The host constructs via the RFC 0001 `Factory(instance_id: u64, cfg: &toml::Value)`
-  — an **owned** id (a borrowed `Ctx` can't be stored; modules keep `instance: u64`).
-  Config = `[modules.<id>]` defaults ← inline `config` override.
-- `[modules.<id>]` is **per-id** (all instances of that id); inline `config` and
-  `[modules.<id>.theme]` are **per-instance** overrides.
+  — an **owned** id. Config = `[modules.<id>]` defaults ← inline `config` override.
+- `[modules.<id>]` is **per-id**; inline `config`, `[modules.<id>.theme]`, and
+  `[modules.<id>.graph]` are **per-instance** overrides.
 
 ### Theme: tokens, two layers
 
-- **Host chrome** (bar bg, islands, separators, popup frame, OSD, scrim) uses the
-  full token set: `style`, tonal `background.{base,weak,strong}` (omitted tiers
-  derived from `base` in **OkLab**, not sRGB, so they don't go muddy), `opacity`,
-  `radius.{item,group,popup}`, `border`, `spacing`, `padding`, `[theme.popup]`,
-  `[theme.workspaces]`.
-- **Modules** receive RFC 0001's `repr(C) ThemeTokens` — *resolved* by the host
-  (incl. any `[modules.<id>.theme]` override), plus `background_base` so a canvas
-  matches the bar. `ThemeTokens` stays small/`repr(C)` (the phase-2 ABI); the config
-  layer is host-only and free to evolve.
-- **Islands** wrap a group in a `pill`: `background × opacity`, `radius.group`
-  (≈ height/2 for a true pill), `border`. `solid` = one bar bg + hairline
-  `separator`s. Modules never know which; the host applies the chrome.
-
-(We expose 3 background tiers, not ashell's 7; deeper layering is derived. If the
-derived tiers prove too flat in practice we add named tiers — tracked, not blocking.)
+- **Host chrome** (bar bg, islands, separators, popup frame, OSD, scrim, shadow,
+  workspace chips, the switcher) uses the full token set: `style`, tonal
+  `background.{base,weak,strong}` (omitted tiers derived from `base` in **OkLab**, not
+  sRGB, so they don't go muddy), `opacity`, `radius.{item,group,popup}`, `bar.radius`,
+  `border`, `shadow`, `spacing.{zone,group}`, `padding.{x,y}`, `separator`,
+  `[theme.popup]`, `[theme.workspaces]`.
+- **Modules** receive RFC 0001's `repr(C) ThemeTokens` — *resolved* by the host (incl.
+  any `[modules.<id>.theme]` override + the active preset), plus `background_base` so a
+  canvas matches the bar, plus the resolved graph knobs. `ThemeTokens` stays
+  small/`repr(C)` (the phase-2 ABI); the config layer is host-only and free to evolve.
+- **Islands** wrap a group in a `pill`: `background × opacity`, `radius.group`,
+  `border`, optional `shadow`. `solid` = one bar bg + `separator`s (`glyph` or
+  hairline). Modules never know which; the host applies the chrome.
 
 ### Hot-reload
 
 ```
-watch(config DIR) → debounce 150ms → read → parse
-   parse err (likely a mid-write read) → retry once after 150ms → still err? keep
-       last-good config, show ⚠ chip whose POPUP shows the file:line error → log
-   ok → validate (ranges, known ids, unique keys) → err? same keep-last-good path
+watch(config DIR + presets DIR) → debounce 150ms → read → parse
+   parse err (mid-write read) → retry once after 150ms → still err? keep last-good
+       config, show ⚠ chip whose POPUP shows the file:line error → log
+   ok → resolve $palette refs + merge (default<preset<[theme]<per-module)
+      → validate (ranges, known ids, unique keys, known $refs) → err? keep last-good
    ok → diff vs live → apply
 ```
 
-- **Watch the directory** (editors save via temp-file + rename, firing on the dir,
-  not the inode); on a delete/move-from, **re-check existence after a short delay**
-  before treating the file as gone (vim/`mv` fire delete-then-create).
+- **Watch both dirs** (editors save via temp-file + rename, firing on the dir); on a
+  delete/move-from, re-check existence after a short delay before treating as gone.
 - **Never half-apply**: parse+validate fully first; any error leaves the running
   config untouched.
 - **Diff/apply:**
-  - *theme only* → re-render; no module churn.
+  - *theme/preset only* (incl. a switcher pick) → re-render; **no module churn**.
   - *a module's config changed* → `reconfigure(&cfg)`:
-    - `Applied { resubscribe: false }` — adopted in `view`/`update`, subscription
-      kept (its recipe key is `(instance_id, config_generation)`, unchanged).
+    - `Applied { resubscribe: false }` — adopted in `view`/`update`; subscription kept
+      (recipe key is `(instance_id, config_generation)`, unchanged).
     - `Applied { resubscribe: true }` — the host **bumps that instance's counter** in
-      its `generation: HashMap<instance_id, u64>` and re-keys the module's
-      subscription via its outer wrap, `module.subscription().with((instance_id,
-      generation))`. Per iced's `With::hash`, changing the wrapped value re-rolls
-      **every** recipe the module produced ⇒ old stream dropped, new config in
-      effect; the module participates in nothing. **Required** whenever config feeds
-      the stream (interval, symbol, target).
-    - `Reconstruct` — full rebuild (safe fallback / default).
+      `generation: HashMap<instance_id,u64>` and re-keys via its existing outer wrap,
+      `module.subscription().with((instance_id, generation))`. Per iced's `With::hash`,
+      changing the wrapped value re-rolls **every** recipe the module produced ⇒ old
+      stream dropped, new config live, module participates in nothing. **Required**
+      whenever config feeds the stream (interval, symbol, target).
+    - `Reconstruct` — full rebuild (safe default).
   - *placement changed* → recompute instance set by `key`: **construct added**,
-    `shutdown()` **removed**, reorder the rest (kept instances keep recipes/state —
-    recipes are keyed by `instance_id`, already verified to survive reorder).
+    `shutdown()` **removed**, reorder the rest (kept instances keep recipes/state).
 
 This is the core correctness story: the host keys every module's subscription by
-`(instance_id, generation)` through its **own** `.with((instance_id, generation))`
-wrap — never by raw config, and **without the module participating**. iced 0.14
-recipe identity is `(TypeId, hashed-data, fn-ptr)` with config nowhere in it, which
-is exactly why the **host** (not the recipe, not the module) must own invalidation.
-Bump the generation → deterministic re-roll; nothing silently goes stale.
+`(instance_id, generation)` through its **own** `.with(...)` wrap — never by raw
+config, **without the module participating**. iced 0.14 recipe identity is
+`(TypeId, hashed-data, fn-ptr)` with config nowhere in it, which is exactly why the
+**host** must own invalidation. Bump the generation → deterministic re-roll; nothing
+silently goes stale. A **preset switch is the cheap path**: theme-only, re-render, no
+resubscribe — which is why it can feel instant.
 
 ### `ezbar msg` IPC (our own)
 
 A small unix socket (`$XDG_RUNTIME_DIR/ezbar.sock`) so compositor keybinds drive the
-bar — and so the **OSD** (RFC 0003) fires on keybind volume/brightness changes, not
-only on bar-widget clicks:
+bar — and so the **OSD** (RFC 0003) fires on keybind volume/brightness changes:
 
 ```
-ezbar msg volume up         # ezbar's own verbs (not ashell's command set)
-ezbar msg volume mute
+ezbar msg volume up | mute
 ezbar msg popup toggle <key>
+ezbar msg preset <name> | next | prev      # drive the switcher from a keybind
 ezbar msg reload
 ```
 
-Verbs are defined by ezbar and routed to the owning module instance (by `key`) or to
-the host. Each carries an optional `--no-osd`.
+Verbs are defined by ezbar and routed to the owning module instance (by `key`) or the
+host. Each carries an optional `--no-osd`.
 
 ### Surface lifecycle (re-roll honesty)
 
-`bar.height`/`position`/`layer`/`outputs` changes **re-roll** the layer surface
-(can't be live-resized): the host opens the new surface, waits for its first commit,
-**then** closes the old one (double-buffer, no visible gap), and **closes any open
-popup**. This re-roll is tagged *intentional* so it does **not** trip the
-exit-on-bar-close path (today `main.rs` exits when the bar surface closes, for
-monitor-removal); the host must distinguish the two. `colors/opacity/style/radius/
-border/spacing/padding/font/scale/add-remove-reorder modules/per-module options`
-all reload **live** (no re-roll).
+`bar.height`/`position`/`layer`/`outputs`/`margin`/`radius` changes **re-roll** the
+layer surface (can't be live-resized): the host opens the new surface, waits for its
+first commit, **then** closes the old one (double-buffer, no visible gap), and
+**closes any open popup**. This re-roll is tagged *intentional* so it does **not**
+trip the exit-on-bar-close path (today `main.rs` exits when the bar surface closes,
+for monitor-removal); the host distinguishes the two. `preset/colors/opacity/style/
+item+group radius/border/shadow/spacing/padding/separator/font/scale/workspace style/
+add-remove-reorder modules/per-module options` all reload **live** (no re-roll).
 
 ### New SDK surface (additive to RFC 0001)
 
@@ -238,29 +365,33 @@ pub trait Module {
 
 | | ezbar (this RFC) | ashell |
 |---|---|---|
-| Format / placement | TOML, zones + island groups, **placement+options co-located**, **per-instance** | TOML, zones + groups, options in separate tables, per-module |
+| Format / placement | TOML, zones + groups, **placement+options co-located**, per-instance | TOML, zones + groups, options in separate tables |
 | Stable identity on reload | ✅ by `key`, zone/position-independent | rebuilds module state |
-| Theme: radius/border/popup/scrim | ✅ tiered radius, border, `[theme.popup]` backdrop | ✅ `Radius` tiers, borders, `menu.backdrop` |
-| Per-module color override | ✅ `[modules.<id>.theme]` | ⛔ (global only) |
+| **Presets + live switcher** | ✅ drop-in files + `▾` switch + `msg preset` | ⛔ none |
+| **Palette variables (`$ref`)** | ✅ `[palette]` anchors | ⛔ raw hex |
+| Floating geometry | ✅ `[bar].margin`/`radius` | ✅ |
+| Per-module color / font / graph | ✅ `[modules.<id>.theme]`+`.graph` | ⛔ global theme only |
+| Workspace chips | ✅ 4 styles, state-filled, square | ✅ width-morph pills (rounded) |
 | Background tiers | base + 2 (rest derived, OkLab) | base + 7 |
-| Workspace state colors | focused/occupied/empty/urgent/special | colors + special |
 | Hot-reload | ✅ live-diff, `config_generation` invalidation | ✅ |
 | Keybind IPC | ✅ `ezbar msg` | ✅ `ashell msg` |
-| Zero-config default | ✅ = current bar | has defaults too |
+| Zero-config default | ✅ = current bar (shown above) | has defaults too |
+| Backdrop | scrim (by design) | scrim |
 | i18n / gradient style | ⛔ deferred | ✅ |
 
 ## Migration
 
 1. RFC 0001 **registry + `Factory(owned id, cfg)` + `reconfigure`** land first.
-2. `[theme]` resolution (theme-only adoption; no behavior change with no file).
-3. Placement (zones/groups/keys) drives the registry; hardcoded list becomes the
-   default value.
-4. Hot-reload (diff/apply) + `ezbar msg` last.
+2. `[theme]` resolution incl. `$palette` + **presets merge** (theme-only adoption; no
+   behavior change with no file). The live theme swap above already runs this path.
+3. Floating geometry + graph knobs + workspace `style` (re-skin existing widgets).
+4. Placement (zones/groups/keys) drives the registry; hardcoded list becomes default.
+5. Hot-reload (diff/apply) + the `▾` switcher + `ezbar msg` last.
 
 ## Open questions
 
-1. Derived-tier color space confirmed **OkLab**; expose named tiers only if the
-   3-tier+derive result is visibly flat.
-2. Include files (`include = ["themes/x.toml"]`) for sharable themes — defer.
-3. `[modules.<id>.theme]` token coverage — start with the semantic colors; expand on
-   demand.
+1. Derived-tier color space confirmed **OkLab**; expose named tiers only if 3-tier
+   + derive looks flat in practice.
+2. Preset thumbnails in the switcher popup (render a mini-bar swatch) — nice, defer.
+3. `[modules.<id>.theme]` token coverage — start with semantic colors + font; expand.
+4. Preset *fetch* helper (`ezbar preset add <url>`) + a community gallery — future RFC.
