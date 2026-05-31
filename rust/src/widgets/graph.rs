@@ -118,12 +118,16 @@ impl Graph {
                 valid += 1;
             }
         }
-        if valid == 0 || max_t <= min_t {
+        if valid == 0 {
             return;
         }
+        // Center a flat/near-flat reading so a constant temperature still draws
+        // a visible line (instead of an empty graph when max_t == min_t).
         let range = max_t - min_t;
         if range < 10.0 {
-            min_t = max_t - 10.0;
+            let center = (min_t + max_t) / 2.0;
+            min_t = center - 5.0;
+            max_t = center + 5.0;
         } else {
             let padding = range * 0.1;
             min_t -= padding;

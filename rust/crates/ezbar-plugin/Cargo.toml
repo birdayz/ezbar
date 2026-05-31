@@ -1,0 +1,8 @@
+[package]
+name = "ezbar-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Stable API surface for ezbar modules (see rfcs/0001-pluggable-modules.md)"
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }

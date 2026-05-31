@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{SinkExt, Stream};
@@ -10,18 +10,46 @@ use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 
 mod history;
+mod modules;
 mod sources;
 mod widgets;
 
+use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 use history::History;
 use sources::sway::{SwayUpdate, Workspace};
 use sources::{
-    battery, calendar, claude, github, kubectl, ping, spotify, stock, sway, system, volume,
+    battery, calendar, kubectl, ping, spotify, stock, sway, system, volume,
 };
 use widgets::graph::{Graph, GraphKind, StockChart};
 
 const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
+
+const THEME: ThemeTokens = ThemeTokens {
+    fg: [1.0, 1.0, 1.0, 1.0],
+    fg_dim: [0.7, 0.7, 0.7, 1.0],
+    urgent: [1.0, 0.2, 0.2, 1.0],
+    warn: [1.0, 0.67, 0.0, 1.0],
+    ok: [0.2, 0.8, 0.2, 1.0],
+    accent: [0.345, 0.65, 1.0, 1.0],
+    sep: [0.4, 0.4, 0.4, 1.0],
+    text_size: 14.0,
+    bar_height: BAR_HEIGHT as u16,
+};
+
+struct ModuleEntry {
+    id: u64,
+    name: String,
+    module: Box<dyn Module>,
+    disabled: bool,
+}
+
+impl ModuleEntry {
+    fn new(id: u64, module: Box<dyn Module>) -> Self {
+        let name = module.id().to_string();
+        ModuleEntry { id, name, module, disabled: false }
+    }
+}
 
 fn main() -> iced_layershell::Result {
     env_logger::init();
@@ -61,18 +89,17 @@ fn run_bar() -> iced_layershell::Result {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopupKind {
     Calendar,
-    GitHub,
     Kubectl,
     Stock,
-    Claude,
 }
 
 struct Bar {
     bar_id: window::Id,
     popup: Option<(window::Id, PopupKind)>,
+    module_popup: Option<(window::Id, u64, PopupMode)>,
+    modules: Vec<ModuleEntry>,
 
     // system
-    cpu_str: String,
     mem_str: String,
     temp_str: String,
     ping: ping::PingData,
@@ -84,13 +111,11 @@ struct Bar {
     kubectl_contexts: Vec<String>,
 
     // graph histories
-    cpu_hist: History,
     mem_hist: History,
     temp_hist: History,
     ping_hist: History,
 
     // graph visibility (memory + ping start hidden, like the Go version)
-    show_cpu_graph: bool,
     show_mem_graph: bool,
     show_temp_graph: bool,
     show_ping_graph: bool,
@@ -101,29 +126,19 @@ struct Bar {
 
     // network widgets
     calendar: calendar::CalendarData,
-    github: github::GitHubData,
-    github_token: Option<String>,
     stock: stock::StockData,
     stock_symbol: String,
     stock_chart: Vec<f64>,
     spotify: spotify::SpotifyData,
 
-    // claude code status
-    claude_instances: Vec<claude::Instance>,
-    claude_block: Option<claude::Block>,
-    claude_limits: Option<claude::Limits>,
-
     // animation / polish state
     blink_on: bool,
     spotify_offset: usize,
-    github_prev_count: usize,
-    github_blink_until: Option<Instant>,
 }
 
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
-    Cpu(String),
     Mem(String),
     Temp(String),
     Ping(ping::PingData),
@@ -134,13 +149,9 @@ enum Message {
     KubectlContexts(Vec<String>),
     Sway(SwayUpdate),
     Calendar(calendar::CalendarData),
-    GitHub(github::GitHubData),
     Stock(stock::StockData),
     StockChart(Vec<f64>),
     Spotify(spotify::SpotifyData),
-    ClaudeInstances(Vec<claude::Instance>),
-    ClaudeBlock(Option<claude::Block>),
-    ClaudeLimits(Option<claude::Limits>),
 
     ToggleGraph(GraphKind),
     VolumeClick,
@@ -151,12 +162,10 @@ enum Message {
     SpotifyScroll(bool),
     OpenPopup(PopupKind),
     ClosePopup,
-    GithubMarkAll,
-    GithubMarkRead(String),
-    GithubOpen(String, String),
     BlinkTick,
     WindowClosed(window::Id),
     Noop,
+    ModuleMsg { instance: u64, msg: ModMsg },
 }
 
 fn bar_settings() -> NewLayerShellSettings {
@@ -175,10 +184,8 @@ fn bar_settings() -> NewLayerShellSettings {
 fn popup_settings(kind: PopupKind) -> NewLayerShellSettings {
     let (w, h, right) = match kind {
         PopupKind::Calendar => (380u32, 320u32, 220i32),
-        PopupKind::GitHub => (480, 440, 120),
         PopupKind::Kubectl => (320, 360, 40),
         PopupKind::Stock => (520, 300, 40),
-        PopupKind::Claude => (460, 340, 40),
     };
     NewLayerShellSettings {
         size: Some((w, h)),
@@ -205,6 +212,22 @@ fn open_popup(kind: PopupKind) -> (window::Id, Task<Message>) {
     )
 }
 
+fn module_popup_settings(mode: PopupMode) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((480, 400)),
+        exclusive_zone: None,
+        anchor: Anchor::Bottom | Anchor::Right,
+        layer: Layer::Overlay,
+        margin: Some((0, 40, BAR_HEIGHT as i32 + 6, 0)),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        // Hover popups are display-only: let pointer events pass through.
+        events_transparent: matches!(mode, PopupMode::Hover),
+        output_option: OutputOption::None,
+        namespace: Some("ezbar-popup".to_string()),
+        ..Default::default()
+    }
+}
+
 fn load_kubectl_contexts() -> Task<Message> {
     Task::perform(
         async { tokio::task::spawn_blocking(kubectl::get_all_contexts).await.unwrap_or_default() },
@@ -222,7 +245,12 @@ impl Bar {
         let bar = Bar {
             bar_id,
             popup: None,
-            cpu_str: "🖥️ --".to_string(),
+            module_popup: None,
+            modules: vec![
+                ModuleEntry::new(1, Box::new(modules::cpu::Cpu::new(1))),
+                ModuleEntry::new(2, Box::new(modules::github::GitHub::new(2))),
+                ModuleEntry::new(3, Box::new(modules::claude::Claude::new(3))),
+            ],
             mem_str: "💾 --".to_string(),
             temp_str: "🌡️ --".to_string(),
             ping: ping::PingData::default(),
@@ -232,11 +260,9 @@ impl Bar {
             volume: volume::VolumeData::default(),
             kubectl: kubectl::KubectlData::default(),
             kubectl_contexts: Vec::new(),
-            cpu_hist: History::new(30),
             mem_hist: History::new(20),
             temp_hist: History::new(60),
             ping_hist: History::new(40),
-            show_cpu_graph: true,
             show_mem_graph: false,
             show_temp_graph: true,
             show_ping_graph: false,
@@ -246,11 +272,6 @@ impl Bar {
                 display_text: "📅 …".to_string(),
                 ..Default::default()
             },
-            github: github::GitHubData {
-                display_text: "GH …".to_string(),
-                ..Default::default()
-            },
-            github_token: github::find_token(),
             stock: stock::StockData {
                 display_text: "📈 …".to_string(),
                 ..Default::default()
@@ -258,13 +279,8 @@ impl Bar {
             stock_symbol: stock::config().0,
             stock_chart: Vec::new(),
             spotify: spotify::SpotifyData::default(),
-            claude_instances: Vec::new(),
-            claude_block: None,
-            claude_limits: None,
             blink_on: true,
             spotify_offset: 0,
-            github_prev_count: 0,
-            github_blink_until: None,
         };
         (bar, open)
     }
@@ -275,11 +291,6 @@ impl Bar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Cpu(s) => {
-                self.cpu_hist.add(system::extract_cpu_usage_value(&s));
-                self.cpu_str = s;
-                Task::none()
-            }
             Message::Mem(s) => {
                 self.mem_hist.add(system::extract_memory_usage_value(&s));
                 self.mem_str = s;
@@ -330,14 +341,6 @@ impl Bar {
                 self.calendar = d;
                 Task::none()
             }
-            Message::GitHub(d) => {
-                if d.count > self.github_prev_count {
-                    self.github_blink_until = Some(Instant::now() + Duration::from_secs(30));
-                }
-                self.github_prev_count = d.count;
-                self.github = d;
-                Task::none()
-            }
             Message::Stock(d) => {
                 self.stock = d;
                 Task::none()
@@ -350,21 +353,10 @@ impl Bar {
                 self.spotify = d;
                 Task::none()
             }
-            Message::ClaudeInstances(v) => {
-                self.claude_instances = v;
-                Task::none()
-            }
-            Message::ClaudeBlock(b) => {
-                self.claude_block = b;
-                Task::none()
-            }
-            Message::ClaudeLimits(l) => {
-                self.claude_limits = l;
-                Task::none()
-            }
             Message::ToggleGraph(kind) => {
                 match kind {
-                    GraphKind::Cpu => self.show_cpu_graph = !self.show_cpu_graph,
+                    // cpu is a module now; it toggles its own graph internally.
+                    GraphKind::Cpu => {}
                     GraphKind::Memory => self.show_mem_graph = !self.show_mem_graph,
                     GraphKind::Temperature => self.show_temp_graph = !self.show_temp_graph,
                     GraphKind::Ping => self.show_ping_graph = !self.show_ping_graph,
@@ -442,59 +434,24 @@ impl Bar {
                 Message::Spotify,
             ),
             Message::OpenPopup(kind) => {
+                // One popup at a time: a hardcoded popup also closes any module popup.
+                let close_mod = self.close_module_popup_any();
                 // Toggle off if the same popup is already open.
                 if let Some((pid, k)) = self.popup {
                     if k == kind {
                         self.popup = None;
-                        return iced::window::close(pid);
+                        return Task::batch([close_mod, iced::window::close(pid)]);
                     }
                     let close = iced::window::close(pid);
                     let (id, open) = open_popup(kind);
                     self.popup = Some((id, kind));
-                    return Task::batch([close, open, self.popup_extra(kind)]);
+                    return Task::batch([close_mod, close, open, self.popup_extra(kind)]);
                 }
                 let (id, open) = open_popup(kind);
                 self.popup = Some((id, kind));
-                Task::batch([open, self.popup_extra(kind)])
+                Task::batch([close_mod, open, self.popup_extra(kind)])
             }
             Message::ClosePopup => self.close_popup_task(),
-            Message::GithubMarkAll => {
-                let close = self.close_popup_task();
-                self.github = github::GitHubData {
-                    display_text: "GH 0".to_string(),
-                    ..Default::default()
-                };
-                if let Some(token) = self.github_token.clone() {
-                    let t = Task::perform(
-                        async move { github::mark_all_as_read(&token).await },
-                        |_| Message::Noop,
-                    );
-                    Task::batch([close, t])
-                } else {
-                    close
-                }
-            }
-            Message::GithubMarkRead(nid) => {
-                self.remove_github(&nid);
-                if let Some(token) = self.github_token.clone() {
-                    Task::perform(async move { github::mark_as_read(&token, &nid).await }, |_| {
-                        Message::Noop
-                    })
-                } else {
-                    Task::none()
-                }
-            }
-            Message::GithubOpen(url, nid) => {
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                self.remove_github(&nid);
-                if let Some(token) = self.github_token.clone() {
-                    Task::perform(async move { github::mark_as_read(&token, &nid).await }, |_| {
-                        Message::Noop
-                    })
-                } else {
-                    Task::none()
-                }
-            }
             Message::BlinkTick => {
                 self.blink_on = !self.blink_on;
                 Task::none()
@@ -510,10 +467,124 @@ impl Bar {
                         self.popup = None;
                     }
                 }
+                if let Some((pid, _, _)) = self.module_popup {
+                    if pid == id {
+                        self.module_popup = None;
+                    }
+                }
                 Task::none()
+            }
+            Message::ModuleMsg { instance, msg } => {
+                let idx = match self.modules.iter().position(|e| e.id == instance && !e.disabled) {
+                    Some(i) => i,
+                    None => return Task::none(),
+                };
+                // RFC 0001 phase-1 panic safety: contain a panicking module to its
+                // own `update` and tear it down (show an error chip) rather than
+                // crashing the bar. `view`/`canvas::draw` panics are NOT contained
+                // — the launcher respawn is their recovery.
+                let resp = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.modules[idx].module.update(msg)
+                })) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        log::error!(
+                            "module '{}' panicked in update; disabling",
+                            self.modules[idx].name
+                        );
+                        self.modules[idx].disabled = true;
+                        return self.close_module_popup_of(instance);
+                    }
+                };
+                let mut tasks: Vec<Task<Message>> =
+                    vec![resp.task.map(move |m| Message::ModuleMsg { instance, msg: m })];
+                for req in resp.requests {
+                    tasks.push(self.handle_host_request(instance, req));
+                }
+                Task::batch(tasks)
             }
             _ => Task::none(),
         }
+    }
+
+    /// Apply a typed host request from a module (RFC 0001: control never rides
+    /// the erased `ModMsg`). Enforces one popup at a time.
+    fn handle_host_request(&mut self, instance: u64, req: HostRequest) -> Task<Message> {
+        match req {
+            HostRequest::OpenPopup(mode) => {
+                if let Some((pid, inst, _)) = self.module_popup {
+                    if inst == instance {
+                        // toggle off
+                        self.module_popup = None;
+                        return iced::window::close(pid);
+                    }
+                }
+                let close_existing = self.close_any_popup();
+                let id = window::Id::unique();
+                self.module_popup = Some((id, instance, mode));
+                let open = Task::done(Message::NewLayerShell {
+                    settings: module_popup_settings(mode),
+                    id,
+                });
+                Task::batch([close_existing, open])
+            }
+            HostRequest::ClosePopup => {
+                if let Some((pid, inst, _)) = self.module_popup {
+                    if inst == instance {
+                        self.module_popup = None;
+                        return iced::window::close(pid);
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn close_any_popup(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        if let Some((pid, _)) = self.popup.take() {
+            tasks.push(iced::window::close(pid));
+        }
+        if let Some((pid, _, _)) = self.module_popup.take() {
+            tasks.push(iced::window::close(pid));
+        }
+        Task::batch(tasks)
+    }
+
+    fn close_module_popup_of(&mut self, instance: u64) -> Task<Message> {
+        if let Some((pid, inst, _)) = self.module_popup {
+            if inst == instance {
+                self.module_popup = None;
+                return iced::window::close(pid);
+            }
+        }
+        Task::none()
+    }
+
+    fn close_module_popup_any(&mut self) -> Task<Message> {
+        if let Some((pid, _, _)) = self.module_popup.take() {
+            iced::window::close(pid)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn wrap_popup<'a>(&self, body: Element<'a, Message>) -> Element<'a, Message> {
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(12)
+            .style(|_theme| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.92))),
+                border: Border {
+                    color: Color::from_rgb(0.2, 0.2, 0.2),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                text_color: Some(Color::WHITE),
+                ..Default::default()
+            })
+            .into()
     }
 
     fn close_popup_task(&mut self) -> Task<Message> {
@@ -536,11 +607,6 @@ impl Bar {
         }
     }
 
-    fn remove_github(&mut self, id: &str) {
-        self.github.notifications.retain(|n| n.id != id);
-        self.github.count = self.github.notifications.len();
-        self.github.display_text = format!("GH {}", self.github.count);
-    }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if id == self.bar_id {
@@ -549,6 +615,18 @@ impl Bar {
         if let Some((pid, kind)) = self.popup {
             if id == pid {
                 return self.popup_view(kind);
+            }
+        }
+        if let Some((pid, instance, _mode)) = self.module_popup {
+            if id == pid {
+                if let Some(entry) = self.modules.iter().find(|e| e.id == instance) {
+                    let ctx = Ctx { instance_id: instance, theme: &THEME };
+                    if let Some(content) = entry.module.popup(&ctx) {
+                        let mapped =
+                            content.map(move |m| Message::ModuleMsg { instance, msg: m });
+                        return self.wrap_popup(mapped);
+                    }
+                }
             }
         }
         Space::new().into()
@@ -585,39 +663,25 @@ impl Bar {
         let mut right: Vec<Element<Message>> = Vec::new();
         let sep = || text("|").color(Color::from_rgb(0.4, 0.4, 0.4));
 
-        // claude code: instances + 5h limit % + block cost; hover for details
-        {
-            let n = self.claude_instances.len();
-            let waiting = self.claude_instances.iter().filter(|i| i.waiting).count();
-            let count_color = if waiting > 0 {
-                Color::from_rgb(1.0, 0.8, 0.2)
-            } else {
-                Color::WHITE
-            };
-            let mut items: Vec<Element<Message>> =
-                vec![text("🤖").into(), text(format!("{}", n)).color(count_color).into()];
-            if let Some(p) = self.claude_limits.as_ref().and_then(|l| l.five_h_left) {
-                let c = if p < 15.0 {
-                    Color::from_rgb(1.0, 0.2, 0.2)
-                } else if p < 30.0 {
-                    Color::from_rgb(1.0, 0.67, 0.0)
-                } else {
-                    Color::from_rgb(0.6, 0.8, 1.0)
-                };
-                items.push(text(format!("5h{:.0}%", p)).color(c).into());
-            }
-            if let Some(b) = &self.claude_block {
-                items.push(
-                    text(format!("${:.0}", b.cost))
-                        .color(Color::from_rgb(0.7, 0.7, 0.7))
+        // pluggable modules (RFC 0001) render first in the right zone.
+        for entry in &self.modules {
+            let instance = entry.id;
+            if entry.disabled {
+                // module panicked in update and was torn down — static error chip.
+                right.push(
+                    text(format!("⚠ {}", entry.name))
+                        .color(Color::from_rgb(1.0, 0.3, 0.3))
                         .into(),
                 );
+                right.push(sep().into());
+                continue;
             }
+            let ctx = Ctx { instance_id: instance, theme: &THEME };
             right.push(
-                mouse_area(row(items).spacing(4).align_y(Vertical::Center))
-                    .on_enter(Message::OpenPopup(PopupKind::Claude))
-                    .on_exit(Message::ClosePopup)
-                    .into(),
+                entry
+                    .module
+                    .view(&ctx)
+                    .map(move |m| Message::ModuleMsg { instance, msg: m }),
             );
             right.push(sep().into());
         }
@@ -651,32 +715,6 @@ impl Bar {
         }
         right.push(sep().into());
 
-        // github: GH N — blue when there are notifications, blinks red on new; click for popup
-        {
-            let blinking = self
-                .github_blink_until
-                .map(|t| Instant::now() < t)
-                .unwrap_or(false);
-            let base = if blinking {
-                Color::from_rgb(1.0, 0.27, 0.27)
-            } else if self.github.count > 0 {
-                Color::from_rgb(0.345, 0.65, 1.0)
-            } else {
-                Color::WHITE
-            };
-            let color = if blinking && !self.blink_on {
-                Color { a: 0.35, ..base }
-            } else {
-                base
-            };
-            right.push(
-                mouse_area(text(self.github.display_text.clone()).color(color))
-                    .on_press(Message::OpenPopup(PopupKind::GitHub))
-                    .into(),
-            );
-        }
-        right.push(sep().into());
-
         // kubectl (left-click clears; right-click opens context menu; red when production)
         let kube_color = if self.kubectl.is_production {
             Color::from_rgb(1.0, 0.2, 0.2)
@@ -691,8 +729,6 @@ impl Bar {
         );
         right.push(sep().into());
 
-        right.push(self.metric(&self.cpu_str, self.show_cpu_graph, &self.cpu_hist, GraphKind::Cpu));
-        right.push(sep().into());
         right.push(self.metric(&self.temp_str, self.show_temp_graph, &self.temp_hist, GraphKind::Temperature));
         right.push(sep().into());
         right.push(self.metric(&self.mem_str, self.show_mem_graph, &self.mem_hist, GraphKind::Memory));
@@ -795,10 +831,8 @@ impl Bar {
     fn popup_view(&self, kind: PopupKind) -> Element<'_, Message> {
         let body: Element<Message> = match kind {
             PopupKind::Calendar => self.calendar_popup(),
-            PopupKind::GitHub => self.github_popup(),
             PopupKind::Kubectl => self.kubectl_popup(),
             PopupKind::Stock => self.stock_popup(),
-            PopupKind::Claude => self.claude_popup(),
         };
         container(body)
             .width(Length::Fill)
@@ -845,69 +879,6 @@ impl Bar {
         scrollable(column(col).spacing(6)).into()
     }
 
-    fn github_popup(&self) -> Element<'_, Message> {
-        let mut header: Vec<Element<Message>> = vec![text(format!(
-            "GitHub Notifications ({})",
-            self.github.count
-        ))
-        .size(15)
-        .width(Length::Fill)
-        .into()];
-        header.push(
-            mouse_area(text("[clear all]").color(Color::from_rgb(0.55, 0.65, 0.8)))
-                .on_press(Message::GithubMarkAll)
-                .into(),
-        );
-
-        let mut col: Vec<Element<Message>> =
-            vec![row(header).spacing(8).align_y(Vertical::Center).into()];
-
-        let reason_order = [
-            "review_requested",
-            "mention",
-            "assign",
-            "author",
-            "comment",
-            "state_change",
-            "manual",
-            "subscribed",
-        ];
-        for reason in reason_order {
-            let group: Vec<&github::GitHubNotification> = self
-                .github
-                .notifications
-                .iter()
-                .filter(|n| n.reason == reason)
-                .collect();
-            if group.is_empty() {
-                continue;
-            }
-            col.push(
-                text(format!(
-                    "{} ({})",
-                    github::reason_display_name(reason),
-                    group.len()
-                ))
-                .color(Color::from_rgb(0.345, 0.65, 1.0))
-                .into(),
-            );
-            for n in group.iter().take(10) {
-                col.push(github_row(n));
-            }
-            if group.len() > 10 {
-                col.push(
-                    text(format!("  … and {} more", group.len() - 10))
-                        .color(Color::from_rgb(0.4, 0.4, 0.4))
-                        .into(),
-                );
-            }
-        }
-        if self.github.notifications.is_empty() {
-            col.push(text("No notifications").into());
-        }
-        scrollable(column(col).spacing(4)).into()
-    }
-
     fn kubectl_popup(&self) -> Element<'_, Message> {
         let mut col: Vec<Element<Message>> = vec![text("Kubectl Context").size(15).into()];
         if self.kubectl_contexts.is_empty() {
@@ -943,60 +914,6 @@ impl Bar {
         .into()
     }
 
-    fn claude_popup(&self) -> Element<'_, Message> {
-        let header = Color::from_rgb(0.345, 0.65, 1.0);
-        let dim = Color::from_rgb(0.7, 0.7, 0.7);
-        let mut col: Vec<Element<Message>> = vec![text(format!(
-            "Claude — {} instance(s)",
-            self.claude_instances.len()
-        ))
-        .size(15)
-        .into()];
-
-        for i in &self.claude_instances {
-            let (marker, color) = if i.waiting {
-                ("⏳", Color::from_rgb(1.0, 0.8, 0.2))
-            } else {
-                ("▶", Color::from_rgb(0.5, 0.85, 0.5))
-            };
-            col.push(
-                row![text(marker), text(i.project.clone()).color(color)]
-                    .spacing(8)
-                    .into(),
-            );
-        }
-
-        if let Some(b) = &self.claude_block {
-            col.push(text("5-hour block").color(header).into());
-            col.push(
-                text(format!(
-                    "  ${:.2} · ${:.0}/hr · {}m left · resets {}",
-                    b.cost, b.burn_per_hour, b.minutes_left, b.reset
-                ))
-                .into(),
-            );
-            col.push(
-                text(format!("  projected ${:.0} · {}", b.projected_cost, b.model))
-                    .color(dim)
-                    .into(),
-            );
-        }
-
-        if let Some(l) = &self.claude_limits {
-            col.push(text("Limits").color(header).into());
-            if let Some(p) = l.five_h_left {
-                col.push(text(format!("  5h: {:.0}% left · resets {}", p, l.five_h_reset)).into());
-            }
-            if let Some(p) = l.weekly_left {
-                col.push(
-                    text(format!("  weekly: {:.0}% left · resets {}", p, l.weekly_reset)).into(),
-                );
-            }
-        }
-
-        scrollable(column(col).spacing(4)).into()
-    }
-
     fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
         iced::theme::Style {
             background_color: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
@@ -1006,7 +923,6 @@ impl Bar {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
-            Subscription::run(cpu_stream),
             Subscription::run(mem_stream),
             Subscription::run(temp_stream),
             Subscription::run(ping_stream),
@@ -1014,12 +930,8 @@ impl Bar {
             Subscription::run(volume_stream),
             Subscription::run(kubectl_stream),
             Subscription::run(calendar_stream),
-            Subscription::run(github_stream),
             Subscription::run(stock_stream),
             Subscription::run(spotify_stream),
-            Subscription::run(claude_instances_stream),
-            Subscription::run(claude_block_stream),
-            Subscription::run(claude_limits_stream),
             Subscription::run(sway::sway_stream).map(Message::Sway),
             iced::time::every(Duration::from_millis(500)).map(|_| Message::BlinkTick),
             event::listen_with(|ev, _status, id| match ev {
@@ -1027,6 +939,24 @@ impl Bar {
                 _ => None,
             }),
         ];
+        // Pluggable modules contribute their own subscriptions. The host owns
+        // instance-keying via `.with(instance)`: it both routes the message
+        // (injecting the instance id without a capturing `map` closure, which
+        // Subscription::map forbids) AND makes two instances of the same module
+        // produce distinct recipes. Modules need not key by instance themselves.
+        for entry in &self.modules {
+            if entry.disabled {
+                continue;
+            }
+            let instance = entry.id;
+            subs.push(
+                entry
+                    .module
+                    .subscription()
+                    .with(instance)
+                    .map(|(instance, m)| Message::ModuleMsg { instance, msg: m }),
+            );
+        }
         if self.has_battery {
             subs.push(Subscription::run(battery_stream));
         }
@@ -1041,40 +971,6 @@ fn calendar_row<'a>(time: &str, title: &str, color: Color) -> Element<'a, Messag
     ]
     .spacing(8)
     .into()
-}
-
-fn github_row<'a>(n: &github::GitHubNotification) -> Element<'a, Message> {
-    let icon = match n.type_.as_str() {
-        "PullRequest" => "PR",
-        "Issue" => "IS",
-        "Release" => "RE",
-        _ => "  ",
-    };
-    let repo = n
-        .repo_name
-        .rsplit('/')
-        .next()
-        .unwrap_or(&n.repo_name)
-        .to_string();
-    let r = row![
-        text(icon).color(Color::from_rgb(0.55, 0.58, 0.6)),
-        text(truncate(&repo, 15)).color(Color::from_rgb(0.55, 0.58, 0.6)).width(Length::Fixed(110.0)),
-        text(truncate(&n.title, 45)).width(Length::Fill),
-        text(github::time_ago(n.updated_at)).color(Color::from_rgb(0.55, 0.58, 0.6)),
-    ]
-    .spacing(8)
-    .align_y(Vertical::Center);
-
-    let url = n.html_url.clone();
-    let id = n.id.clone();
-    if !url.is_empty() {
-        mouse_area(r)
-            .on_press(Message::GithubOpen(url, id.clone()))
-            .on_right_press(Message::GithubMarkRead(id))
-            .into()
-    } else {
-        mouse_area(r).on_press(Message::GithubMarkRead(id)).into()
-    }
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
@@ -1100,18 +996,6 @@ fn marquee(s: &str, offset: usize, max_len: usize) -> String {
 }
 
 // ---- subscription streams (one per data source) ----
-
-fn cpu_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        loop {
-            let s = tokio::task::spawn_blocking(system::get_cpu_usage)
-                .await
-                .unwrap_or_else(|_| "🖥️ --".to_string());
-            let _ = output.send(Message::Cpu(s)).await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    })
-}
 
 fn mem_stream() -> impl Stream<Item = Message> {
     iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -1217,34 +1101,6 @@ fn calendar_stream() -> impl Stream<Item = Message> {
     })
 }
 
-fn github_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        let token = match github::find_token() {
-            Some(t) => t,
-            None => {
-                let _ = output
-                    .send(Message::GitHub(github::GitHubData {
-                        display_text: "GH ?".to_string(),
-                        ..Default::default()
-                    }))
-                    .await;
-                return;
-            }
-        };
-        let mut gh = github::GitHub::new(token);
-        loop {
-            match gh.fetch().await {
-                Ok(github::FetchResult::Data(d)) => {
-                    let _ = output.send(Message::GitHub(d)).await;
-                }
-                Ok(github::FetchResult::NotModified) => {}
-                Err(e) => log::warn!("github: {e}"),
-            }
-            tokio::time::sleep(Duration::from_secs(gh.poll_interval.max(1))).await;
-        }
-    })
-}
-
 fn stock_stream() -> impl Stream<Item = Message> {
     iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
         let (symbol, api_key) = stock::config();
@@ -1270,34 +1126,3 @@ fn spotify_stream() -> impl Stream<Item = Message> {
     })
 }
 
-fn claude_instances_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        loop {
-            let v = tokio::task::spawn_blocking(claude::instances)
-                .await
-                .unwrap_or_default();
-            let _ = output.send(Message::ClaudeInstances(v)).await;
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
-    })
-}
-
-fn claude_block_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        loop {
-            let b = claude::block().await;
-            let _ = output.send(Message::ClaudeBlock(b)).await;
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
-    })
-}
-
-fn claude_limits_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        loop {
-            let l = tokio::task::spawn_blocking(claude::limits).await.ok().flatten();
-            let _ = output.send(Message::ClaudeLimits(l)).await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    })
-}
