@@ -25,6 +25,23 @@ mod ipc;
 const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
 
+/// Default right-zone placement (today's bar) when `right` is unconfigured.
+const DEFAULT_RIGHT: &[&str] = &[
+    "cpu",
+    "github",
+    "claude",
+    "calendar",
+    "kubectl",
+    "temperature",
+    "memory",
+    "ping",
+    "spotify",
+    "stock",
+    "volume",
+    "battery",
+    "clock",
+];
+
 struct ModuleEntry {
     id: u64,
     name: String,
@@ -310,6 +327,29 @@ fn collect_entry_ids(e: &config::Entry, out: &mut Vec<String>) {
     }
 }
 
+/// Build the live module set (RFC 0001 factory): every module-typed id that appears
+/// in the resolved placement, deduped, with config from `[modules.<id>]`.
+fn build_modules(config: &Config) -> Vec<ModuleEntry> {
+    let mut ids = zone_ids(&config.left, &["workspaces"]);
+    ids.extend(zone_ids(&config.center, &["window_title"]));
+    ids.extend(zone_ids(&config.right, DEFAULT_RIGHT));
+    let empty = toml::Value::Table(Default::default());
+    let mut out = Vec::new();
+    let mut inst = 1u64;
+    let mut seen = std::collections::HashSet::new();
+    for id in &ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let cfg = config.modules.get(id).unwrap_or(&empty);
+        if let Some(m) = modules::build(id, inst, cfg) {
+            out.push(ModuleEntry::new(inst, m));
+            inst += 1;
+        }
+    }
+    out
+}
+
 fn parse_popup_kind(s: &str) -> Option<PopupKind> {
     match s {
         "calendar" => Some(PopupKind::Calendar),
@@ -409,11 +449,7 @@ impl Bar {
             bar_id,
             popup: None,
             module_popup: None,
-            modules: vec![
-                ModuleEntry::new(1, Box::new(modules::cpu::Cpu::new(1))),
-                ModuleEntry::new(2, Box::new(modules::github::GitHub::new(2))),
-                ModuleEntry::new(3, Box::new(modules::claude::Claude::new(3))),
-            ],
+            modules: build_modules(&config),
             mem_str: " --".to_string(),
             temp_str: " --".to_string(),
             ping: ping::PingData::default(),
@@ -1215,21 +1251,6 @@ impl Bar {
     fn bar_view(&self) -> Element<'_, Message> {
         // Config placement (RFC 0002) drives which widgets render and in what order;
         // an empty zone falls back to the shipped default (today's bar).
-        const DEFAULT_RIGHT: &[&str] = &[
-            "cpu",
-            "github",
-            "claude",
-            "calendar",
-            "kubectl",
-            "temperature",
-            "memory",
-            "ping",
-            "spotify",
-            "stock",
-            "volume",
-            "battery",
-            "clock",
-        ];
         let mut left_ids = zone_ids(&self.config.left, &["workspaces"]);
         let center_ids = zone_ids(&self.config.center, &["window_title"]);
         let mut right_ids = zone_ids(&self.config.right, DEFAULT_RIGHT);

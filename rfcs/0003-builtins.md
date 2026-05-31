@@ -220,6 +220,12 @@ map** (swap glyph by output, not one fixed icon); an **`alert` regex** that pain
 danger dot; click runs a command. **Bound to the subscription/`Task` tier** (never
 `update`/`view`) — it's the one module a non-Rust user can wedge.
 
+> **Shipped (phase 2):** the poll form — `[modules.custom] command`, `interval`,
+> `icon` (themed with the accent), `on_click` — built by the RFC 0001 **module
+> factory** (`modules::build(id, instance, cfg)`) and placed via `[right]`/etc., the
+> command baked into the subscription recipe (so a config change re-rolls it). The
+> streaming `listen_cmd`, regex→icon map, and `alert` dot are the next increment.
+
 ### Tier B — desktop/control (host services; phased by cost)
 
 **Cheap (land after Tier A):** `tray` (SNI), `media` (MPRIS + art + transport),
