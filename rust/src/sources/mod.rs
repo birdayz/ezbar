@@ -1,0 +1,11 @@
+pub mod battery;
+pub mod calendar;
+pub mod claude;
+pub mod github;
+pub mod kubectl;
+pub mod ping;
+pub mod spotify;
+pub mod stock;
+pub mod sway;
+pub mod system;
+pub mod volume;

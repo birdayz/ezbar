@@ -1,0 +1,23 @@
+[package]
+name = "ezbar"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar — a simple statusbar for sway, rendered with iced on wlr-layer-shell"
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+iced_layershell = "0.18"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+swayipc = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+base64 = "0.22"
+log = "0.4"
+env_logger = "0.11"
+ical = "0.11.0"
+
+[profile.release]
+opt-level = 2

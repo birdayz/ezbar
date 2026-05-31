@@ -2,6 +2,11 @@
 
 ezbar is my extremely simple statusbar for sway.
 
+> **Rust rewrite:** a full port rendered with `iced` on `wlr-layer-shell` (GPU,
+> no GTK) lives in [`rust/`](rust/) — see [`rust/README.md`](rust/README.md) for
+> build/run. The Go version below remains the reference. The widget configuration
+> (calendar URL, Spotify, GitHub) is shared between both.
+
 ## Widgets
 
 ### Google Calendar
