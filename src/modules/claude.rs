@@ -72,7 +72,7 @@ impl Module for Claude {
             Color::WHITE
         };
         let mut items: Vec<Element<ModMsg>> = vec![
-            text("🤖").into(),
+            text("󰚩").into(),
             text(format!("{}", n)).color(count_color).into(),
         ];
         if let Some(p) = self.limits.as_ref().and_then(|l| l.five_h_left) {

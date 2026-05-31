@@ -29,7 +29,7 @@ impl Cpu {
     pub fn new(instance: u64) -> Self {
         Cpu {
             instance,
-            text: "🖥️ --".to_string(),
+            text: " --".to_string(),
             hist: History::new(30),
             show_graph: true,
         }
@@ -83,7 +83,7 @@ fn cpu_stream(_id: &u64) -> impl Stream<Item = ModMsg> {
             loop {
                 let s = tokio::task::spawn_blocking(system::get_cpu_usage)
                     .await
-                    .unwrap_or_else(|_| "🖥️ --".to_string());
+                    .unwrap_or_else(|_| " --".to_string());
                 let _ = out.send(ModMsg::new(Msg::Data(s))).await;
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }

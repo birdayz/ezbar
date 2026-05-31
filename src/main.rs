@@ -106,6 +106,11 @@ fn print_help() {
 }
 
 fn run_bar() -> iced_layershell::Result {
+    // Default to a Nerd Font so the icon glyphs render; overridable via [bar].font.
+    let font = match config::load().bar.font {
+        Some(name) => iced::Font::with_name(Box::leak(name.into_boxed_str())),
+        None => iced::Font::with_name("JetBrainsMono Nerd Font"),
+    };
     daemon(Bar::new, Bar::namespace, Bar::update, Bar::view)
         .settings(Settings {
             layer_settings: LayerShellSettings {
@@ -117,6 +122,7 @@ fn run_bar() -> iced_layershell::Result {
         .style(Bar::style)
         .subscription(Bar::subscription)
         .default_text_size(14.0)
+        .default_font(font)
         .run()
 }
 
@@ -286,11 +292,11 @@ impl Bar {
                 ModuleEntry::new(2, Box::new(modules::github::GitHub::new(2))),
                 ModuleEntry::new(3, Box::new(modules::claude::Claude::new(3))),
             ],
-            mem_str: "💾 --".to_string(),
-            temp_str: "🌡️ --".to_string(),
+            mem_str: " --".to_string(),
+            temp_str: " --".to_string(),
             ping: ping::PingData::default(),
             time_str: "Loading…".to_string(),
-            battery_str: "🔋 --".to_string(),
+            battery_str: " --".to_string(),
             has_battery: battery::has_battery(),
             volume: volume::VolumeData::default(),
             kubectl: kubectl::KubectlData::default(),
@@ -304,11 +310,11 @@ impl Bar {
             workspaces: Vec::new(),
             title: String::new(),
             calendar: calendar::CalendarData {
-                display_text: "📅 …".to_string(),
+                display_text: " …".to_string(),
                 ..Default::default()
             },
             stock: stock::StockData {
-                display_text: "📈 …".to_string(),
+                display_text: " …".to_string(),
                 ..Default::default()
             },
             stock_symbol: stock::config().0,
@@ -771,7 +777,7 @@ impl Bar {
             if entry.disabled {
                 // module panicked in update and was torn down — static error chip.
                 right.push(
-                    text(format!("⚠ {}", entry.name))
+                    text(format!(" {}", entry.name))
                         .color(Color::from_rgb(1.0, 0.3, 0.3))
                         .into(),
                 );
@@ -791,7 +797,7 @@ impl Bar {
             right.push(sep().into());
         }
 
-        // calendar: 📅 <text> [<countdown>], coloured by urgency; click for popup
+        // calendar:  <text> [<countdown>], coloured by urgency; click for popup
         {
             let c = &self.calendar;
             let base = if c.is_overdue {
@@ -808,7 +814,7 @@ impl Bar {
                 base
             };
             let mut cal: Vec<Element<Message>> = vec![
-                text("📅").into(),
+                text("").into(),
                 text(c.display_text.clone()).color(color).into(),
             ];
             if !c.time_until_next.is_empty() {
@@ -1197,7 +1203,7 @@ fn mem_stream() -> impl Stream<Item = Message> {
             loop {
                 let s = tokio::task::spawn_blocking(system::get_memory_usage)
                     .await
-                    .unwrap_or_else(|_| "💾 --".to_string());
+                    .unwrap_or_else(|_| " --".to_string());
                 let _ = output.send(Message::Mem(s)).await;
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
@@ -1212,7 +1218,7 @@ fn temp_stream() -> impl Stream<Item = Message> {
             loop {
                 let s = tokio::task::spawn_blocking(system::get_cpu_temperature)
                     .await
-                    .unwrap_or_else(|_| "🌡️ --".to_string());
+                    .unwrap_or_else(|_| " --".to_string());
                 let _ = output.send(Message::Temp(s)).await;
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -1285,7 +1291,7 @@ fn battery_stream() -> impl Stream<Item = Message> {
             loop {
                 let s = tokio::task::spawn_blocking(battery::get_battery_status)
                     .await
-                    .unwrap_or_else(|_| "🔋 --".to_string());
+                    .unwrap_or_else(|_| " --".to_string());
                 let _ = output.send(Message::Battery(s)).await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
