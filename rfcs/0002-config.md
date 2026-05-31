@@ -82,9 +82,10 @@ one applies **live** (theme-only hot-reload) and persists to the state file. Shi
 > hot-reload, square chips, islands, GPU graphs, layer-shell popups, **drop-in
 > presets, `$palette` `$ref` resolution, and the `▾` switcher** all run today.
 > Also shipped: floating `[bar].margin` geometry, configurable height/position/
-> layer, and font `weight`. Still *proposed* here: `ezbar msg` IPC, config-driven
-> module placement, a `radius` on the solid bar surface, and `[modules.<id>.graph]`
-> knobs — each built on the proven hot-reload path above.
+> layer, font `weight`, and the **`ezbar msg`** IPC (`reload`, `preset
+> <name|next|prev>`, `popup <kind>`, `volume <up|down|mute>`). Still *proposed*
+> here: config-driven module placement, a `radius` on the solid bar surface, and
+> `[modules.<id>.graph]` knobs — each built on the proven hot-reload path above.
 
 ## Motivation
 

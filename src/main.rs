@@ -20,6 +20,7 @@ use ezbar::widgets::graph::{Graph, GraphKind, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
 mod install;
+mod ipc;
 
 const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
@@ -54,6 +55,18 @@ fn main() -> iced_layershell::Result {
                     eprintln!("ezbar: {e}");
                     std::process::exit(1);
                 }
+            }
+            return Ok(());
+        }
+        Some("msg") => {
+            let cmd = std::env::args().skip(2).collect::<Vec<_>>().join(" ");
+            if cmd.is_empty() {
+                eprintln!("ezbar msg: usage: ezbar msg <reload|preset <name|next|prev>|popup <kind>|volume <up|down|mute>>");
+                std::process::exit(2);
+            }
+            if let Err(e) = ipc::send(&cmd) {
+                eprintln!("ezbar msg: {e} (is the bar running?)");
+                std::process::exit(1);
             }
             return Ok(());
         }
@@ -218,6 +231,7 @@ enum Message {
     SpotifyScroll(bool),
     SwitchWorkspace(String),
     SelectPreset(String),
+    Ipc(String),
     OpenPopup(PopupKind),
     ClosePopup,
     BlinkTick,
@@ -269,6 +283,52 @@ fn popup_size(kind: PopupKind) -> (u32, u32) {
         PopupKind::Stock => (520, 300),
         PopupKind::Switcher => (220, 280),
     }
+}
+
+fn parse_popup_kind(s: &str) -> Option<PopupKind> {
+    match s {
+        "calendar" => Some(PopupKind::Calendar),
+        "kubectl" => Some(PopupKind::Kubectl),
+        "stock" => Some(PopupKind::Stock),
+        "switcher" | "theme" => Some(PopupKind::Switcher),
+        _ => None,
+    }
+}
+
+/// Daemon side: listen on the `ezbar` unix socket and emit each line as `Message::Ipc`.
+fn ipc_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(
+        50,
+        |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
+            let path = ipc::socket_path();
+            let _ = std::fs::remove_file(&path); // clear any stale socket
+            let listener = match tokio::net::UnixListener::bind(&path) {
+                Ok(l) => l,
+                Err(e) => {
+                    log::error!("ipc: bind {}: {e}", path.display());
+                    return;
+                }
+            };
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        use tokio::io::AsyncBufReadExt;
+                        let mut reader = tokio::io::BufReader::new(stream);
+                        let mut line = String::new();
+                        while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                            let cmd = line.trim().to_string();
+                            if !cmd.is_empty() {
+                                use iced::futures::SinkExt;
+                                let _ = out.send(Message::Ipc(cmd)).await;
+                            }
+                            line.clear();
+                        }
+                    }
+                    Err(e) => log::warn!("ipc: accept: {e}"),
+                }
+            }
+        },
+    )
 }
 
 const MODULE_POPUP_SIZE: (u32, u32) = (480, 400);
@@ -553,6 +613,7 @@ impl Bar {
                 }
                 close
             }
+            Message::Ipc(cmd) => self.handle_ipc(&cmd),
             Message::OpenPopup(kind) => {
                 // One popup at a time: a hardcoded popup also closes any module popup.
                 let close_mod = self.close_module_popup_any();
@@ -1355,6 +1416,54 @@ impl Bar {
         .into()
     }
 
+    /// Map an `ezbar msg` command line to an action (RFC 0002 IPC).
+    fn handle_ipc(&mut self, cmd: &str) -> Task<Message> {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        match parts.as_slice() {
+            ["reload"] => {
+                self.config = config::load();
+                self.theme = self.config.theme_tokens();
+                if std::env::var("EZBAR_WS_STYLE").is_err() {
+                    self.ws_style = self.config.theme.workspaces.style.variant();
+                }
+                Task::none()
+            }
+            ["preset", dir @ ("next" | "prev")] => {
+                let names = config::preset_names();
+                if names.is_empty() {
+                    return Task::none();
+                }
+                let cur = config::active_preset();
+                let idx = cur
+                    .as_deref()
+                    .and_then(|c| names.iter().position(|n| n == c))
+                    .unwrap_or(0);
+                let n = names.len();
+                let next = if *dir == "next" {
+                    (idx + 1) % n
+                } else {
+                    (idx + n - 1) % n
+                };
+                Task::done(Message::SelectPreset(names[next].clone()))
+            }
+            ["preset", name] => Task::done(Message::SelectPreset((*name).to_string())),
+            ["popup", kind] | ["popup", "toggle", kind] => match parse_popup_kind(kind) {
+                Some(k) => Task::done(Message::OpenPopup(k)),
+                None => {
+                    log::warn!("ipc: unknown popup '{kind}'");
+                    Task::none()
+                }
+            },
+            ["volume", "up"] => Task::done(Message::VolumeScroll(1)),
+            ["volume", "down"] => Task::done(Message::VolumeScroll(-1)),
+            ["volume", "mute"] => Task::done(Message::VolumeClick),
+            _ => {
+                log::warn!("ipc: unknown command: {cmd:?}");
+                Task::none()
+            }
+        }
+    }
+
     fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
         let bg = self.config.theme.background.base().0;
         // Islands draw their own pills over a transparent surface; solid paints
@@ -1373,6 +1482,7 @@ impl Bar {
         let mut subs = vec![
             Subscription::run(mem_stream),
             Subscription::run(config_stream),
+            Subscription::run(ipc_stream),
             Subscription::run(temp_stream),
             Subscription::run(ping_stream),
             Subscription::run(time_stream),

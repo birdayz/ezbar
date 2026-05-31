@@ -88,10 +88,18 @@ text = "#cdd6f4"; ok = "#a6e3a1"; warn = "#f9e2af"; urgent = "#f38ba8"
 
 Six ready palettes ship in [`presets/`](presets/) — `ezbar-dark` (the lilac-islands
 default), `noir` (the original flat black slab), `catppuccin-mocha`, `gruvbox-dark`,
-`nord`, `tokyo-night`. The full design — a drop-in preset folder, a `[palette]`
-variable layer, an on-bar `▾` switcher, and `ezbar msg` — is
-[RFC 0002](rfcs/0002-config.md). Workspace chips come in four square styles
-(`boxed` · `filled` · `outlined` · `underbar`).
+`nord`, `tokyo-night`. Drop them into `~/.config/ezbar/presets/`, then switch live
+from the on-bar `▾`, or from a keybind:
+
+```bash
+ezbar msg preset gruvbox-dark   # or: preset next | prev
+ezbar msg reload                # popup <kind> | volume <up|down|mute>
+```
+
+Presets are theme-only TOML bundles with a `[palette]` variable layer (`primary =
+"$mauve"`), selected via a state file that never edits your `config.toml`. Workspace
+chips come in four square styles (`boxed` · `filled` · `outlined` · `underbar`).
+Full design: [RFC 0002](rfcs/0002-config.md).
 
 ## Interactions
 
