@@ -19,6 +19,12 @@ hover popups all work; popups are real layer-shell surfaces, not overlays.
 
 Needs stable Rust (≥ 1.88) and a Wayland + Vulkan stack.
 
+**Arch / AUR:**
+
+```bash
+yay -S ezbar
+```
+
 **Arch:**
 
 ```bash
