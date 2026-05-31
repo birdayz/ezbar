@@ -1,0 +1,28 @@
+name: Publish AUR
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  aur:
+    name: Update AUR (ezbar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set pkgver from tag
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          sed -i "s/^pkgver=.*/pkgver=${ver}/" packaging/aur/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/aur/PKGBUILD
+      - name: Publish to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: ezbar
+          pkgbuild: packaging/aur/PKGBUILD
+          updpkgsums: true   # recompute sha256sums for the new tag tarball
+          commit_username: 'Johannes Brüderl'
+          commit_email: 'johannes.bruederl@gmail.com'
+          ssh_private_key: ${{ secrets.AUR_KEY }}   # same AUR key as kaf
+          commit_message: "Update to ${{ github.ref_name }}"

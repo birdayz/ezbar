@@ -1,0 +1,6 @@
+# makepkg build artifacts
+src/
+pkg/
+*.tar.gz
+*.pkg.tar.*
+ezbar-*/
