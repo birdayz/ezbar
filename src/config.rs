@@ -335,8 +335,12 @@ pub struct Bar {
     pub height: u32,
     pub outputs: Outputs,
     pub font: Option<String>,
+    /// font weight: thin|light|normal|medium|semibold|bold (RFC 0002)
+    pub weight: Weight,
     pub scale: f32,
     pub switcher: SwitcherPos,
+    /// gap from each screen edge — a non-zero margin floats the bar
+    pub margin: Margin,
 }
 
 impl Default for Bar {
@@ -347,8 +351,47 @@ impl Default for Bar {
             height: 34,
             outputs: Outputs::default(),
             font: None,
+            weight: Weight::default(),
             scale: 1.0,
             switcher: SwitcherPos::default(),
+            margin: Margin::default(),
+        }
+    }
+}
+
+/// Per-side gap from the screen edges (RFC 0002). Non-zero floats the bar.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+pub struct Margin {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
+}
+
+/// Font weight, mapped to `iced::font::Weight`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Weight {
+    Thin,
+    Light,
+    #[default]
+    Normal,
+    Medium,
+    Semibold,
+    Bold,
+}
+
+impl Weight {
+    pub fn iced(self) -> iced::font::Weight {
+        use iced::font::Weight as W;
+        match self {
+            Weight::Thin => W::Thin,
+            Weight::Light => W::Light,
+            Weight::Normal => W::Normal,
+            Weight::Medium => W::Medium,
+            Weight::Semibold => W::Semibold,
+            Weight::Bold => W::Bold,
         }
     }
 }

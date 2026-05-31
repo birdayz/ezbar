@@ -107,10 +107,14 @@ fn print_help() {
 
 fn run_bar() -> iced_layershell::Result {
     // Default to a Nerd Font so the icon glyphs render; overridable via [bar].font.
-    let font = match config::load().bar.font {
-        Some(name) => iced::Font::with_name(Box::leak(name.into_boxed_str())),
-        None => iced::Font::with_name("JetBrainsMono Nerd Font"),
-    };
+    let cfg = config::load();
+    let name = cfg
+        .bar
+        .font
+        .clone()
+        .unwrap_or_else(|| "JetBrainsMono Nerd Font".to_string());
+    let mut font = iced::Font::with_name(Box::leak(name.into_boxed_str()));
+    font.weight = cfg.bar.weight.iced();
     daemon(Bar::new, Bar::namespace, Bar::update, Bar::view)
         .settings(Settings {
             layer_settings: LayerShellSettings {
@@ -224,12 +228,33 @@ enum Message {
     ModuleMsg { instance: u64, msg: ModMsg },
 }
 
-fn bar_settings() -> NewLayerShellSettings {
+fn bar_settings(cfg: &Config) -> NewLayerShellSettings {
+    let b = &cfg.bar;
+    let h = b.height.max(1);
+    let m = b.margin;
+    // Top or bottom edge; span the full width minus L/R margins.
+    let edge = match b.position {
+        config::Position::Top => Anchor::Top,
+        config::Position::Bottom => Anchor::Bottom,
+    };
+    let layer = match b.layer {
+        config::Layer::Background => Layer::Background,
+        config::Layer::Bottom => Layer::Bottom,
+        config::Layer::Top => Layer::Top,
+        config::Layer::Overlay => Layer::Overlay,
+    };
+    // Reserve the bar's height plus its near-edge gap so windows never overlap it.
+    let near_gap = match b.position {
+        config::Position::Top => m.top,
+        config::Position::Bottom => m.bottom,
+    };
     NewLayerShellSettings {
-        size: Some((0, BAR_HEIGHT)),
-        exclusive_zone: Some(BAR_HEIGHT as i32),
-        anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
-        layer: Layer::Top,
+        size: Some((0, h)),
+        exclusive_zone: Some(h as i32 + near_gap.max(0)),
+        anchor: edge | Anchor::Left | Anchor::Right,
+        // layer-shell margin order: (top, right, bottom, left)
+        margin: Some((m.top, m.right, m.bottom, m.left)),
+        layer,
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::None,
         namespace: Some("ezbar".to_string()),
@@ -284,11 +309,11 @@ fn load_kubectl_contexts() -> Task<Message> {
 impl Bar {
     fn new() -> (Self, Task<Message>) {
         let bar_id = window::Id::unique();
+        let config = config::load();
         let open = Task::done(Message::NewLayerShell {
-            settings: bar_settings(),
+            settings: bar_settings(&config),
             id: bar_id,
         });
-        let config = config::load();
         let theme = config.theme_tokens();
         // Workspace chip style: config drives it; EZBAR_WS_STYLE overrides (dev A/B).
         let ws_style = std::env::var("EZBAR_WS_STYLE")
