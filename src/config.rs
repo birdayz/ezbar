@@ -174,7 +174,7 @@ pub struct Border {
 impl Default for Border {
     fn default() -> Self {
         Border {
-            width: 0.0,
+            width: 1.0, // hairline on islands/popups; the flat bar draws none
             color: Color::rgba(1.0, 1.0, 1.0, 0.08),
         }
     }
@@ -190,11 +190,11 @@ pub struct PopupTheme {
 
 impl Default for PopupTheme {
     fn default() -> Self {
-        // matches today's popup chrome: rgba(0,0,0,0.92), 8px corners
+        // dark, square popups (radius 0) — ezbar's identity
         PopupTheme {
             opacity: 0.92,
             backdrop: 0.0,
-            radius: 8.0,
+            radius: 0.0,
         }
     }
 }
@@ -274,16 +274,16 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// Reproduces the current hardcoded bar so wiring config in is a no-op until
-    /// the user actually writes a config.
+    /// ezbar's default identity: a flat, **square**, dark bar — deliberately not
+    /// ashell's rounded islands. Square corners, dark background, white text.
     fn default() -> Self {
         Theme {
             style: Style::Solid,
-            opacity: 0.8,
+            opacity: 0.85,
             font_size: 14.0,
             spacing: 6.0,
             padding: 6.0,
-            radius: Radius::default(),
+            radius: Radius::Uniform(0.0), // square, not rounded
             border: Border::default(),
             background: Background::Solid(Color::rgba(0.0, 0.0, 0.0, 1.0)),
             text: Color::rgba(1.0, 1.0, 1.0, 1.0),

@@ -205,6 +205,7 @@ enum Message {
     OpenPopup(PopupKind),
     ClosePopup,
     BlinkTick,
+    ConfigReloaded(Result<Config, String>),
     WindowClosed(window::Id),
     Cursor(window::Id, f32),
     Noop,
@@ -493,6 +494,16 @@ impl Bar {
                 self.blink_on = !self.blink_on;
                 Task::none()
             }
+            Message::ConfigReloaded(Ok(cfg)) => {
+                log::info!("config reloaded");
+                self.config = cfg;
+                self.theme = self.config.theme_tokens();
+                Task::none()
+            }
+            Message::ConfigReloaded(Err(e)) => {
+                log::warn!("config reload failed ({e}); keeping previous config");
+                Task::none()
+            }
             Message::Cursor(id, x) => {
                 if id == self.bar_id {
                     self.cursor_x = x;
@@ -649,17 +660,29 @@ impl Bar {
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(12)
-            .style(|_theme| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.92))),
-                border: Border {
-                    color: Color::from_rgb(0.2, 0.2, 0.2),
-                    width: 1.0,
-                    radius: 8.0.into(),
-                },
-                text_color: Some(Color::WHITE),
-                ..Default::default()
-            })
+            .style(self.popup_style())
             .into()
+    }
+
+    /// Themed popup container style (dark, square, hairline border) from config.
+    fn popup_style(&self) -> impl Fn(&iced::Theme) -> container::Style {
+        let t = &self.config.theme;
+        let base = t.background.base().0;
+        let bg = Color::from_rgba(base[0], base[1], base[2], t.popup.opacity);
+        let radius = t.popup.radius;
+        let bw = t.border.width;
+        let bc = t.border.color.iced();
+        let text = t.text.iced();
+        move |_theme: &iced::Theme| container::Style {
+            background: Some(Background::Color(bg)),
+            border: Border {
+                color: bc,
+                width: bw,
+                radius: radius.into(),
+            },
+            text_color: Some(text),
+            ..Default::default()
+        }
     }
 
     fn close_popup_task(&mut self) -> Task<Message> {
@@ -941,16 +964,7 @@ impl Bar {
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(12)
-            .style(|_theme| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.92))),
-                border: Border {
-                    color: Color::from_rgb(0.2, 0.2, 0.2),
-                    width: 1.0,
-                    radius: 8.0.into(),
-                },
-                text_color: Some(Color::WHITE),
-                ..Default::default()
-            })
+            .style(self.popup_style())
             .into()
     }
 
@@ -1036,6 +1050,7 @@ impl Bar {
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             Subscription::run(mem_stream),
+            Subscription::run(config_stream),
             Subscription::run(temp_stream),
             Subscription::run(ping_stream),
             Subscription::run(time_stream),
@@ -1113,6 +1128,67 @@ fn marquee(s: &str, offset: usize, max_len: usize) -> String {
 }
 
 // ---- subscription streams (one per data source) ----
+
+fn read_parse(path: &std::path::Path) -> Result<Config, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => config::parse_str(&s),
+        Err(_) => Ok(Config::default()), // file gone → revert to defaults
+    }
+}
+
+/// Watch the config directory; emit a reloaded (or errored) config on change.
+/// Keep-last-good: a parse error yields `Err` and the host keeps the running config.
+fn config_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(
+        4,
+        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            use notify::Watcher;
+            let Some(path) = config::path() else {
+                return;
+            };
+            let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
+                return;
+            };
+            let _ = std::fs::create_dir_all(&dir);
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(16);
+            let mut watcher =
+                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if res.is_ok() {
+                        let _ = tx.blocking_send(());
+                    }
+                }) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        log::warn!("config watch: {e}");
+                        return;
+                    }
+                };
+            if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+                log::warn!("config watch: {e}");
+                return;
+            }
+            loop {
+                if rx.recv().await.is_none() {
+                    break;
+                }
+                // debounce: coalesce a burst of fs events
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                while rx.try_recv().is_ok() {}
+                // read + parse; retry once on error (likely a mid-write read)
+                let mut cfg = read_parse(&path);
+                if cfg.is_err() {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    cfg = read_parse(&path);
+                }
+                if output.send(Message::ConfigReloaded(cfg)).await.is_err() {
+                    break;
+                }
+            }
+            drop(watcher);
+        },
+    )
+}
 
 fn mem_stream() -> impl Stream<Item = Message> {
     iced::stream::channel(

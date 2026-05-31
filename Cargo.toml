@@ -34,6 +34,7 @@ swayipc = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 base64 = "0.22"
 toml = "0.8"
+notify = "6"
 log = "0.4"
 env_logger = "0.11"
 ical = "0.11.0"
