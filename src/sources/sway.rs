@@ -1,14 +1,18 @@
-//! Sway IPC: workspace list + focused window title.
-//! Port of the sway goroutine in cmd/ezbar/main.go. Uses the blocking swayipc
-//! client on dedicated blocking threads, bridged into an iced subscription.
+//! Sway IPC **service**: one shared, event-driven connection that publishes a
+//! `Snapshot` (workspaces + focused title + keyboard layout). Built-in modules
+//! (workspaces, window_title, keyboard) subscribe to the slice they care about via
+//! [`workspaces`]/[`title`]/[`layout`] instead of each opening their own sway socket;
+//! [`run_command`] is the shared command path. One event loop, fanned to all.
 
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use iced::futures::{SinkExt, Stream};
+use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::stream;
 use swayipc::{Connection, Event, EventType, Node};
+use tokio::sync::watch;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub name: String,
     /// focused on the focused output (the active workspace)
@@ -19,28 +23,78 @@ pub struct Workspace {
     pub urgent: bool,
 }
 
-#[derive(Debug, Clone)]
-pub enum SwayUpdate {
-    Workspaces(Vec<Workspace>),
-    Title(String),
+/// The latest sway state the service publishes.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub workspaces: Vec<Workspace>,
+    pub title: String,
+    pub layout: String,
 }
 
-/// Title-only stream for the host (the workspaces *module* owns its own workspace
-/// stream — [`workspaces_stream`]). Kept as `SwayUpdate` for the host's message shape.
-pub fn sway_stream() -> impl Stream<Item = SwayUpdate> {
+// ---------------------------------------------------------------------------
+// The service: a lazily-started singleton, one event loop, a `watch` of Snapshot.
+// ---------------------------------------------------------------------------
+
+static BUS: OnceLock<watch::Sender<Arc<Snapshot>>> = OnceLock::new();
+
+/// A receiver of the shared snapshot (starts the service on first use). `watch`
+/// retains the latest value, so a late subscriber sees current state immediately.
+fn bus() -> watch::Receiver<Arc<Snapshot>> {
+    let tx = BUS.get_or_init(|| {
+        let (tx, _rx) = watch::channel(Arc::new(Snapshot::default()));
+        let tx2 = tx.clone();
+        std::thread::spawn(move || loop {
+            if let Err(e) = run_service(&tx2) {
+                log::warn!("sway service: {e}");
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        tx
+    });
+    tx.subscribe()
+}
+
+/// Subscribe to events once, re-query the changed slice, publish a fresh snapshot.
+fn run_service(tx: &watch::Sender<Arc<Snapshot>>) -> swayipc::Fallible<()> {
+    let mut q = Connection::new()?;
+    let mut snap = Snapshot {
+        workspaces: fetch_workspaces(&mut q)?,
+        title: focused_title(&mut q),
+        layout: active_layout(&mut q),
+    };
+    let _ = tx.send_replace(Arc::new(snap.clone()));
+
+    let events = Connection::new()?.subscribe([
+        EventType::Workspace,
+        EventType::Window,
+        EventType::Input,
+    ])?;
+    for event in events {
+        match event? {
+            Event::Workspace(_) => snap.workspaces = fetch_workspaces(&mut q)?,
+            Event::Window(_) => snap.title = focused_title(&mut q),
+            Event::Input(_) => snap.layout = active_layout(&mut q),
+            _ => continue,
+        }
+        // send_replace keeps the latest even with zero current receivers
+        let _ = tx.send_replace(Arc::new(snap.clone()));
+    }
+    Ok(())
+}
+
+/// Stream of snapshots (current value first, then on every change).
+fn snapshots() -> impl Stream<Item = Arc<Snapshot>> {
     stream::channel(
-        50,
-        |mut output: iced::futures::channel::mpsc::Sender<SwayUpdate>| async move {
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<SwayUpdate>(50);
-            let tx_title = tx.clone();
-            tokio::task::spawn_blocking(move || loop {
-                if let Err(e) = run_title(&tx_title) {
-                    log::warn!("sway title error: {e}");
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            });
-            while let Some(update) = rx.recv().await {
-                if output.send(update).await.is_err() {
+        8,
+        |mut out: iced::futures::channel::mpsc::Sender<Arc<Snapshot>>| async move {
+            let mut rx = bus();
+            let current = rx.borrow().clone(); // clone out so the Ref guard isn't held across await
+            if out.send(current).await.is_err() {
+                return;
+            }
+            while rx.changed().await.is_ok() {
+                let snap = rx.borrow().clone();
+                if out.send(snap).await.is_err() {
                     break;
                 }
             }
@@ -48,29 +102,46 @@ pub fn sway_stream() -> impl Stream<Item = SwayUpdate> {
     )
 }
 
-/// Workspace-list stream — the workspaces module subscribes to this with its own
-/// sway connection (RFC 0001: a module owns its IO client).
-pub fn workspaces_stream() -> impl Stream<Item = Vec<Workspace>> {
-    stream::channel(
-        50,
-        |mut output: iced::futures::channel::mpsc::Sender<Vec<Workspace>>| async move {
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<SwayUpdate>(50);
-            tokio::task::spawn_blocking(move || loop {
-                if let Err(e) = run_workspaces(&tx) {
-                    log::warn!("sway workspace error: {e}");
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            });
-            while let Some(update) = rx.recv().await {
-                if let SwayUpdate::Workspaces(ws) = update {
-                    if output.send(ws).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        },
-    )
+/// Skip consecutive equal items (so a title change doesn't wake the workspaces module).
+fn dedup<T: Clone + PartialEq + 'static>(s: impl Stream<Item = T>) -> impl Stream<Item = T> {
+    let mut last: Option<T> = None;
+    s.filter_map(move |item| {
+        let keep = last.as_ref() != Some(&item);
+        if keep {
+            last = Some(item.clone());
+        }
+        async move { keep.then_some(item) }
+    })
 }
+
+/// Workspace-list slice of the service (deduped).
+pub fn workspaces() -> impl Stream<Item = Vec<Workspace>> {
+    dedup(snapshots().map(|s| s.workspaces.clone()))
+}
+
+/// Focused-window-title slice (deduped).
+pub fn title() -> impl Stream<Item = String> {
+    dedup(snapshots().map(|s| s.title.clone()))
+}
+
+/// Active keyboard-layout slice (deduped).
+pub fn layout() -> impl Stream<Item = String> {
+    dedup(snapshots().map(|s| s.layout.clone()))
+}
+
+/// Run a sway command on a short-lived connection (shared command path).
+pub fn run_command(cmd: impl Into<String>) {
+    let cmd = cmd.into();
+    std::thread::spawn(move || {
+        if let Ok(mut c) = Connection::new() {
+            let _ = c.run_command(cmd);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
 
 fn sort_workspaces(ws: &mut [Workspace]) {
     ws.sort_by(
@@ -97,58 +168,45 @@ fn fetch_workspaces(conn: &mut Connection) -> swayipc::Fallible<Vec<Workspace>> 
     Ok(state)
 }
 
-fn run_workspaces(tx: &tokio::sync::mpsc::Sender<SwayUpdate>) -> swayipc::Fallible<()> {
-    let mut conn = Connection::new()?;
-    let state = fetch_workspaces(&mut conn)?;
-    let _ = tx.blocking_send(SwayUpdate::Workspaces(state));
-
-    // Re-snapshot on every workspace event. Sway workspace events are infrequent
-    // (focus/init/empty/urgent), so a full re-query is cheaper than tracking
-    // visible/urgent deltas by hand — and it can never drift out of sync.
-    let mut q = Connection::new()?;
-    let events = Connection::new()?.subscribe([EventType::Workspace])?;
-    for event in events {
-        let _we = match event? {
-            Event::Workspace(we) => *we,
-            _ => continue,
-        };
-        let state = fetch_workspaces(&mut q)?;
-        if tx.blocking_send(SwayUpdate::Workspaces(state)).is_err() {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn run_title(tx: &tokio::sync::mpsc::Sender<SwayUpdate>) -> swayipc::Fallible<()> {
-    let mut conn = Connection::new()?;
-    loop {
-        let tree = conn.get_tree()?;
-        if let Some(name) = focused_name(&tree) {
-            if tx.blocking_send(SwayUpdate::Title(name)).is_err() {
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    Ok(())
+fn focused_title(conn: &mut Connection) -> String {
+    conn.get_tree()
+        .ok()
+        .and_then(|t| focused_name(&t))
+        .unwrap_or_default()
 }
 
 fn focused_name(node: &Node) -> Option<String> {
     if node.focused {
         return Some(node.name.clone().unwrap_or_default());
     }
-    for c in &node.nodes {
-        if let Some(n) = focused_name(c) {
-            return Some(n);
-        }
-    }
-    for c in &node.floating_nodes {
+    for c in node.nodes.iter().chain(node.floating_nodes.iter()) {
         if let Some(n) = focused_name(c) {
             return Some(n);
         }
     }
     None
+}
+
+/// The first keyboard's active layout, shortened (`English (US)` → `US`).
+fn active_layout(conn: &mut Connection) -> String {
+    conn.get_inputs()
+        .ok()
+        .and_then(|inputs| {
+            inputs
+                .into_iter()
+                .find_map(|i| i.xkb_active_layout_name)
+                .map(|name| short_layout(&name))
+        })
+        .unwrap_or_else(|| "??".to_string())
+}
+
+fn short_layout(name: &str) -> String {
+    if let (Some(a), Some(b)) = (name.find('('), name.find(')')) {
+        if b > a + 1 {
+            return name[a + 1..b].to_string();
+        }
+    }
+    name.split_whitespace().next().unwrap_or(name).to_string()
 }
 
 #[cfg(test)]
@@ -178,5 +236,11 @@ mod tests {
         sort_workspaces(&mut ws);
         let names: Vec<&str> = ws.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, vec!["code", "web"]);
+    }
+
+    #[test]
+    fn short_layout_extracts_paren_code() {
+        assert_eq!(short_layout("English (US)"), "US");
+        assert_eq!(short_layout("German"), "German");
     }
 }

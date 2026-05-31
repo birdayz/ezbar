@@ -12,6 +12,7 @@ pub mod net;
 pub mod ping;
 pub mod temperature;
 pub mod updates;
+pub mod window_title;
 pub mod workspaces;
 
 use ezbar_plugin::Module;
@@ -34,6 +35,7 @@ pub fn is_module(id: &str) -> bool {
             | "memory"
             | "temperature"
             | "ping"
+            | "window_title"
     )
 }
 
@@ -55,6 +57,7 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "memory" => Some(Box::new(memory::Memory::new(instance))),
         "temperature" => Some(Box::new(temperature::Temperature::new(instance))),
         "ping" => Some(Box::new(ping::Ping::new(instance, cfg))),
+        "window_title" => Some(Box::new(window_title::WindowTitle::new(instance, cfg))),
         _ => None,
     }
 }

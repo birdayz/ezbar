@@ -13,8 +13,7 @@ use iced_layershell::to_layer_message;
 
 use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::modules;
-use ezbar::sources::sway::SwayUpdate;
-use ezbar::sources::{battery, calendar, kubectl, spotify, stock, sway, volume};
+use ezbar::sources::{battery, calendar, kubectl, spotify, stock, volume};
 use ezbar_plugin::ui::graph::StockChart;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
@@ -181,9 +180,6 @@ struct Bar {
     kubectl: kubectl::KubectlData,
     kubectl_contexts: Vec<String>,
 
-    // sway (workspaces is its own module now; the host only tracks the title)
-    title: String,
-
     // network widgets
     calendar: calendar::CalendarData,
     stock: stock::StockData,
@@ -230,7 +226,6 @@ enum Message {
     Volume(volume::VolumeData),
     Kubectl(kubectl::KubectlData),
     KubectlContexts(Vec<String>),
-    Sway(SwayUpdate),
     Calendar(calendar::CalendarData),
     Stock(stock::StockData),
     StockChart(Vec<f64>),
@@ -494,7 +489,6 @@ impl Bar {
             volume: volume::VolumeData::default(),
             kubectl: kubectl::KubectlData::default(),
             kubectl_contexts: Vec::new(),
-            title: String::new(),
             calendar: calendar::CalendarData {
                 display_text: " …".to_string(),
                 ..Default::default()
@@ -554,11 +548,6 @@ impl Bar {
             }
             Message::KubectlContexts(v) => {
                 self.kubectl_contexts = v;
-                Task::none()
-            }
-            Message::Sway(SwayUpdate::Workspaces(_)) => Task::none(), // handled by the module
-            Message::Sway(SwayUpdate::Title(t)) => {
-                self.title = t;
                 Task::none()
             }
             Message::Calendar(d) => {
@@ -964,7 +953,7 @@ impl Bar {
     fn render_widget(&self, id: &str) -> Option<Element<'_, Message>> {
         match id {
             // workspaces is a Module now (rendered by key via render_module)
-            "window_title" | "title" => Some(text(self.title.clone()).into()),
+            // window_title is a Module now (rendered by key)
             "clock" | "time" => Some(text(self.time_str.clone()).into()),
             "calendar" => {
                 let c = &self.calendar;
@@ -1406,7 +1395,6 @@ impl Bar {
             Subscription::run(calendar_stream),
             Subscription::run(stock_stream),
             Subscription::run(spotify_stream),
-            Subscription::run(sway::sway_stream).map(Message::Sway),
             iced::time::every(Duration::from_millis(500)).map(|_| Message::BlinkTick),
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),

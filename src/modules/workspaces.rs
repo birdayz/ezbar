@@ -17,7 +17,7 @@ use ezbar_plugin::iced::{Background, Border, Color, Element, Length, Subscriptio
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::config::WsStyle;
-use crate::sources::sway::{workspaces_stream, Workspace};
+use crate::sources::sway::{self, Workspace};
 
 enum Msg {
     Update(Vec<Workspace>),
@@ -69,13 +69,13 @@ impl Module for Workspaces {
     fn update(&mut self, msg: ModMsg) -> Response {
         match msg.get::<Msg>() {
             Some(Msg::Update(ws)) => self.list = ws.clone(),
-            Some(Msg::Switch(name)) => switch(&format!("workspace {name}")),
+            Some(Msg::Switch(name)) => sway::run_command(format!("workspace {name}")),
             Some(Msg::Scroll(delta)) => {
                 let dir = self.scroll_dir(*delta);
                 if dir < 0 {
-                    switch("workspace prev_on_output");
+                    sway::run_command("workspace prev_on_output");
                 } else if dir > 0 {
-                    switch("workspace next_on_output");
+                    sway::run_command("workspace next_on_output");
                 }
             }
             None => {}
@@ -131,18 +131,8 @@ impl Workspaces {
     }
 }
 
-/// Run a sway command on a throwaway connection (fire-and-forget, never blocks update).
-fn switch(cmd: &str) {
-    let cmd = cmd.to_string();
-    std::thread::spawn(move || {
-        if let Ok(mut c) = swayipc::Connection::new() {
-            let _ = c.run_command(cmd);
-        }
-    });
-}
-
 fn ws_sub(_id: &u64) -> impl Stream<Item = ModMsg> {
-    workspaces_stream().map(|ws| ModMsg::new(Msg::Update(ws)))
+    sway::workspaces().map(|ws| ModMsg::new(Msg::Update(ws)))
 }
 
 /// One workspace as a square, state-filled chip — state drives the *fill*, not width.
