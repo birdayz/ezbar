@@ -1,0 +1,15 @@
+[package]
+name = "ezbar-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standalone visual harness for developing and testing ezbar modules."
+
+[dependencies]
+ezbar-plugin = { path = "../ezbar-plugin" }
+# iced is re-exported through ezbar-plugin (guaranteed same version as modules);
+# we depend on it directly only to name the executor/feature set.
+iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+# (the example plugin needs no direct deps — it uses ezbar_plugin::task helpers)

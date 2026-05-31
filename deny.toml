@@ -1,0 +1,23 @@
+# cargo-deny config — https://embarkstudios.github.io/cargo-deny/
+# CI runs: cargo deny check advisories bans sources
+
+[advisories]
+version = 2
+yanked = "deny"
+# Consciously ignore a specific advisory by id:
+# ignore = ["RUSTSEC-0000-0000"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# Licenses are not enforced in CI yet. To turn it on, add `licenses` to the
+# cargo-deny command in .github/workflows/ci.yml and pin an allow-list here, e.g.:
+# [licenses]
+# version = 2
+# allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause",
+#          "ISC", "Unicode-3.0", "Zlib", "MPL-2.0"]

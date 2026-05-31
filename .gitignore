@@ -1,17 +1,12 @@
-# Binaries
-ezbar
-giobar
+/target
 
-# IDE
-.idea/
-.vscode/
+# editor / IDE
+/.idea/
+/.vscode/
 *.swp
 *.swo
+*.rs.bk
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Test coverage
-*.out
-coverage.html

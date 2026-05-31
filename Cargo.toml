@@ -1,0 +1,45 @@
+[package]
+name = "ezbar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A GPU-rendered status bar for Sway (iced + wlr-layer-shell), with pluggable widgets."
+readme = "README.md"
+keywords = ["sway", "wayland", "statusbar", "wlroots", "iced"]
+categories = ["gui"]
+
+[workspace]
+members = ["crates/ezbar-plugin", "crates/ezbar-harness"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/birdayz/ezbar"
+authors = ["Johannes Brüderl <johannes.bruederl@gmail.com>"]
+
+[dependencies]
+ezbar-plugin = { path = "crates/ezbar-plugin" }
+iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+iced_layershell = "0.18"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+chrono = { version = "0.4", features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+swayipc = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+base64 = "0.22"
+log = "0.4"
+env_logger = "0.11"
+ical = "0.11.0"
+
+[dev-dependencies]
+# the module dev harness — used only by examples/harness.rs, so it stays out of
+# the shipping bar binary's dependency graph.
+ezbar-harness = { path = "crates/ezbar-harness" }
+
+[profile.release]
+opt-level = 2
