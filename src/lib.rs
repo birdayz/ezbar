@@ -11,4 +11,3 @@ pub mod config;
 pub mod history;
 pub mod modules;
 pub mod sources;
-pub mod widgets;

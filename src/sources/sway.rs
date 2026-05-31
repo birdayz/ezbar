@@ -25,21 +25,13 @@ pub enum SwayUpdate {
     Title(String),
 }
 
-/// Long-lived subscription stream emitting workspace + title updates.
+/// Title-only stream for the host (the workspaces *module* owns its own workspace
+/// stream — [`workspaces_stream`]). Kept as `SwayUpdate` for the host's message shape.
 pub fn sway_stream() -> impl Stream<Item = SwayUpdate> {
     stream::channel(
         50,
         |mut output: iced::futures::channel::mpsc::Sender<SwayUpdate>| async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<SwayUpdate>(50);
-
-            let tx_ws = tx.clone();
-            tokio::task::spawn_blocking(move || loop {
-                if let Err(e) = run_workspaces(&tx_ws) {
-                    log::warn!("sway workspace error: {e}");
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            });
-
             let tx_title = tx.clone();
             tokio::task::spawn_blocking(move || loop {
                 if let Err(e) = run_title(&tx_title) {
@@ -47,10 +39,33 @@ pub fn sway_stream() -> impl Stream<Item = SwayUpdate> {
                 }
                 std::thread::sleep(Duration::from_secs(1));
             });
-
             while let Some(update) = rx.recv().await {
                 if output.send(update).await.is_err() {
                     break;
+                }
+            }
+        },
+    )
+}
+
+/// Workspace-list stream — the workspaces module subscribes to this with its own
+/// sway connection (RFC 0001: a module owns its IO client).
+pub fn workspaces_stream() -> impl Stream<Item = Vec<Workspace>> {
+    stream::channel(
+        50,
+        |mut output: iced::futures::channel::mpsc::Sender<Vec<Workspace>>| async move {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<SwayUpdate>(50);
+            tokio::task::spawn_blocking(move || loop {
+                if let Err(e) = run_workspaces(&tx) {
+                    log::warn!("sway workspace error: {e}");
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            });
+            while let Some(update) = rx.recv().await {
+                if let SwayUpdate::Workspaces(ws) = update {
+                    if output.send(ws).await.is_err() {
+                        break;
+                    }
                 }
             }
         },

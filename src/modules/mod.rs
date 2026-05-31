@@ -9,6 +9,7 @@ pub mod ip;
 pub mod keyboard;
 pub mod net;
 pub mod updates;
+pub mod workspaces;
 
 use ezbar_plugin::Module;
 
@@ -17,7 +18,16 @@ use ezbar_plugin::Module;
 pub fn is_module(id: &str) -> bool {
     matches!(
         id,
-        "cpu" | "github" | "claude" | "custom" | "disk" | "net" | "ip" | "updates" | "keyboard"
+        "cpu"
+            | "github"
+            | "claude"
+            | "custom"
+            | "disk"
+            | "net"
+            | "ip"
+            | "updates"
+            | "keyboard"
+            | "workspaces"
     )
 }
 
@@ -35,6 +45,7 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "ip" => Some(Box::new(ip::Ip::new(instance, cfg))),
         "updates" => Some(Box::new(updates::Updates::new(instance, cfg))),
         "keyboard" => Some(Box::new(keyboard::Keyboard::new(instance, cfg))),
+        "workspaces" => Some(Box::new(workspaces::Workspaces::new(instance, cfg))),
         _ => None,
     }
 }

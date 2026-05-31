@@ -16,7 +16,6 @@ use ezbar::history::History;
 use ezbar::modules;
 use ezbar::sources::sway::SwayUpdate;
 use ezbar::sources::{battery, calendar, kubectl, ping, spotify, stock, sway, system, volume};
-use ezbar::widgets::workspaces::{WorkspacesView, WsAction};
 use ezbar_plugin::ui::graph::{Graph, GraphKind, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
@@ -197,8 +196,7 @@ struct Bar {
     show_temp_graph: bool,
     show_ping_graph: bool,
 
-    // sway
-    workspaces: WorkspacesView,
+    // sway (workspaces is its own module now; the host only tracks the title)
     title: String,
 
     // network widgets
@@ -263,8 +261,6 @@ enum Message {
     KubectlSelect(String),
     SpotifyClick,
     SpotifyScroll(bool),
-    SwitchWorkspace(String),
-    WorkspaceScroll(iced::mouse::ScrollDelta),
     SelectPreset(String),
     Ipc(String),
     OpenPopup(PopupKind),
@@ -526,7 +522,6 @@ impl Bar {
             show_mem_graph: false,
             show_temp_graph: true,
             show_ping_graph: false,
-            workspaces: WorkspacesView::default(),
             title: String::new(),
             calendar: calendar::CalendarData {
                 display_text: " …".to_string(),
@@ -606,10 +601,7 @@ impl Bar {
                 self.kubectl_contexts = v;
                 Task::none()
             }
-            Message::Sway(SwayUpdate::Workspaces(ws)) => {
-                self.workspaces.set(ws);
-                Task::none()
-            }
+            Message::Sway(SwayUpdate::Workspaces(_)) => Task::none(), // handled by the module
             Message::Sway(SwayUpdate::Title(t)) => {
                 self.title = t;
                 Task::none()
@@ -710,41 +702,6 @@ impl Bar {
                 },
                 Message::Spotify,
             ),
-            Message::SwitchWorkspace(name) => Task::perform(
-                async move {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Ok(mut conn) = swayipc::Connection::new() {
-                            let _ = conn.run_command(format!("workspace {name}"));
-                        }
-                    })
-                    .await;
-                },
-                |()| Message::Noop,
-            ),
-            Message::WorkspaceScroll(delta) => {
-                // up = previous workspace, down = next (the widget owns the
-                // trackpad-pixel accumulator and returns the step direction).
-                let dir = self.workspaces.scroll_dir(delta);
-                if dir == 0 {
-                    return Task::none();
-                }
-                let cmd = if dir < 0 {
-                    "workspace prev_on_output"
-                } else {
-                    "workspace next_on_output"
-                };
-                Task::perform(
-                    async move {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            if let Ok(mut conn) = swayipc::Connection::new() {
-                                let _ = conn.run_command(cmd);
-                            }
-                        })
-                        .await;
-                    },
-                    |()| Message::Noop,
-                )
-            }
             Message::SelectPreset(name) => {
                 // Persist the choice (state file, never config.toml), then reload so
                 // the preset applies live through the theme path. Closes the popup.
@@ -1061,14 +1018,7 @@ impl Bar {
     /// show (e.g. `battery` on a desktop).
     fn render_widget(&self, id: &str) -> Option<Element<'_, Message>> {
         match id {
-            "workspaces" => Some(
-                self.workspaces
-                    .view(&self.config.theme, self.config.bar.height, self.blink_on)
-                    .map(|action| match action {
-                        WsAction::Switch(name) => Message::SwitchWorkspace(name),
-                        WsAction::Scroll(delta) => Message::WorkspaceScroll(delta),
-                    }),
-            ),
+            // workspaces is a Module now (rendered by key via render_module)
             "window_title" | "title" => Some(text(self.title.clone()).into()),
             "clock" | "time" => Some(text(self.time_str.clone()).into()),
             "calendar" => {
