@@ -180,6 +180,94 @@ impl Default for Border {
     }
 }
 
+/// Separator between items in a zone: a bare hex color, or
+/// `{ color, width?, glyph? }` (RFC 0002). A `glyph` (e.g. `""`, `"|"`) draws
+/// that string instead of a hairline rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Separator {
+    pub color: Color,
+    pub width: f32,
+    pub glyph: Option<String>,
+}
+
+impl Default for Separator {
+    fn default() -> Self {
+        Separator {
+            color: Color::rgba(0.4, 0.4, 0.4, 1.0),
+            width: 1.0,
+            glyph: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Separator {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Hex(String),
+            Table {
+                #[serde(default = "default_sep_color")]
+                color: Color,
+                #[serde(default = "default_sep_width")]
+                width: f32,
+                #[serde(default)]
+                glyph: Option<String>,
+            },
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Hex(s) => Separator {
+                color: Color::parse(&s)
+                    .ok_or_else(|| serde::de::Error::custom(format!("invalid color: {s:?}")))?,
+                ..Separator::default()
+            },
+            Raw::Table {
+                color,
+                width,
+                glyph,
+            } => Separator {
+                color,
+                width,
+                glyph,
+            },
+        })
+    }
+}
+
+fn default_sep_color() -> Color {
+    Separator::default().color
+}
+fn default_sep_width() -> f32 {
+    1.0
+}
+
+/// How the workspace indicator renders (RFC 0003). All four are square.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WsStyle {
+    /// every workspace is a filled square cell (default)
+    #[default]
+    Boxed,
+    /// only the focused workspace is filled; others are plain
+    Filled,
+    /// focused gets a square accent border, no fill
+    Outlined,
+    /// numbers with a 2px accent bar under the focused one
+    Underbar,
+}
+
+impl WsStyle {
+    /// Map to the internal chip-variant id used by the renderer.
+    pub fn variant(self) -> u8 {
+        match self {
+            WsStyle::Filled => 1,
+            WsStyle::Boxed => 2,
+            WsStyle::Outlined => 3,
+            WsStyle::Underbar => 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PopupTheme {
@@ -202,6 +290,7 @@ impl Default for PopupTheme {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceTheme {
+    pub style: WsStyle,
     pub focused: Color,
     pub occupied: Color,
     pub empty: Color,
@@ -213,6 +302,7 @@ pub struct WorkspaceTheme {
 impl Default for WorkspaceTheme {
     fn default() -> Self {
         WorkspaceTheme {
+            style: WsStyle::default(),
             focused: Color::rgba(1.0, 1.0, 1.0, 1.0),
             occupied: Color::rgba(0.55, 0.55, 0.55, 1.0),
             empty: Color::rgba(0.35, 0.35, 0.35, 1.0),
@@ -268,7 +358,7 @@ pub struct Theme {
     pub ok: Color,
     pub warn: Color,
     pub urgent: Color,
-    pub separator: Color,
+    pub separator: Separator,
     pub popup: PopupTheme,
     pub workspaces: WorkspaceTheme,
 }
@@ -301,7 +391,11 @@ impl Default for Theme {
             ok: hex("#a6e3a1"),
             warn: hex("#f9e2af"),
             urgent: hex("#f38ba8"),
-            separator: hex("#585b70"),
+            separator: Separator {
+                color: hex("#585b70"),
+                width: 1.0,
+                glyph: None,
+            },
             popup: PopupTheme::default(),
             workspaces: WorkspaceTheme {
                 focused: hex("#cba6f7"),
@@ -375,7 +469,7 @@ impl Config {
             warn: t.warn.0,
             ok: t.ok.0,
             accent: t.primary.0,
-            sep: t.separator.0,
+            sep: t.separator.color.0,
             text_size: t.font_size,
             bar_height: self.bar.height as u16,
         }
@@ -393,20 +487,216 @@ pub fn path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config/ezbar/config.toml"))
 }
 
-/// Pure: parse a config from a TOML string.
+/// Pure: parse a config from a TOML string (inline `[presets.*]` + `$palette` only;
+/// no file I/O). [`parse_with`] adds drop-in `presets/*.toml` files.
 pub fn parse_str(s: &str) -> Result<Config, String> {
-    toml::from_str(s).map_err(|e| e.to_string())
+    parse_with(s, &HashMap::new(), None)
+}
+
+/// Pure resolution pipeline (RFC 0002): apply the active **preset** (a theme bundle)
+/// under the user's `[theme]`, resolve `$palette` references, then deserialize.
+///
+/// - `preset_files`: name → TOML body for drop-in `presets/<name>.toml`.
+/// - `active`: the preset selected via the state file; overrides `[theme].preset`.
+///
+/// Precedence: built-in defaults < active preset < `[theme]` < per-module overrides.
+pub fn parse_with(
+    s: &str,
+    preset_files: &HashMap<String, String>,
+    active: Option<&str>,
+) -> Result<Config, String> {
+    let mut root: toml::Table = toml::from_str(s).map_err(|e| e.to_string())?;
+
+    // 1. effective [theme] = preset theme (base) <- user [theme] (override)
+    let user_theme = root.remove("theme");
+    let preset_name = active.map(str::to_string).or_else(|| {
+        user_theme
+            .as_ref()
+            .and_then(|t| t.get("preset"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
+
+    let mut theme_tbl = toml::Table::new();
+    if let Some(name) = &preset_name {
+        if let Some(p) = load_preset_table(name, &root, preset_files)? {
+            theme_tbl = p;
+        }
+    }
+    if let Some(toml::Value::Table(ut)) = user_theme {
+        merge_into(&mut theme_tbl, ut);
+    }
+
+    // 2. palette = top-level [palette] (base) <- preset/theme palette (wins)
+    let mut palette = toml::Table::new();
+    if let Some(toml::Value::Table(p)) = root.remove("palette") {
+        merge_into(&mut palette, p);
+    }
+    if let Some(toml::Value::Table(p)) = theme_tbl.remove("palette") {
+        merge_into(&mut palette, p);
+    }
+
+    // 3. resolve `$name` references against the palette (theme + per-module)
+    resolve_refs_table(&mut theme_tbl, &palette)?;
+    if let Some(toml::Value::Table(mods)) = root.get_mut("modules") {
+        resolve_refs_table(mods, &palette)?;
+    }
+
+    theme_tbl.remove("preset"); // not a Theme field
+    root.insert("theme".into(), toml::Value::Table(theme_tbl));
+
+    // `presets`/`preset` left over are unknown to `Config` and ignored by serde.
+    toml::Value::Table(root)
+        .try_into()
+        .map_err(|e: toml::de::Error| e.to_string())
+}
+
+/// Look up a preset by name: a `presets/<name>.toml` file (base) overlaid by an
+/// inline `[presets.<name>]` table (wins). `None` if neither exists.
+fn load_preset_table(
+    name: &str,
+    root: &toml::Table,
+    files: &HashMap<String, String>,
+) -> Result<Option<toml::Table>, String> {
+    let mut t = toml::Table::new();
+    let mut found = false;
+    if let Some(src) = files.get(name) {
+        let ft: toml::Table = toml::from_str(src).map_err(|e| format!("preset {name}: {e}"))?;
+        merge_into(&mut t, ft);
+        found = true;
+    }
+    if let Some(toml::Value::Table(presets)) = root.get("presets") {
+        if let Some(toml::Value::Table(inline)) = presets.get(name) {
+            merge_into(&mut t, inline.clone());
+            found = true;
+        }
+    }
+    Ok(found.then_some(t))
+}
+
+/// Recursively merge `src` into `dst`: tables deep-merge, scalars/arrays overwrite.
+fn merge_into(dst: &mut toml::Table, src: toml::Table) {
+    for (k, sv) in src {
+        let both_tables = matches!(dst.get(&k), Some(toml::Value::Table(_))) && sv.is_table();
+        if both_tables {
+            if let (Some(toml::Value::Table(dt)), toml::Value::Table(st)) = (dst.get_mut(&k), sv) {
+                merge_into(dt, st);
+            }
+        } else {
+            dst.insert(k, sv);
+        }
+    }
+}
+
+/// Replace every `"$name"` string in `tbl` with `palette[name]` (a hex string).
+fn resolve_refs_table(tbl: &mut toml::Table, palette: &toml::Table) -> Result<(), String> {
+    for (_k, v) in tbl.iter_mut() {
+        resolve_refs_value(v, palette)?;
+    }
+    Ok(())
+}
+
+fn resolve_refs_value(v: &mut toml::Value, palette: &toml::Table) -> Result<(), String> {
+    match v {
+        toml::Value::String(s) => {
+            if let Some(name) = s.strip_prefix('$') {
+                // only treat `$word` as a ref; leave odd strings alone
+                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    match palette.get(name) {
+                        Some(toml::Value::String(hex)) => *s = hex.clone(),
+                        Some(other) => {
+                            return Err(format!("$palette ref ${name} is not a string: {other}"))
+                        }
+                        None => return Err(format!("unknown $palette ref: ${name}")),
+                    }
+                }
+            }
+        }
+        toml::Value::Table(t) => resolve_refs_table(t, palette)?,
+        toml::Value::Array(a) => {
+            for e in a.iter_mut() {
+                resolve_refs_value(e, palette)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `<config-dir>/ezbar/presets/`.
+fn presets_dir() -> Option<PathBuf> {
+    path().and_then(|p| p.parent().map(|d| d.join("presets")))
+}
+
+/// Read every `presets/*.toml` into name → contents.
+fn load_preset_files() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    if let Some(dir) = presets_dir() {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("toml") {
+                    continue;
+                }
+                if let (Some(stem), Ok(src)) = (
+                    p.file_stem().and_then(|s| s.to_str()),
+                    std::fs::read_to_string(&p),
+                ) {
+                    m.insert(stem.to_string(), src);
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Sorted names of available drop-in presets (for the switcher).
+pub fn preset_names() -> Vec<String> {
+    let mut names: Vec<String> = load_preset_files().into_keys().collect();
+    names.sort();
+    names
+}
+
+/// `$XDG_STATE_HOME/ezbar/state.toml`, else `~/.local/state/ezbar/state.toml`.
+fn state_path() -> Option<PathBuf> {
+    if let Ok(x) = std::env::var("XDG_STATE_HOME") {
+        if !x.is_empty() {
+            return Some(PathBuf::from(x).join("ezbar/state.toml"));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".local/state/ezbar/state.toml"))
+}
+
+/// The preset the user last selected via the switcher (persisted, not in config).
+pub fn active_preset() -> Option<String> {
+    let s = std::fs::read_to_string(state_path()?).ok()?;
+    let t: toml::Table = toml::from_str(&s).ok()?;
+    t.get("preset").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// Persist the active preset to the state file (never touches `config.toml`).
+pub fn save_active_preset(name: &str) -> std::io::Result<()> {
+    let p = state_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no state path (HOME unset)")
+    })?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(p, format!("preset = {name:?}\n"))
 }
 
 /// Load the config; missing file or parse error falls back to defaults (logged).
 pub fn load() -> Config {
-    match path().and_then(|p| std::fs::read_to_string(p).ok()) {
-        Some(s) => parse_str(&s).unwrap_or_else(|e| {
-            log::warn!("config: {e}; using defaults");
-            Config::default()
-        }),
-        None => Config::default(),
-    }
+    let src = path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let files = load_preset_files();
+    let active = active_preset();
+    parse_with(&src, &files, active.as_deref()).unwrap_or_else(|e| {
+        log::warn!("config: {e}; using defaults");
+        Config::default()
+    })
 }
 
 #[cfg(test)]
@@ -531,5 +821,81 @@ mod tests {
         let named = parse_str("[bar]\noutputs = [\"DP-1\"]").unwrap();
         assert!(named.bar.outputs.matches("DP-1"));
         assert!(!named.bar.outputs.matches("eDP-1"));
+    }
+
+    #[test]
+    fn palette_refs_resolve() {
+        let src = r##"
+            [palette]
+            blue = "#58a6ff"
+            base = "#0d1117"
+            [theme]
+            primary = "$blue"
+            background = { base = "$base" }
+            separator = { color = "$blue", width = 2 }
+        "##;
+        let c = parse_str(src).unwrap();
+        assert_eq!(c.theme.primary, Color::parse("#58a6ff").unwrap());
+        assert_eq!(c.theme.background.base(), Color::parse("#0d1117").unwrap());
+        assert_eq!(c.theme.separator.color, Color::parse("#58a6ff").unwrap());
+        assert_eq!(c.theme.separator.width, 2.0);
+    }
+
+    #[test]
+    fn unknown_palette_ref_errors() {
+        let err = parse_str("[theme]\nprimary = \"$nope\"").unwrap_err();
+        assert!(err.contains("unknown $palette ref: $nope"), "got: {err}");
+    }
+
+    #[test]
+    fn separator_accepts_hex_or_table() {
+        let hex = parse_str("[theme]\nseparator = \"#30363d\"").unwrap();
+        assert_eq!(hex.theme.separator.color, Color::parse("#30363d").unwrap());
+        assert_eq!(hex.theme.separator.glyph, None);
+        let tbl = parse_str("[theme.separator]\nglyph = \"\"\nwidth = 1").unwrap();
+        assert_eq!(tbl.theme.separator.glyph.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn workspace_style_parses() {
+        let c = parse_str("[theme.workspaces]\nstyle = \"outlined\"").unwrap();
+        assert_eq!(c.theme.workspaces.style, WsStyle::Outlined);
+        assert_eq!(c.theme.workspaces.style.variant(), 3);
+        // default is boxed
+        assert_eq!(Config::default().theme.workspaces.style, WsStyle::Boxed);
+    }
+
+    #[test]
+    fn inline_preset_applies_under_user_theme() {
+        // preset sets the base; the user's [theme] overrides one key on top.
+        let src = r##"
+            [theme]
+            preset = "mine"
+            primary = "#cccccc"     # overrides the preset
+
+            [presets.mine]
+            primary = "#aaaaaa"
+            text = "#bbbbbb"
+        "##;
+        let c = parse_str(src).unwrap();
+        assert_eq!(c.theme.primary, Color::parse("#cccccc").unwrap()); // user wins
+        assert_eq!(c.theme.text, Color::parse("#bbbbbb").unwrap()); // from preset
+    }
+
+    #[test]
+    fn file_preset_via_parse_with_and_active_override() {
+        let mut files = HashMap::new();
+        files.insert(
+            "nord".to_string(),
+            "palette = { blue = \"#88c0d0\" }\nprimary = \"$blue\"\nstyle = \"islands\""
+                .to_string(),
+        );
+        // active (state file) selects the preset even with an empty config
+        let c = parse_with("", &files, Some("nord")).unwrap();
+        assert_eq!(c.theme.primary, Color::parse("#88c0d0").unwrap());
+        assert_eq!(c.theme.style, Style::Islands);
+        // `active` overrides [theme].preset
+        let c2 = parse_with("[theme]\npreset = \"other\"", &files, Some("nord")).unwrap();
+        assert_eq!(c2.theme.primary, Color::parse("#88c0d0").unwrap());
     }
 }

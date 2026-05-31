@@ -287,6 +287,11 @@ impl Bar {
         });
         let config = config::load();
         let theme = config.theme_tokens();
+        // Workspace chip style: config drives it; EZBAR_WS_STYLE overrides (dev A/B).
+        let ws_style = std::env::var("EZBAR_WS_STYLE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| config.theme.workspaces.style.variant());
         let bar = Bar {
             bar_id,
             popup: None,
@@ -329,10 +334,7 @@ impl Bar {
             cursor_x: 0.0,
             config,
             theme,
-            ws_style: std::env::var("EZBAR_WS_STYLE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(2),
+            ws_style,
         };
         // Dev/screenshot hook: open a popup on startup for deterministic capture.
         if let Ok(k) = std::env::var("EZBAR_OPEN_POPUP") {
@@ -535,6 +537,10 @@ impl Bar {
                 log::info!("config reloaded");
                 self.config = cfg;
                 self.theme = self.config.theme_tokens();
+                // EZBAR_WS_STYLE (dev) still wins; otherwise follow the reloaded config.
+                if std::env::var("EZBAR_WS_STYLE").is_err() {
+                    self.ws_style = self.config.theme.workspaces.style.variant();
+                }
                 Task::none()
             }
             Message::ConfigReloaded(Err(e)) => {
