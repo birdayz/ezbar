@@ -11,7 +11,7 @@ use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::history::History;
 use crate::sources::system;
-use crate::widgets::graph::{Graph, GraphKind};
+use ezbar_plugin::ui::graph::{Graph, GraphKind};
 
 enum Msg {
     Data(String),

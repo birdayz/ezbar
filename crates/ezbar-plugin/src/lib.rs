@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 pub use iced;
 
+pub mod ui;
+
 /// Async helpers re-exported so modules need no direct `tokio` dependency. They
 /// run on the host's executor (the bar and the harness both drive iced on tokio),
 /// so call them inside a [`Subscription`] recipe or a `Task` returned from `update`.
@@ -53,6 +55,9 @@ pub struct ThemeTokens {
     pub ok: [f32; 4],
     pub accent: [f32; 4],
     pub sep: [f32; 4],
+    /// the bar's background base — so a chip's dark-text-on-fill, or a canvas, can
+    /// match the bar (a module shouldn't have to guess the surface colour).
+    pub bg: [f32; 4],
     pub text_size: f32,
     pub bar_height: u16,
 }
@@ -93,6 +98,10 @@ impl Ctx<'_> {
     }
     pub fn sep(&self) -> iced::Color {
         ThemeTokens::color(self.theme.sep)
+    }
+    /// the bar background base (for dark-text-on-fill, canvases matching the bar).
+    pub fn bg(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.bg)
     }
 }
 

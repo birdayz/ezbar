@@ -37,6 +37,7 @@ pub const DEFAULT_THEME: ThemeTokens = ThemeTokens {
     ok: [0.2, 0.8, 0.2, 1.0],
     accent: [0.345, 0.65, 1.0, 1.0],
     sep: [0.4, 0.4, 0.4, 1.0],
+    bg: [0.05, 0.05, 0.07, 1.0],
     text_size: 14.0,
     bar_height: 34,
 };

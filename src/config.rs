@@ -525,6 +525,7 @@ impl Config {
             ok: t.ok.0,
             accent: t.primary.0,
             sep: t.separator.color.0,
+            bg: t.background.base().0,
             text_size: t.font_size,
             bar_height: self.bar.height as u16,
         }

@@ -16,8 +16,8 @@ use ezbar::history::History;
 use ezbar::modules;
 use ezbar::sources::sway::SwayUpdate;
 use ezbar::sources::{battery, calendar, kubectl, ping, spotify, stock, sway, system, volume};
-use ezbar::widgets::graph::{Graph, GraphKind, StockChart};
 use ezbar::widgets::workspaces::{WorkspacesView, WsAction};
+use ezbar_plugin::ui::graph::{Graph, GraphKind, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
 mod install;
