@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{SinkExt, Stream};
-use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
 use iced::{event, window, Background, Border, Color, Element, Length, Subscription, Task};
 use iced_layershell::build_pattern::daemon;
 use iced_layershell::reexport::{
@@ -13,8 +13,7 @@ use iced_layershell::to_layer_message;
 
 use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::modules;
-use ezbar::sources::{calendar, kubectl, spotify, stock, volume};
-use ezbar_plugin::ui::graph::StockChart;
+use ezbar::sources::volume;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
 mod install;
@@ -160,9 +159,8 @@ fn run_bar() -> iced_layershell::Result {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopupKind {
-    Calendar,
-    Kubectl,
-    Stock,
+    /// the ▾ preset switcher — the only host-owned popup; module popups (calendar,
+    /// stock, kubectl) go through the module-popup path (`HostRequest::OpenPopup`).
     Switcher,
 }
 
@@ -171,21 +169,6 @@ struct Bar {
     popup: Option<(window::Id, PopupKind)>,
     module_popup: Option<(window::Id, u64, PopupMode)>,
     modules: Vec<ModuleEntry>,
-
-    // remaining host widgets (kubectl/calendar/stock/spotify still inline)
-    kubectl: kubectl::KubectlData,
-    kubectl_contexts: Vec<String>,
-
-    // network widgets
-    calendar: calendar::CalendarData,
-    stock: stock::StockData,
-    stock_symbol: String,
-    stock_chart: Vec<f64>,
-    spotify: spotify::SpotifyData,
-
-    // animation / polish state
-    blink_on: bool,
-    spotify_offset: usize,
 
     // popup anchoring: last cursor x over the bar, so a popup opens above the
     // widget the user interacted with (RFC 0001 slot-derived).
@@ -217,23 +200,11 @@ fn focused_output_width() -> u32 {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
-    Kubectl(kubectl::KubectlData),
-    KubectlContexts(Vec<String>),
-    Calendar(calendar::CalendarData),
-    Stock(stock::StockData),
-    StockChart(Vec<f64>),
-    Spotify(spotify::SpotifyData),
-
     VolumeAdjust(i32), // IPC volume keybind path (0 = mute, ±1 = change)
-    KubectlClear,
-    KubectlSelect(String),
-    SpotifyClick,
-    SpotifyScroll(bool),
     SelectPreset(String),
     Ipc(String),
     OpenPopup(PopupKind),
     ClosePopup,
-    BlinkTick,
     ConfigReloaded(Result<Config, String>),
     WindowClosed(window::Id),
     Cursor(window::Id, f32),
@@ -277,9 +248,6 @@ fn bar_settings(cfg: &Config) -> NewLayerShellSettings {
 
 fn popup_size(kind: PopupKind) -> (u32, u32) {
     match kind {
-        PopupKind::Calendar => (380, 320),
-        PopupKind::Kubectl => (320, 360),
-        PopupKind::Stock => (520, 300),
         PopupKind::Switcher => (220, 280),
     }
 }
@@ -382,9 +350,6 @@ fn build_modules(config: &Config) -> Vec<ModuleEntry> {
 
 fn parse_popup_kind(s: &str) -> Option<PopupKind> {
     match s {
-        "calendar" => Some(PopupKind::Calendar),
-        "kubectl" => Some(PopupKind::Kubectl),
-        "stock" => Some(PopupKind::Stock),
         "switcher" | "theme" => Some(PopupKind::Switcher),
         _ => None,
     }
@@ -450,17 +415,6 @@ fn popup_layer_settings(
     }
 }
 
-fn load_kubectl_contexts() -> Task<Message> {
-    Task::perform(
-        async {
-            tokio::task::spawn_blocking(kubectl::get_all_contexts)
-                .await
-                .unwrap_or_default()
-        },
-        Message::KubectlContexts,
-    )
-}
-
 impl Bar {
     fn new() -> (Self, Task<Message>) {
         let bar_id = window::Id::unique();
@@ -475,37 +429,16 @@ impl Bar {
             popup: None,
             module_popup: None,
             modules: build_modules(&config),
-            kubectl: kubectl::KubectlData::default(),
-            kubectl_contexts: Vec::new(),
-            calendar: calendar::CalendarData {
-                display_text: " …".to_string(),
-                ..Default::default()
-            },
-            stock: stock::StockData {
-                display_text: " …".to_string(),
-                ..Default::default()
-            },
-            stock_symbol: stock::config().0,
-            stock_chart: Vec::new(),
-            spotify: spotify::SpotifyData::default(),
-            blink_on: true,
-            spotify_offset: 0,
             cursor_x: 0.0,
             config,
             theme,
             screen_w: focused_output_width(),
         };
-        // Dev/screenshot hook: open a popup on startup for deterministic capture.
-        if let Ok(k) = std::env::var("EZBAR_OPEN_POPUP") {
-            let kind = match k.as_str() {
-                "kubectl" => PopupKind::Kubectl,
-                "stock" => PopupKind::Stock,
-                "switcher" => PopupKind::Switcher,
-                _ => PopupKind::Calendar,
-            };
+        // Dev/screenshot hook: open the switcher popup on startup for capture.
+        if std::env::var("EZBAR_OPEN_POPUP").is_ok() {
             return (
                 bar,
-                Task::batch([open, Task::done(Message::OpenPopup(kind))]),
+                Task::batch([open, Task::done(Message::OpenPopup(PopupKind::Switcher))]),
             );
         }
         (bar, open)
@@ -517,30 +450,6 @@ impl Bar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Kubectl(d) => {
-                self.kubectl = d;
-                Task::none()
-            }
-            Message::KubectlContexts(v) => {
-                self.kubectl_contexts = v;
-                Task::none()
-            }
-            Message::Calendar(d) => {
-                self.calendar = d;
-                Task::none()
-            }
-            Message::Stock(d) => {
-                self.stock = d;
-                Task::none()
-            }
-            Message::StockChart(v) => {
-                self.stock_chart = v;
-                Task::none()
-            }
-            Message::Spotify(d) => {
-                self.spotify = d;
-                Task::none()
-            }
             Message::VolumeAdjust(dir) => Task::perform(
                 async move {
                     let _ = tokio::task::spawn_blocking(move || {
@@ -553,54 +462,6 @@ impl Bar {
                     .await;
                 },
                 |()| Message::Noop,
-            ),
-            Message::KubectlClear => Task::perform(
-                async {
-                    tokio::task::spawn_blocking(|| {
-                        kubectl::clear_context();
-                        kubectl::update_context()
-                    })
-                    .await
-                    .unwrap_or_default()
-                },
-                Message::Kubectl,
-            ),
-            Message::KubectlSelect(ctx) => {
-                let close = self.close_popup_task();
-                let set = Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            kubectl::set_context(&ctx);
-                            kubectl::update_context()
-                        })
-                        .await
-                        .unwrap_or_default()
-                    },
-                    Message::Kubectl,
-                );
-                Task::batch([close, set])
-            }
-            Message::SpotifyClick => {
-                let needs_auth = self.spotify.needs_auth;
-                let is_playing = self.spotify.is_playing;
-                Task::perform(
-                    async move {
-                        if needs_auth {
-                            let _ = tokio::task::spawn_blocking(spotify::authorize).await;
-                        } else {
-                            spotify::toggle_playback(is_playing).await;
-                        }
-                        spotify::poll().await
-                    },
-                    Message::Spotify,
-                )
-            }
-            Message::SpotifyScroll(next) => Task::perform(
-                async move {
-                    spotify::skip(next).await;
-                    spotify::poll().await
-                },
-                Message::Spotify,
             ),
             Message::SelectPreset(name) => {
                 // Persist the choice (state file, never config.toml), then reload so
@@ -625,19 +486,13 @@ impl Bar {
                     let close = iced::window::close(pid);
                     let (id, open) = self.open_popup(kind);
                     self.popup = Some((id, kind));
-                    return Task::batch([close_mod, close, open, self.popup_extra(kind)]);
+                    return Task::batch([close_mod, close, open]);
                 }
                 let (id, open) = self.open_popup(kind);
                 self.popup = Some((id, kind));
-                Task::batch([close_mod, open, self.popup_extra(kind)])
+                Task::batch([close_mod, open])
             }
             Message::ClosePopup => self.close_popup_task(),
-            Message::BlinkTick => {
-                self.blink_on = !self.blink_on;
-                // drive the spotify marquee scroll (was piggybacking on the clock tick)
-                self.spotify_offset = self.spotify_offset.wrapping_add(1);
-                Task::none()
-            }
             Message::ConfigReloaded(Ok(cfg)) => {
                 log::info!("config reloaded");
                 self.apply_config(cfg);
@@ -835,21 +690,6 @@ impl Bar {
         }
     }
 
-    /// Side-effect task to run when a popup opens (load contexts / fetch chart).
-    fn popup_extra(&self, kind: PopupKind) -> Task<Message> {
-        match kind {
-            PopupKind::Kubectl => load_kubectl_contexts(),
-            PopupKind::Stock => {
-                let sym = self.stock_symbol.clone();
-                Task::perform(
-                    async move { stock::fetch_chart(&sym).await },
-                    Message::StockChart,
-                )
-            }
-            _ => Task::none(),
-        }
-    }
-
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if id == self.bar_id {
             return self.bar_view();
@@ -922,87 +762,9 @@ impl Bar {
     /// it's not a host widget (then it's a module, rendered by key) or has nothing to
     /// show (e.g. `battery` on a desktop).
     fn render_widget(&self, id: &str) -> Option<Element<'_, Message>> {
+        // Only the ▾ switcher is host chrome now; everything placeable is a Module.
         match id {
-            // workspaces is a Module now (rendered by key via render_module)
-            // window_title is a Module now (rendered by key)
-            // clock is a Module now (rendered by key)
-            "calendar" => {
-                let c = &self.calendar;
-                let base = if c.is_overdue {
-                    Color::from_rgb(1.0, 0.27, 0.27)
-                } else if c.is_urgent {
-                    Color::from_rgb(1.0, 0.67, 0.0)
-                } else {
-                    Color::WHITE
-                };
-                let blinking = c.is_overdue || c.is_urgent;
-                let color = if blinking && !self.blink_on {
-                    Color { a: 0.4, ..base }
-                } else {
-                    base
-                };
-                let mut cal: Vec<Element<Message>> = vec![
-                    text("").into(),
-                    text(c.display_text.clone()).color(color).into(),
-                ];
-                if !c.time_until_next.is_empty() {
-                    cal.push(text(format!("[{}]", c.time_until_next)).color(color).into());
-                }
-                Some(
-                    mouse_area(row(cal).spacing(4).align_y(Vertical::Center))
-                        .on_press(Message::OpenPopup(PopupKind::Calendar))
-                        .into(),
-                )
-            }
-            "kubectl" => {
-                let kube_color = if self.kubectl.is_production {
-                    Color::from_rgb(1.0, 0.2, 0.2)
-                } else {
-                    Color::WHITE
-                };
-                Some(
-                    mouse_area(text(self.kubectl.string.clone()).color(kube_color))
-                        .on_press(Message::KubectlClear)
-                        .on_right_press(Message::OpenPopup(PopupKind::Kubectl))
-                        .into(),
-                )
-            }
-            // cpu/memory/temperature/ping are Modules now (rendered by key)
-            "spotify" => Some(
-                mouse_area(text(marquee(
-                    &self.spotify.track_string,
-                    self.spotify_offset,
-                    40,
-                )))
-                .on_press(Message::SpotifyClick)
-                .on_scroll(|delta| {
-                    let y = match delta {
-                        iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                        iced::mouse::ScrollDelta::Pixels { y, .. } => y,
-                    };
-                    Message::SpotifyScroll(y > 0.0)
-                })
-                .into(),
-            ),
-            "stock" => {
-                let s = &self.stock;
-                let color = if s.is_positive && s.change != 0.0 {
-                    Color::from_rgb(0.2, 0.8, 0.2)
-                } else if s.is_negative {
-                    Color::from_rgb(1.0, 0.3, 0.3)
-                } else {
-                    Color::WHITE
-                };
-                Some(
-                    mouse_area(text(s.display_text.clone()).color(color))
-                        .on_enter(Message::OpenPopup(PopupKind::Stock))
-                        .on_exit(Message::ClosePopup)
-                        .into(),
-                )
-            }
-            // volume + battery are Modules now (rendered by key)
             "switcher" => Some(self.switcher_button()),
-            // not a host widget → it's a module, rendered by key in build_zone
             _ => None,
         }
     }
@@ -1129,9 +891,6 @@ impl Bar {
 
     fn popup_view(&self, kind: PopupKind) -> Element<'_, Message> {
         let body: Element<Message> = match kind {
-            PopupKind::Calendar => self.calendar_popup(),
-            PopupKind::Kubectl => self.kubectl_popup(),
-            PopupKind::Stock => self.stock_popup(),
             PopupKind::Switcher => self.switcher_popup(),
         };
         container(body)
@@ -1140,67 +899,6 @@ impl Bar {
             .padding(12)
             .style(self.popup_style())
             .into()
-    }
-
-    fn calendar_popup(&self) -> Element<'_, Message> {
-        let mut col: Vec<Element<Message>> = vec![text("Today's Meetings").size(15).into()];
-        let now = chrono::Local::now();
-        let mut any = false;
-        // all-day first, then timed
-        for ev in self.calendar.today_events.iter().filter(|e| e.is_all_day) {
-            col.push(calendar_row("All day", &ev.title, Color::WHITE));
-            any = true;
-        }
-        for ev in self.calendar.today_events.iter().filter(|e| !e.is_all_day) {
-            let color = if now > ev.end {
-                Color::from_rgb(0.4, 0.4, 0.4)
-            } else if now > ev.start {
-                Color::from_rgb(0.0, 1.0, 0.0)
-            } else if (ev.start - now) <= chrono::Duration::minutes(15) {
-                Color::from_rgb(1.0, 0.67, 0.0)
-            } else {
-                Color::WHITE
-            };
-            col.push(calendar_row(
-                &ev.start.format("%H:%M").to_string(),
-                &ev.title,
-                color,
-            ));
-            any = true;
-        }
-        if !any {
-            col.push(text("No meetings today").into());
-        }
-        scrollable(column(col).spacing(6)).into()
-    }
-
-    fn kubectl_popup(&self) -> Element<'_, Message> {
-        let mut col: Vec<Element<Message>> = vec![text("Kubectl Context").size(15).into()];
-        if self.kubectl_contexts.is_empty() {
-            col.push(
-                text("(no contexts)")
-                    .color(Color::from_rgb(0.5, 0.5, 0.5))
-                    .into(),
-            );
-        }
-        for ctx in &self.kubectl_contexts {
-            let is_current = *ctx == self.kubectl.context;
-            let is_prod = kubectl::is_production_context(ctx);
-            let color = if is_prod {
-                Color::from_rgb(1.0, 0.4, 0.4)
-            } else if is_current {
-                Color::from_rgb(0.4, 0.9, 0.4)
-            } else {
-                Color::WHITE
-            };
-            let marker = if is_current { "▸ " } else { "  " };
-            col.push(
-                mouse_area(text(format!("{marker}{ctx}")).color(color))
-                    .on_press(Message::KubectlSelect(ctx.clone()))
-                    .into(),
-            );
-        }
-        scrollable(column(col).spacing(4)).into()
     }
 
     fn switcher_popup(&self) -> Element<'_, Message> {
@@ -1250,16 +948,6 @@ impl Bar {
             );
         }
         scrollable(column(col).spacing(2)).into()
-    }
-
-    fn stock_popup(&self) -> Element<'_, Message> {
-        canvas(StockChart {
-            values: self.stock_chart.clone(),
-            symbol: self.stock_symbol.clone(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
     }
 
     /// Adopt a freshly-loaded config: re-resolve theme, and rebuild the live module
@@ -1346,11 +1034,6 @@ impl Bar {
         let mut subs = vec![
             Subscription::run(config_stream),
             Subscription::run(ipc_stream),
-            Subscription::run(kubectl_stream),
-            Subscription::run(calendar_stream),
-            Subscription::run(stock_stream),
-            Subscription::run(spotify_stream),
-            iced::time::every(Duration::from_millis(500)).map(|_| Message::BlinkTick),
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
@@ -1379,39 +1062,6 @@ impl Bar {
         }
         Subscription::batch(subs)
     }
-}
-
-fn calendar_row<'a>(time: &str, title: &str, color: Color) -> Element<'a, Message> {
-    row![
-        text(time.to_string())
-            .color(color)
-            .width(Length::Fixed(60.0)),
-        text(truncate(title, 40)).color(color).width(Length::Fill),
-    ]
-    .spacing(8)
-    .into()
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_len {
-        return s.to_string();
-    }
-    let mut out: String = chars[..max_len.saturating_sub(2)].iter().collect();
-    out.push_str("..");
-    out
-}
-
-/// Rotating marquee window over `s` (with trailing padding) when it exceeds `max_len`.
-fn marquee(s: &str, offset: usize, max_len: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_len {
-        return s.to_string();
-    }
-    let padded: Vec<char> = s.chars().chain("    ".chars()).collect();
-    let n = padded.len();
-    let start = offset % n;
-    (0..max_len).map(|i| padded[(start + i) % n]).collect()
 }
 
 // ---- subscription streams (one per data source) ----
@@ -1474,100 +1124,4 @@ fn config_stream() -> impl Stream<Item = Message> {
             drop(watcher);
         },
     )
-}
-
-fn kubectl_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let d = tokio::task::spawn_blocking(kubectl::update_context)
-                    .await
-                    .unwrap_or_default();
-                let _ = output.send(Message::Kubectl(d)).await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        },
-    )
-}
-
-fn calendar_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                match calendar::get_events().await {
-                    Ok(d) => {
-                        let _ = output.send(Message::Calendar(d)).await;
-                    }
-                    Err(e) => {
-                        log::warn!("calendar: {e}");
-                        let _ = output
-                            .send(Message::Calendar(calendar::CalendarData {
-                                display_text: "Setup: ~/.config/ezbar/calendar_url".to_string(),
-                                ..Default::default()
-                            }))
-                            .await;
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
-        },
-    )
-}
-
-fn stock_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let (symbol, api_key) = stock::config();
-            loop {
-                match stock::fetch(&symbol, &api_key).await {
-                    Ok(d) => {
-                        let _ = output.send(Message::Stock(d)).await;
-                    }
-                    Err(e) => log::warn!("stock: {e}"),
-                }
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
-        },
-    )
-}
-
-fn spotify_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let d = spotify::poll().await;
-                let _ = output.send(Message::Spotify(d)).await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        },
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_ellipsizes() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("abcdefghij", 10), "abcdefghij");
-        assert_eq!(truncate("abcdefghijk", 5), "abc..");
-    }
-
-    #[test]
-    fn marquee_short_unchanged() {
-        assert_eq!(marquee("hello", 0, 10), "hello");
-        assert_eq!(marquee("hello", 99, 10), "hello");
-    }
-
-    #[test]
-    fn marquee_long_rotates() {
-        let s = "0123456789ABCDEF"; // 16 > 10
-        assert_eq!(marquee(s, 0, 10), "0123456789");
-        assert_eq!(marquee(s, 1, 10), "123456789A");
-    }
 }

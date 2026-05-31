@@ -1,6 +1,7 @@
 //! Compile-in modules implementing `ezbar_plugin::Module` (RFC 0001, phase 1).
 
 pub mod battery;
+pub mod calendar;
 pub mod claude;
 pub mod clock;
 pub mod cpu;
@@ -9,9 +10,12 @@ pub mod disk;
 pub mod github;
 pub mod ip;
 pub mod keyboard;
+pub mod kubectl;
 pub mod memory;
 pub mod net;
 pub mod ping;
+pub mod spotify;
+pub mod stock;
 pub mod temperature;
 pub mod updates;
 pub mod volume;
@@ -42,6 +46,10 @@ pub fn is_module(id: &str) -> bool {
             | "clock"
             | "volume"
             | "battery"
+            | "calendar"
+            | "kubectl"
+            | "stock"
+            | "spotify"
     )
 }
 
@@ -67,6 +75,10 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "clock" => Some(Box::new(clock::Clock::new(instance, cfg))),
         "volume" => Some(Box::new(volume::Volume::new(instance))),
         "battery" => Some(Box::new(battery::Battery::new(instance))),
+        "calendar" => Some(Box::new(calendar::Calendar::new(instance))),
+        "kubectl" => Some(Box::new(kubectl::Kubectl::new(instance))),
+        "stock" => Some(Box::new(stock::Stock::new(instance))),
+        "spotify" => Some(Box::new(spotify::Spotify::new(instance))),
         _ => None,
     }
 }
