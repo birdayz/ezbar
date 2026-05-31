@@ -18,6 +18,8 @@ use ezbar::sources::{battery, calendar, kubectl, ping, spotify, stock, sway, sys
 use ezbar::widgets::graph::{Graph, GraphKind, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
+mod install;
+
 const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
 
@@ -55,6 +57,33 @@ impl ModuleEntry {
 fn main() -> iced_layershell::Result {
     env_logger::init();
 
+    match std::env::args().nth(1).as_deref() {
+        Some("install") => {
+            match install::run() {
+                Ok(msg) => println!("{msg}"),
+                Err(e) => {
+                    eprintln!("ezbar: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some("--version" | "-V" | "version") => {
+            println!("ezbar {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help" | "-h" | "help") => {
+            print_help();
+            return Ok(());
+        }
+        Some(other) => {
+            eprintln!("ezbar: unknown command '{other}'\n");
+            print_help();
+            std::process::exit(2);
+        }
+        None => {}
+    }
+
     // Launcher: re-spawn the bar child forever (restart on crash / monitor change),
     // unless we ARE the child. A short backoff avoids hot-spinning (improves on the Go original).
     if std::env::var("EZBAR_CHILD").as_deref() != Ok("1") {
@@ -73,6 +102,18 @@ fn main() -> iced_layershell::Result {
     }
 
     run_bar()
+}
+
+fn print_help() {
+    println!(
+        "ezbar — a status bar for sway\n\n\
+         USAGE:\n    \
+         ezbar              run the bar (default)\n    \
+         ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
+         ezbar --version    print the version\n    \
+         ezbar --help       print this help\n\n\
+         EZBAR_CHILD=1 ezbar   run a single foreground instance (no respawn)"
+    );
 }
 
 fn run_bar() -> iced_layershell::Result {

@@ -39,10 +39,12 @@ cargo build --release        # -> target/release/ezbar
 ./target/release/ezbar
 ```
 
-Add it to your Sway config:
+Add it to your Sway config — `ezbar install` does this for you (idempotent, and
+it never edits or removes an existing line; it backs up the config and appends
+one `exec_always`), or add it by hand:
 
 ```
-exec /path/to/ezbar
+exec_always /path/to/ezbar
 ```
 
 `ezbar` is a thin launcher: it respawns the bar if the output disappears (monitor
