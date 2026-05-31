@@ -160,31 +160,31 @@ machinery.
 
 ## Default appearance (what 90% see)
 
-Zero-config must look **designed**, not "today's emoji bar". This is the **actual
-running default** (sway, wgpu/Vulkan), not a mockup:
+Zero-config must look **designed**, not "today's emoji bar". The default is **lilac
+islands** — square panels floating over the wallpaper, dark base, flieder/lilac accent.
+The **actual running default** (sway, wgpu/Vulkan), not a mockup — workspaces island +
+the right cluster:
 
-![default bar](assets/default-bar.png)
+![default bar — lilac islands](assets/default-bar.png)
 
-- `style = solid`, ezbar's own dark palette (`#0d1117` bg, `#58a6ff` primary,
-  `#3fb950/#d29922/#f85149` ok/warn/urgent), hairline `separator`, the icon font (no
-  emoji), and **GPU sparklines** filled under the line (red cpu, orange temp above).
+- `style = islands`, ezbar's own dark+lilac palette (`#1e1e2e` base, `#cba6f7` lilac
+  primary, `#a6e3a1/#f9e2af/#f38ba8` ok/warn/urgent), square `[theme.workspaces]`
+  chips, the icon font (no emoji), and **GPU sparklines** filled under the line. Square
+  — radius is a hair (4), not a pill; deliberately not ashell's rounded islands.
 - Default modules on: `workspaces · title │ cpu mem temp(graphs) · ping · clock ·
   volume battery`. Dev widgets (github/stock/claude/kubectl/calendar/spotify) ship but
   are **opt-in** in config (they need tokens/setup); the capture shows them enabled.
-- Re-theming is one preset away and **live** — same bar, Catppuccin Mocha, hot-
-  reloaded with no restart:
+- The look is a token swap away: `style = "solid"` gives the flat **noir** slab, and
+  any palette re-skins **live** with no restart:
 
+  ![islands vs solid](assets/islands.png)
+
+- Because theming is a token layer, any palette round-trips — same chrome, different
+  scheme (Mocha and Gruvbox shown, from the shipped `presets/`), and a live `[theme]`
+  hot-swap (default → Mocha, no restart):
+
+  ![palette round-trip](assets/palettes.png)
   ![theme hot-swap](assets/theme-swap.png)
-
-`style = "islands"` flips the look to **floating square panels** over the wallpaper —
-ours stay square/flat, deliberately not ashell's rounded pills (real capture):
-
-![islands mode](assets/islands.png)
-
-And because theming is a token layer, any palette round-trips — same chrome, different
-scheme (Mocha and Gruvbox shown, from the shipped `presets/`):
-
-![palette round-trip](assets/palettes.png)
 
 ## Part 2 — Built-in catalog
 

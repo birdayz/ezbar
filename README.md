@@ -4,6 +4,12 @@ A status bar for [Sway](https://swaywm.org). GPU-rendered with
 [iced](https://iced.rs) on `wlr-layer-shell` — no GTK, no config DSL, no IPC.
 Widgets are just Rust.
 
+![ezbar — lilac islands (default)](assets/hero.png)
+
+*The default look: **lilac islands** — square panels floating over your wallpaper,
+filled GPU sparklines, a dark base. Square, not rounded; dark, not busy. Drop in a
+[preset](#theme-it) to reskin the whole thing in seconds.*
+
 Workspaces, focused-window title, clock, CPU / temperature / memory / ping
 graphs, volume, battery, GitHub notifications, Google Calendar, Spotify, kubectl
 context, a stock ticker, and a live Claude-usage widget. Clicking, scrolling and
@@ -66,6 +72,26 @@ config just stays quiet. Nothing is hardcoded; no secrets ship in the binary.
 | Spotify  | `spotify_config.json` (`client_id`, `client_secret`); or `$SPOTIFY_ACCESS_TOKEN` |
 | Stock    | `$EZBAR_STOCK_SYMBOL` (default `NQ=F`), `$EZBAR_STOCK_API_KEY` (optional) |
 | Ping     | target hardcoded to `8.8.8.8` |
+
+## Theme it
+
+Theming is **live** — edit `[theme]` in `~/.config/ezbar/config.toml` and the bar
+re-skins instantly, no restart:
+
+```toml
+[theme]
+style   = "islands"   # islands (default, floating square panels) | solid (one slab)
+primary = "#cba6f7"   # the accent — workspace chip, graphs, highlights
+background = { base = "#1e1e2e", weak = "#313244", strong = "#45475a" }
+text = "#cdd6f4"; ok = "#a6e3a1"; warn = "#f9e2af"; urgent = "#f38ba8"
+```
+
+Six ready palettes ship in [`presets/`](presets/) — `ezbar-dark` (the lilac-islands
+default), `noir` (the original flat black slab), `catppuccin-mocha`, `gruvbox-dark`,
+`nord`, `tokyo-night`. The full design — a drop-in preset folder, a `[palette]`
+variable layer, an on-bar `▾` switcher, and `ezbar msg` — is
+[RFC 0002](rfcs/0002-config.md). Workspace chips come in four square styles
+(`boxed` · `filled` · `outlined` · `underbar`).
 
 ## Interactions
 

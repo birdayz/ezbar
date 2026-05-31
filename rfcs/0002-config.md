@@ -45,28 +45,27 @@ beat ashell's configurability and looks, on sway, our own square/dark/flat way.
 
 Captures of the running bar (sway, wgpu/Vulkan, JetBrainsMono Nerd Font).
 
-**Zero-config default** — flat, square, dark `#0d1117`; Nerd glyphs; GPU sparklines
-(red cpu, orange temp) inline with the values. No emoji, no rounded chrome:
+**Zero-config default** — **lilac islands**: square panels floating over the wallpaper,
+dark `#1e1e2e` base, flieder/lilac `#cba6f7` accent; Nerd glyphs; GPU sparklines inline.
+No emoji, no rounded pills (workspaces island + the right cluster):
 
-![default bar](assets/default-bar.png)
+![default bar — lilac islands](assets/default-bar.png)
 
-**Live preset swap** — the *same running bar* re-themed to Catppuccin Mocha by a
-~9-line `[theme]` override, applied by hot-reload with **no restart** (background,
-separators, text recolor; semantic graph colors are pinned by default — see
-`[modules.<id>.graph]`):
+**Islands vs solid** — `style` flips the whole look; `solid` (the `noir` preset) is one
+flat slab with hairline separators, `islands` floats square panels over the wallpaper:
+
+![islands vs solid](assets/islands.png)
+
+**Live theme swap** — the *same running bar* re-themed to Catppuccin Mocha by a ~9-line
+`[theme]` override, applied by hot-reload with **no restart** (background, separators,
+text recolor; semantic graph colors are pinned by default — see `[modules.<id>.graph]`):
 
 ![theme hot-swap](assets/theme-swap.png)
 
 **Workspace chips** — square, state-filled (focused = solid accent square), four
-selectable styles via `[theme.workspaces].style`, uniform cell width (real captures,
-Mocha palette):
+selectable styles via `[theme.workspaces].style`, uniform cell width (real captures):
 
 ![workspace chip styles](assets/workspaces.png)
-
-**Islands** — `style = "islands"` floats each zone as a **square** panel over the
-wallpaper (transparent surface), our flat take on islands (not ashell's rounded pills):
-
-![islands mode](assets/islands.png)
 
 > These are captures of the **current implementation** (config parsing, theme
 > hot-reload, square chips, islands, GPU graphs all run today). The **preset
@@ -83,9 +82,10 @@ switcher, without copying their identity.
 
 Study their source for *technique*; implement our **own**. No ashell code, assets,
 fonts, or default palette is copied. We **deliberately differ**: default style is
-ezbar's flat `solid` (islands opt-in); default palette is ezbar's own; placement and
-options are co-located; identity leans on **GPU graphs** and **square chips**, plus a
-**preset switcher** ashell lacks. Where a choice is just good engineering (tonal
+ezbar's **square** islands (a hair of radius, not ashell's rounded pills) with a
+flieder/lilac accent; `solid` is one toggle away; default palette is ezbar's own;
+placement and options are co-located; identity leans on **GPU graphs** and **square
+chips**, plus a **preset switcher** ashell lacks. Where a choice is just good engineering (tonal
 palette, file-watch reload, width-state workspaces) we adopt the *idea*, our way. We
 do **not** claim the semantic-color schema as ours — it's convergent with ashell and
 iced's `palette`.

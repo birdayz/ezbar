@@ -334,6 +334,18 @@ impl Bar {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(2),
         };
+        // Dev/screenshot hook: open a popup on startup for deterministic capture.
+        if let Ok(k) = std::env::var("EZBAR_OPEN_POPUP") {
+            let kind = match k.as_str() {
+                "kubectl" => PopupKind::Kubectl,
+                "stock" => PopupKind::Stock,
+                _ => PopupKind::Calendar,
+            };
+            return (
+                bar,
+                Task::batch([open, Task::done(Message::OpenPopup(kind))]),
+            );
+        }
         (bar, open)
     }
 

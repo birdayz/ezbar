@@ -274,27 +274,39 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// ezbar's default identity: a flat, **square**, dark bar — deliberately not
-    /// ashell's rounded islands. Square corners, dark background, white text.
+    /// ezbar's default identity: **lilac islands** — square floating panels over a
+    /// dark, near-black base, with a flieder/lilac accent. Still square (radius is a
+    /// hair, not a pill) and dark — deliberately not ashell's rounded islands.
     fn default() -> Self {
+        let hex = |s: &str| Color::parse(s).expect("valid default hex");
         Theme {
-            style: Style::Solid,
-            opacity: 0.85,
+            style: Style::Islands,
+            opacity: 0.97,
             font_size: 14.0,
             spacing: 6.0,
             padding: 6.0,
-            radius: Radius::Uniform(0.0), // square, not rounded
-            border: Border::default(),
-            background: Background::Solid(Color::rgba(0.0, 0.0, 0.0, 1.0)),
-            text: Color::rgba(1.0, 1.0, 1.0, 1.0),
-            dim: Color::rgba(0.7, 0.7, 0.7, 1.0),
-            primary: Color::rgba(0.345, 0.65, 1.0, 1.0),
-            ok: Color::rgba(0.2, 0.8, 0.2, 1.0),
-            warn: Color::rgba(1.0, 0.67, 0.0, 1.0),
-            urgent: Color::rgba(1.0, 0.2, 0.2, 1.0),
-            separator: Color::rgba(0.4, 0.4, 0.4, 1.0),
+            radius: Radius::Uniform(4.0), // near-square; islands need a hair of corner
+            border: Border {
+                width: 1.0,
+                color: hex("#ffffff20"),
+            },
+            background: Background::Tonal {
+                base: hex("#1e1e2e"),
+                weak: Some(hex("#313244")),
+                strong: Some(hex("#45475a")),
+            },
+            text: hex("#cdd6f4"),
+            dim: hex("#a6adc8"),
+            primary: hex("#cba6f7"), // flieder / lilac — the signature accent
+            ok: hex("#a6e3a1"),
+            warn: hex("#f9e2af"),
+            urgent: hex("#f38ba8"),
+            separator: hex("#585b70"),
             popup: PopupTheme::default(),
-            workspaces: WorkspaceTheme::default(),
+            workspaces: WorkspaceTheme {
+                focused: hex("#cba6f7"),
+                ..WorkspaceTheme::default()
+            },
         }
     }
 }
@@ -420,12 +432,13 @@ mod tests {
     fn empty_config_is_defaults() {
         let c = parse_str("").unwrap();
         assert_eq!(c.bar.height, 34);
-        assert_eq!(c.theme.style, Style::Solid);
+        // default identity: lilac islands
+        assert_eq!(c.theme.style, Style::Islands);
         assert!(c.left.is_empty());
-        // theme tokens reproduce the current bar
+        // theme tokens reproduce the default bar (dark base, flieder/lilac accent)
         let t = c.theme_tokens();
-        assert_eq!(t.fg, [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(t.accent, [0.345, 0.65, 1.0, 1.0]);
+        assert_eq!(t.fg, Color::parse("#cdd6f4").unwrap().0);
+        assert_eq!(t.accent, Color::parse("#cba6f7").unwrap().0);
         assert_eq!(t.bar_height, 34);
         assert_eq!(t.text_size, 14.0);
     }

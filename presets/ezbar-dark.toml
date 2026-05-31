@@ -1,24 +1,21 @@
-# ezbar-dark — the default identity: flat, square, dark.
-# A preset is a theme-only bundle. Drop into ~/.config/ezbar/presets/ and pick it
-# from the ▾ switcher, or set `[theme] preset = "ezbar-dark"`.
+# ezbar-dark — the default identity: LILAC ISLANDS.
+# Square floating panels over a dark base, with a flieder/lilac accent.
+# This is what zero-config gives you; it ships as the built-in default.
 
-palette = { base = "#0d1117", surface = "#161b22", over = "#21262d",
-            text = "#e6edf3", muted = "#7d8590",
-            blue = "#58a6ff", green = "#3fb950", yellow = "#d29922", red = "#f85149" }
+palette = { base = "#1e1e2e", surface = "#313244", over = "#45475a",
+            text = "#cdd6f4", muted = "#a6adc8",
+            lilac = "#cba6f7", green = "#a6e3a1", yellow = "#f9e2af",
+            red = "#f38ba8", grey = "#585b70" }
 
-style = "solid"
-opacity = 0.85
-radius = 0                       # square
+style = "islands"                 # floating square panels
+opacity = 0.97
+radius = 4                        # a hair of corner; still square, not a pill
+border = { width = 1, color = "#ffffff20" }
 background = { base = "$base", weak = "$surface", strong = "$over" }
 text = "$text"; dim = "$muted"
-primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
-separator = { color = "$over", width = 1 }
-
-[popup]
-opacity = 0.92
-backdrop = 0.0
-radius = 0
+primary = "$lilac"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+separator = { color = "$grey", width = 1 }
 
 [workspaces]
 style = "boxed"
-focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"
+focused = "$lilac"; occupied = "$muted"; empty = "$over"; urgent = "$red"
