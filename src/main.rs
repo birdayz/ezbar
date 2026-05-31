@@ -292,7 +292,7 @@ impl Bar {
                 ModuleEntry::new(2, Box::new(modules::github::GitHub::new(2))),
                 ModuleEntry::new(3, Box::new(modules::claude::Claude::new(3))),
             ],
-            mem_str: " --".to_string(),
+            mem_str: " --".to_string(),
             temp_str: " --".to_string(),
             ping: ping::PingData::default(),
             time_str: "Loading…".to_string(),
@@ -1203,7 +1203,7 @@ fn mem_stream() -> impl Stream<Item = Message> {
             loop {
                 let s = tokio::task::spawn_blocking(system::get_memory_usage)
                     .await
-                    .unwrap_or_else(|_| " --".to_string());
+                    .unwrap_or_else(|_| " --".to_string());
                 let _ = output.send(Message::Mem(s)).await;
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }

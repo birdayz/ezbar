@@ -109,6 +109,24 @@ fn stroke_segment(frame: &mut Frame, a: Point, b: Point, color: Color) {
     frame.stroke(&path, Stroke::default().with_width(1.5).with_color(color));
 }
 
+/// Fill the area under a polyline (low alpha) so a sparkline reads as a filled
+/// area chart — ezbar's graph-forward look.
+fn fill_under(frame: &mut Frame, points: &[(f32, f32)], h: f32, color: Color) {
+    if points.len() < 2 {
+        return;
+    }
+    let fill = Color { a: 0.16, ..color };
+    let path = Path::new(|p| {
+        p.move_to(Point::new(points[0].0, h));
+        for &(x, y) in points {
+            p.line_to(Point::new(x, y));
+        }
+        p.line_to(Point::new(points[points.len() - 1].0, h));
+        p.close();
+    });
+    frame.fill(&path, fill);
+}
+
 impl Graph {
     fn draw_fixed(
         &self,
@@ -124,18 +142,27 @@ impl Graph {
             return;
         }
         let n = values.len();
-        let mut prev: Option<(f32, f32, f64)> = None;
-        for (i, &val) in values.iter().enumerate() {
-            if val < 0.0 {
-                continue;
-            }
-            let x = i as f32 * w / (n as f32 - 1.0).max(1.0);
-            let y = h - (((val - min) / (max - min)) as f32) * h;
-            if let Some((px, py, pv)) = prev {
-                let seg = if pv > val { pv } else { val };
-                stroke_segment(frame, Point::new(px, py), Point::new(x, y), color(seg));
-            }
-            prev = Some((x, y, val));
+        let pts: Vec<(f32, f32, f64)> = values
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v >= 0.0)
+            .map(|(i, &v)| {
+                let x = i as f32 * w / (n as f32 - 1.0).max(1.0);
+                let y = h - (((v - min) / (max - min)) as f32) * h;
+                (x, y, v)
+            })
+            .collect();
+        if pts.is_empty() {
+            return;
+        }
+        let max_val = pts.iter().map(|p| p.2).fold(min, f64::max);
+        let xy: Vec<(f32, f32)> = pts.iter().map(|p| (p.0, p.1)).collect();
+        fill_under(frame, &xy, h, color(max_val));
+        for seg in pts.windows(2) {
+            let (px, py, pv) = seg[0];
+            let (x, y, v) = seg[1];
+            let c = color(if pv > v { pv } else { v });
+            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
         }
     }
 
@@ -146,22 +173,27 @@ impl Graph {
             None => return,
         };
         let n = temps.len();
-        let mut prev: Option<(f32, f32, f64)> = None;
-        for (i, &t) in temps.iter().enumerate() {
-            if t > 0.0 {
+        let pts: Vec<(f32, f32, f64)> = temps
+            .iter()
+            .enumerate()
+            .filter(|(_, &t)| t > 0.0)
+            .map(|(i, &t)| {
                 let x = i as f32 * w / (n as f32 - 1.0).max(1.0);
                 let y = h - (((t - min_t) / (max_t - min_t)) as f32) * h;
-                if let Some((px, py, pt)) = prev {
-                    let seg = if pt > t { pt } else { t };
-                    stroke_segment(
-                        frame,
-                        Point::new(px, py),
-                        Point::new(x, y),
-                        temperature_color(seg),
-                    );
-                }
-                prev = Some((x, y, t));
-            }
+                (x, y, t)
+            })
+            .collect();
+        if pts.is_empty() {
+            return;
+        }
+        let max_t_val = pts.iter().map(|p| p.2).fold(min_t, f64::max);
+        let xy: Vec<(f32, f32)> = pts.iter().map(|p| (p.0, p.1)).collect();
+        fill_under(frame, &xy, h, temperature_color(max_t_val));
+        for seg in pts.windows(2) {
+            let (px, py, pt) = seg[0];
+            let (x, y, t) = seg[1];
+            let c = temperature_color(if pt > t { pt } else { t });
+            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
         }
     }
 

@@ -70,11 +70,11 @@ fn cpu_usage_percent(c1: &[i64; 4], c2: &[i64; 4]) -> i64 {
     100 - (idle * 100) / total
 }
 
-/// Returns the memory usage display string, e.g. " 8.2GB/16.0GB".
+/// Returns the memory usage display string, e.g. " 8.2GB/16.0GB".
 pub fn get_memory_usage() -> String {
     let meminfo = match fs::read_to_string("/proc/meminfo") {
         Ok(s) => s,
-        Err(_) => return " --".to_string(),
+        Err(_) => return " --".to_string(),
     };
     let mut mem_total: i64 = 0;
     let mut mem_available: i64 = 0;
@@ -90,13 +90,13 @@ pub fn get_memory_usage() -> String {
         }
     }
     if mem_total == 0 {
-        return " --".to_string();
+        return " --".to_string();
     }
     let mem_used = mem_total - mem_available;
     let used_bytes = (mem_used * 1024) as u64;
     let total_bytes = (mem_total * 1024) as u64;
     format!(
-        " {}/{}",
+        " {}/{}",
         humanize_with_decimals(used_bytes),
         humanize_with_decimals(total_bytes)
     )
@@ -220,7 +220,7 @@ fn parse_memory_size(size: &str) -> f64 {
     0.0
 }
 
-/// Extracts the memory usage percentage from a string like " 8.2GB/16.0GB".
+/// Extracts the memory usage percentage from a string like " 8.2GB/16.0GB".
 pub fn extract_memory_usage_value(s: &str) -> f64 {
     for part in s.split(' ') {
         if part.contains('/') {
@@ -297,9 +297,9 @@ mod tests {
         assert_eq!(extract_temperature_value(" 45°C"), 45.0);
         assert_eq!(extract_temperature_value(" --"), 0.0);
 
-        let mem = extract_memory_usage_value(" 8.0GB/16.0GB");
+        let mem = extract_memory_usage_value(" 8.0GB/16.0GB");
         assert!((mem - 50.0).abs() < 0.001, "got {mem}");
-        assert_eq!(extract_memory_usage_value(" --"), 0.0);
+        assert_eq!(extract_memory_usage_value(" --"), 0.0);
     }
 
     #[test]
