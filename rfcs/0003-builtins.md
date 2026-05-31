@@ -186,6 +186,12 @@ the right cluster:
   ![palette round-trip](assets/palettes.png)
   ![theme hot-swap](assets/theme-swap.png)
 
+- Popups are **real layer-shell surfaces**, not overlays — a dark square `popup_frame`
+  (`[theme.popup]`). The stock popup carries the graph-forward identity into the detail
+  surface with a GPU 7-day chart:
+
+  ![stock popup](assets/popup.png)
+
 ## Part 2 — Built-in catalog
 
 Every entry is an RFC 0001 `Module`, placed/configured via RFC 0002.

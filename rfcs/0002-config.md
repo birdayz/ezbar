@@ -67,10 +67,17 @@ selectable styles via `[theme.workspaces].style`, uniform cell width (real captu
 
 ![workspace chip styles](assets/workspaces.png)
 
+**Popup detail surface** — a real layer-shell surface styled by `[theme.popup]` (dark,
+square, hairline border), opaque even when the bar is translucent; the stock popup's
+GPU 7-day chart shown:
+
+![stock popup](assets/popup.png)
+
 > These are captures of the **current implementation** (config parsing, theme
-> hot-reload, square chips, islands, GPU graphs all run today). The **preset
-> switcher `▾`**, `[palette]` `$ref` resolution, and `ezbar msg` are the *proposed*
-> additions this RFC specifies; they're built on the proven hot-reload path above.
+> hot-reload, square chips, islands, GPU graphs, and layer-shell popups all run
+> today). The **preset switcher `▾`**, `[palette]` `$ref` resolution, and `ezbar msg`
+> are the *proposed* additions this RFC specifies; they're built on the proven
+> hot-reload path above.
 
 ## Motivation
 
