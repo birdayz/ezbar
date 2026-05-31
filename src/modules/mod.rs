@@ -3,7 +3,12 @@
 pub mod claude;
 pub mod cpu;
 pub mod custom;
+pub mod disk;
 pub mod github;
+pub mod ip;
+pub mod keyboard;
+pub mod net;
+pub mod updates;
 
 use ezbar_plugin::Module;
 
@@ -16,6 +21,11 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "github" => Some(Box::new(github::GitHub::new(instance))),
         "claude" => Some(Box::new(claude::Claude::new(instance))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
+        "disk" => Some(Box::new(disk::Disk::new(instance, cfg))),
+        "net" => Some(Box::new(net::Net::new(instance, cfg))),
+        "ip" => Some(Box::new(ip::Ip::new(instance, cfg))),
+        "updates" => Some(Box::new(updates::Updates::new(instance, cfg))),
+        "keyboard" => Some(Box::new(keyboard::Keyboard::new(instance, cfg))),
         _ => None,
     }
 }

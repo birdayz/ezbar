@@ -200,6 +200,14 @@ Every entry is an RFC 0001 `Module`, placed/configured via RFC 0002.
 
 ### Tier A — bar modules (no D-Bus; land first)
 
+> **Shipped (phase 2):** `cpu` `memory` `temperature` `ping` (GPU graphs),
+> `workspaces` (square chips), `clock`, `disk`, `net` (throughput), `ip`, `updates`
+> (count + click-to-update), `keyboard` (layout + click-to-switch), and `custom` —
+> all built by the RFC 0001 `modules::build()` factory and placed via RFC 0002
+> `left/center/right`. Remaining: clock **weather**, sway **submap**, and `custom`'s
+> streaming `listen_cmd` / regex-icon / alert dot.
+
+
 | module | origin | does | popup |
 |---|---|---|---|
 | workspaces | have→**chips** | sway ws as **square state-chips** (§1e), 4 styles, click-switch, urgent blink; **special/scratchpad**, **visibility modes**, **scroll pixel-accumulator** are follow-ups | — |
