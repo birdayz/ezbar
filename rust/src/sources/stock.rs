@@ -160,3 +160,34 @@ async fn fetch_alphavantage(symbol: &str, api_key: &str) -> Result<StockData, St
         .unwrap_or(0.0);
     Ok(format_stock(symbol, price, change, cp))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_positive() {
+        let d = format_stock("NQ=F", 100.0, 5.0, 5.26);
+        assert!(d.is_positive && !d.is_negative);
+        assert_eq!(d.trend_emoji, "📈");
+        assert_eq!(d.price_string, "$100.00");
+        assert_eq!(d.change_string, "+5.00 (5.26%)");
+        assert_eq!(d.display_text, "📈 NQ=F: $100.00 +5.00 (5.26%)");
+    }
+
+    #[test]
+    fn format_negative() {
+        let d = format_stock("AAPL", 50.0, -2.5, -4.76);
+        assert!(!d.is_positive && d.is_negative);
+        assert_eq!(d.trend_emoji, "📉");
+        assert_eq!(d.change_string, "-2.50 (-4.76%)");
+        assert_eq!(d.display_text, "📉 AAPL: $50.00 -2.50 (-4.76%)");
+    }
+
+    #[test]
+    fn zero_change_counts_as_positive() {
+        let d = format_stock("X", 10.0, 0.0, 0.0);
+        assert!(d.is_positive);
+        assert_eq!(d.change_string, "+0.00 (0.00%)");
+    }
+}

@@ -17,16 +17,16 @@ pub fn get_battery_status() -> String {
         Err(_) => return "🔋 --".to_string(),
     };
 
-    let icon = match status.as_str() {
-        "Charging" => "⚡",
-        "Not charging" => "🔌",
-        "Discharging" => "🔋",
-        "Full" => "🔌",
-        _ => "🔋",
-    };
-
     let time_str = get_time_remaining(&status);
-    format!("{} {}% [{}]", icon, capacity, time_str)
+    format!("{} {}% [{}]", battery_icon(&status), capacity, time_str)
+}
+
+fn battery_icon(status: &str) -> &'static str {
+    match status {
+        "Charging" => "⚡",
+        "Not charging" | "Full" => "🔌",
+        _ => "🔋",
+    }
 }
 
 fn read_f64(path: &str) -> Option<f64> {
@@ -56,6 +56,11 @@ fn get_time_remaining(status: &str) -> String {
         _ => return "--".to_string(),
     };
 
+    format_time_remaining(hours)
+}
+
+/// Formats a remaining-time (in hours) as "Xm" or "XhYm"; "--" if negative.
+fn format_time_remaining(hours: f64) -> String {
     let total_minutes = (hours * 60.0) as i64;
     if total_minutes < 0 {
         return "--".to_string();
@@ -66,5 +71,28 @@ fn get_time_remaining(status: &str) -> String {
         format!("{}m", m)
     } else {
         format!("{}h{}m", h, m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_time() {
+        assert_eq!(format_time_remaining(0.5), "30m");
+        assert_eq!(format_time_remaining(2.5), "2h30m");
+        assert_eq!(format_time_remaining(1.0), "1h0m");
+        assert_eq!(format_time_remaining(0.0), "0m");
+        assert_eq!(format_time_remaining(-1.0), "--");
+    }
+
+    #[test]
+    fn icons() {
+        assert_eq!(battery_icon("Charging"), "⚡");
+        assert_eq!(battery_icon("Discharging"), "🔋");
+        assert_eq!(battery_icon("Full"), "🔌");
+        assert_eq!(battery_icon("Not charging"), "🔌");
+        assert_eq!(battery_icon("weird"), "🔋");
     }
 }

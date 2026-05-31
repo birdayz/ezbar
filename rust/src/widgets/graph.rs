@@ -66,6 +66,41 @@ fn ping_color(v: f64) -> Color {
     }
 }
 
+/// Temperature graph y-range: skips unfilled (0) slots, and centers a flat/near-
+/// flat reading (±5°) so a constant temperature still draws a visible line (the
+/// old code returned nothing when max_t == min_t); otherwise pads the range 10%.
+/// Returns None when there is no valid sample.
+fn temp_range(temps: &[f64]) -> Option<(f64, f64)> {
+    if temps.is_empty() {
+        return None;
+    }
+    let mut min_t = temps[0];
+    let mut max_t = temps[0];
+    let mut valid = 0;
+    for &t in temps {
+        if t > 0.0 {
+            if t < min_t || min_t == 0.0 {
+                min_t = t;
+            }
+            if t > max_t {
+                max_t = t;
+            }
+            valid += 1;
+        }
+    }
+    if valid == 0 {
+        return None;
+    }
+    let range = max_t - min_t;
+    if range < 10.0 {
+        let center = (min_t + max_t) / 2.0;
+        Some((center - 5.0, center + 5.0))
+    } else {
+        let padding = range * 0.1;
+        Some((min_t - padding, max_t + padding))
+    }
+}
+
 fn stroke_segment(frame: &mut Frame, a: Point, b: Point, color: Color) {
     let path = Path::new(|p| {
         p.move_to(a);
@@ -101,39 +136,10 @@ impl Graph {
 
     fn draw_temperature(&self, frame: &mut Frame, w: f32, h: f32) {
         let temps = &self.values;
-        if temps.is_empty() {
-            return;
-        }
-        let mut min_t = temps[0];
-        let mut max_t = temps[0];
-        let mut valid = 0;
-        for &t in temps {
-            if t > 0.0 {
-                if t < min_t || min_t == 0.0 {
-                    min_t = t;
-                }
-                if t > max_t {
-                    max_t = t;
-                }
-                valid += 1;
-            }
-        }
-        if valid == 0 {
-            return;
-        }
-        // Center a flat/near-flat reading so a constant temperature still draws
-        // a visible line (instead of an empty graph when max_t == min_t).
-        let range = max_t - min_t;
-        if range < 10.0 {
-            let center = (min_t + max_t) / 2.0;
-            min_t = center - 5.0;
-            max_t = center + 5.0;
-        } else {
-            let padding = range * 0.1;
-            min_t -= padding;
-            max_t += padding;
-        }
-
+        let (min_t, max_t) = match temp_range(temps) {
+            Some(r) => r,
+            None => return,
+        };
         let n = temps.len();
         let mut prev: Option<(f32, f32, f64)> = None;
         for (i, &t) in temps.iter().enumerate() {
@@ -359,5 +365,38 @@ impl<Message> canvas::Program<Message> for StockChart {
         ));
 
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temp_range_constant_reading_centers() {
+        // regression: a constant temperature used to draw nothing (max_t == min_t)
+        assert_eq!(temp_range(&[17.0, 17.0, 17.0]), Some((12.0, 22.0)));
+    }
+
+    #[test]
+    fn temp_range_skips_zeros_and_pads() {
+        let (lo, hi) = temp_range(&[0.0, 0.0, 40.0, 60.0]).unwrap();
+        assert!((lo - 38.0).abs() < 1e-9 && (hi - 62.0).abs() < 1e-9, "got {lo}..{hi}");
+    }
+
+    #[test]
+    fn temp_range_none_without_valid_samples() {
+        assert_eq!(temp_range(&[0.0, 0.0]), None);
+        assert_eq!(temp_range(&[]), None);
+    }
+
+    #[test]
+    fn colors_by_threshold() {
+        assert_eq!(cpu_color(10.0), Color::from_rgb(0.2, 0.8, 0.2));
+        assert_eq!(cpu_color(40.0), Color::from_rgb(1.0, 1.0, 0.0));
+        assert_eq!(cpu_color(60.0), Color::from_rgb(1.0, 0.6, 0.0));
+        assert_eq!(cpu_color(90.0), Color::from_rgb(1.0, 0.2, 0.2));
+        assert_eq!(ping_color(10.0), Color::from_rgb(0.2, 0.8, 0.2));
+        assert_eq!(ping_color(150.0), Color::from_rgb(1.0, 0.2, 0.2));
     }
 }

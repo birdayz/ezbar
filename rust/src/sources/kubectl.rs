@@ -77,3 +77,18 @@ pub fn clear_context() {
         .args(["config", "unset", "current-context"])
         .status();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_detection() {
+        assert!(is_production_context("prod-cluster"));
+        assert!(is_production_context("my-PROD-eu"));
+        assert!(is_production_context("acme-prd-1"));
+        assert!(!is_production_context("staging"));
+        assert!(!is_production_context("dev-local"));
+        assert!(!is_production_context("--"));
+    }
+}

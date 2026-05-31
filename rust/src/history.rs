@@ -28,3 +28,22 @@ impl History {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_buffer_orders_oldest_first_and_wraps() {
+        let mut h = History::new(3);
+        assert_eq!(h.ordered(), vec![0.0, 0.0, 0.0]);
+        h.add(1.0);
+        h.add(2.0);
+        h.add(3.0);
+        assert_eq!(h.ordered(), vec![1.0, 2.0, 3.0]);
+        h.add(4.0); // wraps, oldest dropped
+        assert_eq!(h.ordered(), vec![2.0, 3.0, 4.0]);
+        h.add(5.0);
+        assert_eq!(h.ordered(), vec![3.0, 4.0, 5.0]);
+    }
+}

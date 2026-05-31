@@ -9,18 +9,12 @@ use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerSh
 use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 
-mod history;
-mod modules;
-mod sources;
-mod widgets;
-
+use ezbar::history::History;
+use ezbar::modules;
+use ezbar::sources::sway::{SwayUpdate, Workspace};
+use ezbar::sources::{battery, calendar, kubectl, ping, spotify, stock, sway, system, volume};
+use ezbar::widgets::graph::{Graph, GraphKind, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
-use history::History;
-use sources::sway::{SwayUpdate, Workspace};
-use sources::{
-    battery, calendar, kubectl, ping, spotify, stock, sway, system, volume,
-};
-use widgets::graph::{Graph, GraphKind, StockChart};
 
 const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
@@ -1154,3 +1148,28 @@ fn spotify_stream() -> impl Stream<Item = Message> {
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ellipsizes() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("abcdefghij", 10), "abcdefghij");
+        assert_eq!(truncate("abcdefghijk", 5), "abc..");
+    }
+
+    #[test]
+    fn marquee_short_unchanged() {
+        assert_eq!(marquee("hello", 0, 10), "hello");
+        assert_eq!(marquee("hello", 99, 10), "hello");
+    }
+
+    #[test]
+    fn marquee_long_rotates() {
+        let s = "0123456789ABCDEF"; // 16 > 10
+        assert_eq!(marquee(s, 0, 10), "0123456789");
+        assert_eq!(marquee(s, 1, 10), "123456789A");
+    }
+}

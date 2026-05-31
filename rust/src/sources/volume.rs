@@ -23,25 +23,27 @@ impl Default for VolumeData {
 
 pub fn update_volume() -> VolumeData {
     let (volume, is_muted) = get_volume_info();
-    let string = if is_muted {
-        "🔇 --%".to_string()
-    } else {
-        let icon = if volume == 0 {
-            "🔇"
-        } else if volume < 33 {
-            "🔈"
-        } else if volume < 66 {
-            "🔉"
-        } else {
-            "🔊"
-        };
-        format!("{} {}%", icon, volume)
-    };
     VolumeData {
         volume,
-        string,
+        string: format_volume(volume, is_muted),
         is_muted,
     }
+}
+
+fn format_volume(volume: i32, is_muted: bool) -> String {
+    if is_muted {
+        return "🔇 --%".to_string();
+    }
+    let icon = if volume == 0 {
+        "🔇"
+    } else if volume < 33 {
+        "🔈"
+    } else if volume < 66 {
+        "🔉"
+    } else {
+        "🔊"
+    };
+    format!("{} {}%", icon, volume)
 }
 
 fn get_volume_info() -> (i32, bool) {
@@ -132,5 +134,19 @@ pub fn change_volume(direction: i32) {
             format!("{}%-", -change)
         };
         let _ = Command::new("amixer").args(["set", "Master", &alsa_dir]).status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_by_level() {
+        assert_eq!(format_volume(0, false), "🔇 0%");
+        assert_eq!(format_volume(20, false), "🔈 20%");
+        assert_eq!(format_volume(50, false), "🔉 50%");
+        assert_eq!(format_volume(80, false), "🔊 80%");
+        assert_eq!(format_volume(50, true), "🔇 --%");
     }
 }

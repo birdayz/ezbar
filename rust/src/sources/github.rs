@@ -320,3 +320,82 @@ pub fn time_ago(t: DateTime<Utc>) -> String {
         format!("{}d", d.num_hours() / 24)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_url_to_html() {
+        assert_eq!(
+            api_to_html("https://api.github.com/repos/o/r/pulls/5", "PullRequest"),
+            "https://github.com/o/r/pull/5"
+        );
+        assert_eq!(
+            api_to_html("https://api.github.com/repos/o/r/issues/3", "Issue"),
+            "https://github.com/o/r/issues/3"
+        );
+        assert_eq!(api_to_html("", "Issue"), "");
+    }
+
+    #[test]
+    fn reason_names() {
+        assert_eq!(reason_display_name("review_requested"), "Review Requested");
+        assert_eq!(reason_display_name("mention"), "Mentioned");
+        assert_eq!(reason_display_name("weird_unknown"), "weird_unknown");
+    }
+
+    #[test]
+    fn time_ago_buckets() {
+        assert_eq!(time_ago(Utc::now()), "now");
+        assert_eq!(time_ago(Utc::now() - chrono::Duration::minutes(5)), "5m");
+        assert_eq!(time_ago(Utc::now() - chrono::Duration::hours(3)), "3h");
+        assert_eq!(time_ago(Utc::now() - chrono::Duration::days(2)), "2d");
+    }
+
+    fn notif(id: &str, reason: &str, repo: &str, unread: bool) -> GitHubNotification {
+        GitHubNotification {
+            id: id.into(),
+            reason: reason.into(),
+            title: "t".into(),
+            type_: "Issue".into(),
+            repo_name: repo.into(),
+            html_url: String::new(),
+            updated_at: Utc::now(),
+            unread,
+        }
+    }
+
+    #[test]
+    fn filter_unread_allowed_reasons_excludes_repos() {
+        let gh = GitHub {
+            token: String::new(),
+            config: GitHubConfig {
+                reasons: vec!["review_requested".into()],
+                exclude_repos: vec!["o/skip".into()],
+            },
+            last_modified: None,
+            poll_interval: 60,
+        };
+        let out = gh.filter(vec![
+            notif("a", "review_requested", "o/keep", true),  // kept
+            notif("b", "review_requested", "o/keep", false), // dropped: read
+            notif("c", "mention", "o/keep", true),           // dropped: reason
+            notif("d", "review_requested", "o/skip", true),  // dropped: excluded repo
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "a");
+    }
+
+    #[test]
+    fn empty_reasons_allows_any_reason() {
+        let gh = GitHub {
+            token: String::new(),
+            config: GitHubConfig { reasons: vec![], exclude_repos: vec![] },
+            last_modified: None,
+            poll_interval: 60,
+        };
+        let out = gh.filter(vec![notif("a", "anything", "o/r", true)]);
+        assert_eq!(out.len(), 1);
+    }
+}

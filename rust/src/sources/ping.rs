@@ -55,3 +55,27 @@ pub fn extract_ping_latency(output: &str) -> Option<f64> {
     let caps = re.captures(output)?;
     caps.get(1)?.as_str().trim().parse::<f64>().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_latency_from_ping_output() {
+        assert_eq!(
+            extract_ping_latency("64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=12.3 ms"),
+            Some(12.3)
+        );
+        assert_eq!(extract_ping_latency("time=1.05ms"), Some(1.05));
+        assert_eq!(extract_ping_latency("time=0 ms"), Some(0.0));
+        assert_eq!(extract_ping_latency("no latency here"), None);
+        assert_eq!(extract_ping_latency(""), None);
+    }
+
+    #[test]
+    fn default_is_down() {
+        let d = PingData::default();
+        assert!(!d.is_up);
+        assert_eq!(d.string, "🏓 --");
+    }
+}

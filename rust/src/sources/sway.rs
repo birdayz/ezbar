@@ -143,3 +143,31 @@ fn focused_name(node: &Node) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sorts_numerically_not_lexically() {
+        let mut ws = vec![
+            Workspace { name: "10".into(), focused: false },
+            Workspace { name: "2".into(), focused: false },
+            Workspace { name: "1".into(), focused: true },
+        ];
+        sort_workspaces(&mut ws);
+        let names: Vec<&str> = ws.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["1", "2", "10"]);
+    }
+
+    #[test]
+    fn named_workspaces_sort_as_strings() {
+        let mut ws = vec![
+            Workspace { name: "web".into(), focused: false },
+            Workspace { name: "code".into(), focused: false },
+        ];
+        sort_workspaces(&mut ws);
+        let names: Vec<&str> = ws.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["code", "web"]);
+    }
+}

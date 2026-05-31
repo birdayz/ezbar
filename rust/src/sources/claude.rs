@@ -129,6 +129,11 @@ pub async fn block() -> Option<Block> {
         return None;
     }
     let v: Value = serde_json::from_slice(&output.stdout).ok()?;
+    parse_block(&v)
+}
+
+/// Parses the active 5-hour block out of `ccusage blocks --active --json`.
+fn parse_block(v: &Value) -> Option<Block> {
     let b = v["blocks"]
         .as_array()?
         .iter()
@@ -148,6 +153,11 @@ pub fn limits() -> Option<Limits> {
     let home = std::env::var("HOME").ok()?;
     let data = fs::read_to_string(format!("{home}/.claude/ezbar-status.json")).ok()?;
     let v: Value = serde_json::from_str(&data).ok()?;
+    parse_limits(&v)
+}
+
+/// Parses account rate limits out of the Claude Code statusline JSON.
+fn parse_limits(v: &Value) -> Option<Limits> {
     let rl = &v["rate_limits"];
     if rl.is_null() {
         return None;
@@ -160,4 +170,56 @@ pub fn limits() -> Option<Limits> {
         weekly_left: week_used.map(|u| 100.0 - u),
         weekly_reset: rl["seven_day"]["resets_at"].as_i64().map(unix_date).unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_block_picks_active() {
+        let v = json!({
+            "blocks": [
+                { "isActive": false, "costUSD": 1.0 },
+                { "isActive": true, "costUSD": 246.65,
+                  "burnRate": { "costPerHour": 77.5 },
+                  "projection": { "remainingMinutes": 92, "totalCost": 365.0 },
+                  "models": ["claude-opus-4-8"],
+                  "endTime": "2026-05-31T03:00:00.000Z" }
+            ]
+        });
+        let b = parse_block(&v).unwrap();
+        assert!((b.cost - 246.65).abs() < 1e-9);
+        assert!((b.burn_per_hour - 77.5).abs() < 1e-9);
+        assert_eq!(b.minutes_left, 92);
+        assert!((b.projected_cost - 365.0).abs() < 1e-9);
+        assert_eq!(b.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn parse_block_none_without_active() {
+        assert!(parse_block(&json!({ "blocks": [ { "isActive": false } ] })).is_none());
+        assert!(parse_block(&json!({})).is_none());
+    }
+
+    #[test]
+    fn parse_limits_percentages() {
+        let v = json!({
+            "rate_limits": {
+                "five_hour": { "used_percentage": 11, "resets_at": 1780205400 },
+                "seven_day": { "used_percentage": 18, "resets_at": 1780689600 }
+            }
+        });
+        let l = parse_limits(&v).unwrap();
+        assert_eq!(l.five_h_left, Some(89.0));
+        assert_eq!(l.weekly_left, Some(82.0));
+        assert!(!l.five_h_reset.is_empty());
+        assert!(!l.weekly_reset.is_empty());
+    }
+
+    #[test]
+    fn parse_limits_none_without_rate_limits() {
+        assert!(parse_limits(&json!({})).is_none());
+    }
 }

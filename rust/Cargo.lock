@@ -941,6 +941,7 @@ dependencies = [
  "base64",
  "chrono",
  "env_logger",
+ "ezbar-harness",
  "ezbar-plugin",
  "ical",
  "iced",
@@ -951,6 +952,15 @@ dependencies = [
  "serde",
  "serde_json",
  "swayipc",
+ "tokio",
+]
+
+[[package]]
+name = "ezbar-harness"
+version = "0.1.0"
+dependencies = [
+ "ezbar-plugin",
+ "iced",
  "tokio",
 ]
 

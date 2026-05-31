@@ -5,10 +5,11 @@ edition = "2021"
 description = "ezbar — a simple statusbar for sway, rendered with iced on wlr-layer-shell"
 
 [workspace]
-members = ["crates/ezbar-plugin"]
+members = ["crates/ezbar-plugin", "crates/ezbar-harness"]
 
 [dependencies]
 ezbar-plugin = { path = "crates/ezbar-plugin" }
+ezbar-harness = { path = "crates/ezbar-harness" }
 iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
 iced_layershell = "0.18"
 tokio = { version = "1", features = ["full"] }
