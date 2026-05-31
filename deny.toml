@@ -10,6 +10,8 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# our workspace-internal crates are path deps with no version — that's fine
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
