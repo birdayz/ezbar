@@ -9,7 +9,4 @@ ezbar-plugin = { path = "../ezbar-plugin" }
 # iced is re-exported through ezbar-plugin (guaranteed same version as modules);
 # we depend on it directly only to name the executor/feature set.
 iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
-
-[dev-dependencies]
-# the runnable example plugin (`examples/counter.rs`) ticks on a tokio timer
-tokio = { version = "1", features = ["rt", "time", "macros"] }
+# (the example plugin needs no direct deps — it uses ezbar_plugin::task helpers)

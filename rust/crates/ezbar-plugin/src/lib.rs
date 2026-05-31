@@ -11,6 +11,14 @@ use std::sync::Arc;
 
 pub use iced;
 
+/// Async helpers re-exported so modules need no direct `tokio` dependency. They
+/// run on the host's executor (the bar and the harness both drive iced on tokio),
+/// so call them inside a [`Subscription`] recipe or a `Task` returned from `update`.
+pub mod task {
+    pub use tokio::task::spawn_blocking;
+    pub use tokio::time::sleep;
+}
+
 /// Type-erased intra-module message. Modules define their own message enums;
 /// the host never names or inspects them. `Arc` supplies the `Clone` iced needs;
 /// `Debug` is a placeholder so the host `Message` can still derive `Debug`.
@@ -59,6 +67,33 @@ impl ThemeTokens {
 pub struct Ctx<'a> {
     pub instance_id: u64,
     pub theme: &'a ThemeTokens,
+}
+
+impl Ctx<'_> {
+    /// Theme colors as ready-to-use `iced::Color`s — the ergonomic, discoverable
+    /// way to color your widgets (they autocomplete under `ctx.`). For raw tokens
+    /// use `ctx.theme` directly (it is a `&ThemeTokens`, and `ThemeTokens: Copy`).
+    pub fn fg(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.fg)
+    }
+    pub fn fg_dim(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.fg_dim)
+    }
+    pub fn urgent(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.urgent)
+    }
+    pub fn warn(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.warn)
+    }
+    pub fn ok(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.ok)
+    }
+    pub fn accent(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.accent)
+    }
+    pub fn sep(&self) -> iced::Color {
+        ThemeTokens::color(self.theme.sep)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
