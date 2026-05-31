@@ -135,13 +135,15 @@ preset = "tokyo-night"     # the default preset on launch (optional)
 
 # inline preset (same shape as a presets/*.toml file, just nested under [presets.<name>]):
 [presets.tokyo-night]
-palette = { bg = "#1a1b26", surface = "#1f2335", over = "#24283b",
-            fg = "#c0caf5", muted = "#565f89", blue = "#7aa2f7", green = "#9ece6a",
-            yellow = "#e0af68", red = "#f7768e", grey = "#414868" }
 background = { base = "$bg", weak = "$surface", strong = "$over" }
 text = "$fg"; dim = "$muted"
 primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
 separator = { color = "$grey", width = 1 }
+# the palette is a SECTION (TOML inline tables can't span lines), one anchor per row:
+[presets.tokyo-night.palette]
+bg = "#1a1b26"; surface = "#1f2335"; over = "#24283b"
+fg = "#c0caf5"; muted = "#565f89"
+blue = "#7aa2f7"; green = "#9ece6a"; yellow = "#e0af68"; red = "#f7768e"; grey = "#414868"
 [presets.tokyo-night.workspaces]
 style = "boxed"; focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"
 ```

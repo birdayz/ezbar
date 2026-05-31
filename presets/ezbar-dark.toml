@@ -2,20 +2,34 @@
 # Square floating panels over a dark base, with a flieder/lilac accent.
 # This is what zero-config gives you; it ships as the built-in default.
 
-palette = { base = "#1e1e2e", surface = "#313244", over = "#45475a",
-            text = "#cdd6f4", muted = "#a6adc8",
-            lilac = "#cba6f7", green = "#a6e3a1", yellow = "#f9e2af",
-            red = "#f38ba8", grey = "#585b70" }
-
 style = "islands"                 # floating square panels
 opacity = 0.97
 radius = 4                        # a hair of corner; still square, not a pill
 border = { width = 1, color = "#ffffff20" }
 background = { base = "$base", weak = "$surface", strong = "$over" }
-text = "$text"; dim = "$muted"
-primary = "$lilac"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+text = "$text"
+dim = "$muted"
+primary = "$lilac"
+ok = "$green"
+warn = "$yellow"
+urgent = "$red"
 separator = { color = "$grey", width = 1 }
+
+[palette]
+base = "#1e1e2e"
+surface = "#313244"
+over = "#45475a"
+text = "#cdd6f4"
+muted = "#a6adc8"
+lilac = "#cba6f7"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+red = "#f38ba8"
+grey = "#585b70"
 
 [workspaces]
 style = "boxed"
-focused = "$lilac"; occupied = "$muted"; empty = "$over"; urgent = "$red"
+focused = "$lilac"
+occupied = "$muted"
+empty = "$over"
+urgent = "$red"

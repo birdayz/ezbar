@@ -629,6 +629,19 @@ fn load_preset_table(
     Ok(found.then_some(t))
 }
 
+/// A module's effective config: `[modules.<id>]` defaults overlaid by the inline
+/// `config` from a placement `{ id, key, config }` spec (inline wins).
+pub fn merge_module_config(defaults: Option<&toml::Value>, inline: &toml::Value) -> toml::Value {
+    let mut base = match defaults {
+        Some(toml::Value::Table(t)) => t.clone(),
+        _ => toml::Table::new(),
+    };
+    if let toml::Value::Table(i) = inline {
+        merge_into(&mut base, i.clone());
+    }
+    toml::Value::Table(base)
+}
+
 /// Recursively merge `src` into `dst`: tables deep-merge, scalars/arrays overwrite.
 fn merge_into(dst: &mut toml::Table, src: toml::Table) {
     for (k, sv) in src {
@@ -741,14 +754,22 @@ pub fn save_active_preset(name: &str) -> std::io::Result<()> {
     std::fs::write(p, format!("preset = {name:?}\n"))
 }
 
-/// Load the config; missing file or parse error falls back to defaults (logged).
-pub fn load() -> Config {
+/// Run the full load pipeline (config.toml + drop-in presets + active-preset state),
+/// returning `Err` on a parse/resolve failure so callers can keep the last-good
+/// config. A missing `config.toml` is **not** an error — it resolves to defaults +
+/// any active preset (so a preset selected via the switcher survives a file edit).
+pub fn load_result() -> Result<Config, String> {
     let src = path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
     let files = load_preset_files();
     let active = active_preset();
-    parse_with(&src, &files, active.as_deref()).unwrap_or_else(|e| {
+    parse_with(&src, &files, active.as_deref())
+}
+
+/// Load the config; missing file or parse error falls back to defaults (logged).
+pub fn load() -> Config {
+    load_result().unwrap_or_else(|e| {
         log::warn!("config: {e}; using defaults");
         Config::default()
     })
@@ -935,6 +956,48 @@ mod tests {
         let c = parse_str(src).unwrap();
         assert_eq!(c.theme.primary, Color::parse("#cccccc").unwrap()); // user wins
         assert_eq!(c.theme.text, Color::parse("#bbbbbb").unwrap()); // from preset
+    }
+
+    #[test]
+    fn shipped_presets_parse_and_resolve() {
+        // Guard against the multi-line-inline-table bug: every shipped preset file
+        // must parse AND fully resolve its $palette refs (no unresolved "$name").
+        let presets: &[(&str, &str)] = &[
+            ("ezbar-dark", include_str!("../presets/ezbar-dark.toml")),
+            ("noir", include_str!("../presets/noir.toml")),
+            ("nord", include_str!("../presets/nord.toml")),
+            ("gruvbox-dark", include_str!("../presets/gruvbox-dark.toml")),
+            (
+                "catppuccin-mocha",
+                include_str!("../presets/catppuccin-mocha.toml"),
+            ),
+            ("tokyo-night", include_str!("../presets/tokyo-night.toml")),
+        ];
+        for (name, body) in presets {
+            let mut files = HashMap::new();
+            files.insert(name.to_string(), body.to_string());
+            let c = parse_with("", &files, Some(name))
+                .unwrap_or_else(|e| panic!("preset {name} failed to load: {e}"));
+            // the preset's accent must have resolved to a real opaque colour (a
+            // leftover "$ref" would have errored above; a default fallback would be
+            // caught by the per-preset spot-checks below)
+            assert!(
+                c.theme.primary.0[3] > 0.0,
+                "preset {name}: primary did not resolve"
+            );
+        }
+        // spot-check a couple of non-default presets actually applied their palette
+        let mut nf = HashMap::new();
+        nf.insert(
+            "nord".to_string(),
+            include_str!("../presets/nord.toml").into(),
+        );
+        let nord = parse_with("", &nf, Some("nord")).unwrap();
+        assert_eq!(
+            nord.theme.background.base(),
+            Color::parse("#2e3440").unwrap()
+        );
+        assert_eq!(nord.theme.primary, Color::parse("#88c0d0").unwrap());
     }
 
     #[test]

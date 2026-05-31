@@ -1,18 +1,32 @@
 # noir — ezbar's original identity: a flat, SOLID, square, near-black bar with a
 # blue accent. No islands, no float, hard corners. For people who want the slab.
 
-palette = { base = "#0d1117", surface = "#161b22", over = "#21262d",
-            text = "#e6edf3", muted = "#7d8590",
-            blue = "#58a6ff", green = "#3fb950", yellow = "#d29922", red = "#f85149" }
-
 style = "solid"                   # one bar background, hairline separators
 opacity = 0.85
 radius = 0                        # hard square corners
 background = { base = "$base", weak = "$surface", strong = "$over" }
-text = "$text"; dim = "$muted"
-primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+text = "$text"
+dim = "$muted"
+primary = "$blue"
+ok = "$green"
+warn = "$yellow"
+urgent = "$red"
 separator = { color = "$over", width = 1 }
+
+[palette]
+base = "#0d1117"
+surface = "#161b22"
+over = "#21262d"
+text = "#e6edf3"
+muted = "#7d8590"
+blue = "#58a6ff"
+green = "#3fb950"
+yellow = "#d29922"
+red = "#f85149"
 
 [workspaces]
 style = "boxed"
-focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"
+focused = "$blue"
+occupied = "$muted"
+empty = "$over"
+urgent = "$red"

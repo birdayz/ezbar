@@ -1,19 +1,33 @@
 # Tokyo Night — community palette, ezbar's square/dark chrome.
 # Colours: github.com/enkia/tokyo-night-vscode-theme.
 
-palette = { base = "#1a1b26", surface = "#1f2335", over = "#24283b",
-            text = "#c0caf5", muted = "#565f89",
-            blue = "#7aa2f7", green = "#9ece6a", yellow = "#e0af68",
-            red = "#f7768e", grey = "#414868" }
-
 style = "solid"
 opacity = 0.95
 radius = 0
 background = { base = "$base", weak = "$surface", strong = "$over" }
-text = "$text"; dim = "$muted"
-primary = "$blue"; ok = "$green"; warn = "$yellow"; urgent = "$red"
+text = "$text"
+dim = "$muted"
+primary = "$blue"
+ok = "$green"
+warn = "$yellow"
+urgent = "$red"
 separator = { color = "$grey", width = 1 }
+
+[palette]
+base = "#1a1b26"
+surface = "#1f2335"
+over = "#24283b"
+text = "#c0caf5"
+muted = "#565f89"
+blue = "#7aa2f7"
+green = "#9ece6a"
+yellow = "#e0af68"
+red = "#f7768e"
+grey = "#414868"
 
 [workspaces]
 style = "boxed"
-focused = "$blue"; occupied = "$muted"; empty = "$over"; urgent = "$red"
+focused = "$blue"
+occupied = "$muted"
+empty = "$over"
+urgent = "$red"

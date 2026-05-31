@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{SinkExt, Stream};
-use iced::widget::{canvas, column, container, mouse_area, row, scrollable, text, Space};
+use iced::widget::{button, canvas, column, container, mouse_area, row, scrollable, text, Space};
 use iced::{event, window, Background, Border, Color, Element, Length, Subscription, Task};
 use iced_layershell::build_pattern::daemon;
 use iced_layershell::reexport::{
@@ -50,8 +50,9 @@ struct ModuleEntry {
 }
 
 impl ModuleEntry {
-    fn new(id: u64, module: Box<dyn Module>) -> Self {
-        let name = module.id().to_string();
+    /// Construct with a routing name = the placement **key** (so two instances of one
+    /// module type, distinguished by `key`, route independently).
+    fn with_name(id: u64, name: String, module: Box<dyn Module>) -> Self {
         ModuleEntry {
             id,
             name,
@@ -220,6 +221,24 @@ struct Bar {
 
     // temporary A/B switch for the workspace-chip style (env EZBAR_WS_STYLE)
     ws_style: u8,
+
+    // focused output width, so popups can be clamped on-screen
+    screen_w: u32,
+}
+
+/// Width of the focused sway output (for clamping popups). Falls back to 1920.
+fn focused_output_width() -> u32 {
+    swayipc::Connection::new()
+        .ok()
+        .and_then(|mut c| c.get_outputs().ok())
+        .and_then(|outs| {
+            outs.iter()
+                .find(|o| o.focused)
+                .or_else(|| outs.first())
+                .map(|o| o.rect.width as u32)
+        })
+        .filter(|w| *w > 0)
+        .unwrap_or(1920)
 }
 
 #[to_layer_message(multi)]
@@ -302,48 +321,97 @@ fn popup_size(kind: PopupKind) -> (u32, u32) {
     }
 }
 
-/// A zone's ordered render-ids: from config entries, else the shipped default.
-/// Groups are flattened to their member ids (island-per-group is a refinement).
-fn zone_ids(entries: &[config::Entry], default: &[&str]) -> Vec<String> {
-    if entries.is_empty() {
-        return default.iter().map(|s| s.to_string()).collect();
-    }
-    let mut v = Vec::new();
-    for e in entries {
-        collect_entry_ids(e, &mut v);
-    }
-    v
+/// One placeable item: routing `key`, module `type_id`, and inline `config`.
+struct Placed {
+    key: String,
+    type_id: String,
+    config: toml::Value,
 }
 
-fn collect_entry_ids(e: &config::Entry, out: &mut Vec<String>) {
+fn empty_cfg() -> toml::Value {
+    toml::Value::Table(Default::default())
+}
+
+/// Resolve a zone's entries (or the shipped default) into ordered `Placed` items.
+fn resolve_zone(entries: &[config::Entry], default: &[&str], out: &mut Vec<Placed>) {
+    if entries.is_empty() {
+        for id in default {
+            out.push(Placed {
+                key: id.to_string(),
+                type_id: id.to_string(),
+                config: empty_cfg(),
+            });
+        }
+    } else {
+        for e in entries {
+            resolve_entry(e, out);
+        }
+    }
+}
+
+fn resolve_entry(e: &config::Entry, out: &mut Vec<Placed>) {
     match e {
-        config::Entry::Id(id) => out.push(id.clone()),
-        config::Entry::Spec(s) => out.push(s.id.clone()),
+        config::Entry::Id(id) => out.push(Placed {
+            key: id.clone(),
+            type_id: id.clone(),
+            config: empty_cfg(),
+        }),
+        config::Entry::Spec(s) => out.push(Placed {
+            key: s.key.clone().unwrap_or_else(|| s.id.clone()),
+            type_id: s.id.clone(),
+            config: s.config.clone(),
+        }),
         config::Entry::Group(g) => {
             for m in g {
-                collect_entry_ids(m, out);
+                resolve_entry(m, out);
             }
         }
     }
 }
 
-/// Build the live module set (RFC 0001 factory): every module-typed id that appears
-/// in the resolved placement, deduped, with config from `[modules.<id>]`.
+/// All placed items across the three zones, in order (zones fall back to defaults).
+fn all_placed(config: &Config) -> Vec<Placed> {
+    let mut items = Vec::new();
+    resolve_zone(&config.left, &["workspaces"], &mut items);
+    resolve_zone(&config.center, &["window_title"], &mut items);
+    resolve_zone(&config.right, DEFAULT_RIGHT, &mut items);
+    items
+}
+
+/// The ordered, deduped module-instance **keys** in the resolved placement — used to
+/// detect whether a reload changed the module set.
+fn resolved_module_ids(config: &Config) -> Vec<String> {
+    let empty = empty_cfg();
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in all_placed(config) {
+        if seen.insert(p.key.clone()) && modules::build(&p.type_id, 0, &empty).is_some() {
+            out.push(p.key);
+        }
+    }
+    out
+}
+
+/// Build the live module set (RFC 0001 factory): one instance **per placement entry**,
+/// keyed by `key` (so two `custom`/`disk`/… with distinct keys are independent),
+/// configured from `[modules.<id>]` overlaid by the entry's inline `config`.
 fn build_modules(config: &Config) -> Vec<ModuleEntry> {
-    let mut ids = zone_ids(&config.left, &["workspaces"]);
-    ids.extend(zone_ids(&config.center, &["window_title"]));
-    ids.extend(zone_ids(&config.right, DEFAULT_RIGHT));
-    let empty = toml::Value::Table(Default::default());
     let mut out = Vec::new();
     let mut inst = 1u64;
     let mut seen = std::collections::HashSet::new();
-    for id in &ids {
-        if !seen.insert(id.clone()) {
+    for p in all_placed(config) {
+        // skip non-module ids (widgets like clock/volume are rendered inline)
+        if modules::build(&p.type_id, 0, &empty_cfg()).is_none() {
             continue;
         }
-        let cfg = config.modules.get(id).unwrap_or(&empty);
-        if let Some(m) = modules::build(id, inst, cfg) {
-            out.push(ModuleEntry::new(inst, m));
+        // a key identifies exactly one module instance
+        if !seen.insert(p.key.clone()) {
+            log::warn!("duplicate module key {:?}; ignoring the second", p.key);
+            continue;
+        }
+        let cfg = config::merge_module_config(config.modules.get(&p.type_id), &p.config);
+        if let Some(m) = modules::build(&p.type_id, inst, &cfg) {
+            out.push(ModuleEntry::with_name(inst, p.key, m));
             inst += 1;
         }
     }
@@ -484,6 +552,7 @@ impl Bar {
             config,
             theme,
             ws_style,
+            screen_w: focused_output_width(),
         };
         // Dev/screenshot hook: open a popup on startup for deterministic capture.
         if let Ok(k) = std::env::var("EZBAR_OPEN_POPUP") {
@@ -667,11 +736,7 @@ impl Bar {
                     log::warn!("could not save preset selection: {e}");
                 }
                 let close = self.close_popup_task();
-                self.config = config::load();
-                self.theme = self.config.theme_tokens();
-                if std::env::var("EZBAR_WS_STYLE").is_err() {
-                    self.ws_style = self.config.theme.workspaces.style.variant();
-                }
+                self.apply_config(config::load());
                 close
             }
             Message::Ipc(cmd) => self.handle_ipc(&cmd),
@@ -700,12 +765,7 @@ impl Bar {
             }
             Message::ConfigReloaded(Ok(cfg)) => {
                 log::info!("config reloaded");
-                self.config = cfg;
-                self.theme = self.config.theme_tokens();
-                // EZBAR_WS_STYLE (dev) still wins; otherwise follow the reloaded config.
-                if std::env::var("EZBAR_WS_STYLE").is_err() {
-                    self.ws_style = self.config.theme.workspaces.style.variant();
-                }
+                self.apply_config(cfg);
                 Task::none()
             }
             Message::ConfigReloaded(Err(e)) => {
@@ -841,13 +901,12 @@ impl Bar {
         }
     }
 
-    /// Left margin so a `popup_w`-wide popup is centered above the cursor (i.e.
-    /// the widget that triggered it), clamped to stay on the output.
+    /// Left margin so a `popup_w`-wide popup is centered above the cursor (the widget
+    /// that triggered it), clamped so it always stays fully on the output — both
+    /// edges, so a right-anchored widget (e.g. the ▾ switcher) opens visibly.
     fn popup_left_margin(&self, popup_w: u32) -> i32 {
-        // Center the popup above the cursor (i.e. the widget that triggered it),
-        // clamped only to the left edge. No right clamp: no popup-bearing widget
-        // sits within half a popup width of the bar's right edge.
-        (self.cursor_x as i32 - popup_w as i32 / 2).max(0)
+        let max_left = (self.screen_w as i32 - popup_w as i32).max(0);
+        (self.cursor_x as i32 - popup_w as i32 / 2).clamp(0, max_left)
     }
 
     fn open_popup(&self, kind: PopupKind) -> (window::Id, Task<Message>) {
@@ -1093,9 +1152,10 @@ impl Bar {
         .into()
     }
 
-    /// The placement registry (RFC 0002): render one entry by `id`. `None` if the
-    /// id is unknown or has nothing to show (e.g. `battery` on a desktop).
-    fn render_id(&self, id: &str) -> Option<Element<'_, Message>> {
+    /// Render a host-inline **widget** by its type id (RFC 0002 registry). `None` if
+    /// it's not a host widget (then it's a module, rendered by key) or has nothing to
+    /// show (e.g. `battery` on a desktop).
+    fn render_widget(&self, id: &str) -> Option<Element<'_, Message>> {
         match id {
             "workspaces" => {
                 let fs = self.config.theme.font_size;
@@ -1225,47 +1285,62 @@ impl Bar {
                 .has_battery
                 .then(|| text(self.battery_str.clone()).into()),
             "switcher" => Some(self.switcher_button()),
-            // anything else: an RFC 0001 module placed by its id (cpu/github/claude/…)
-            other => self.render_module(other),
+            // not a host widget → it's a module, rendered by key in build_zone
+            _ => None,
         }
     }
 
-    /// Build one zone (a row of items) from an ordered id list, inserting the
-    /// configured separator between items (never before the `▾` switcher).
-    fn build_zone(&self, ids: &[String]) -> Element<'_, Message> {
+    /// Build one zone from ordered `Placed` items: a module instance renders by `key`,
+    /// a host widget by `type_id`. A configured separator goes between items (never
+    /// before the `▾` switcher).
+    fn build_zone(&self, items: &[Placed]) -> Element<'_, Message> {
         let s = &self.config.theme.separator;
         let glyph = s.glyph.clone().unwrap_or_else(|| "|".to_string());
         let sep_color = s.color.iced();
-        let mut items: Vec<Element<Message>> = Vec::new();
-        for id in ids {
-            if let Some(el) = self.render_id(id) {
-                if !items.is_empty() && id != "switcher" {
-                    items.push(text(glyph.clone()).color(sep_color).into());
+        let mut out: Vec<Element<Message>> = Vec::new();
+        for p in items {
+            // a built module instance is keyed by `key`; otherwise it's a host widget
+            let el = if self.modules.iter().any(|e| e.name == p.key) {
+                self.render_module(&p.key)
+            } else {
+                self.render_widget(&p.type_id)
+            };
+            if let Some(el) = el {
+                if !out.is_empty() && p.type_id != "switcher" {
+                    out.push(text(glyph.clone()).color(sep_color).into());
                 }
-                items.push(el);
+                out.push(el);
             }
         }
-        row(items).spacing(6).align_y(Vertical::Center).into()
+        row(out).spacing(6).align_y(Vertical::Center).into()
     }
 
     fn bar_view(&self) -> Element<'_, Message> {
         // Config placement (RFC 0002) drives which widgets render and in what order;
         // an empty zone falls back to the shipped default (today's bar).
-        let mut left_ids = zone_ids(&self.config.left, &["workspaces"]);
-        let center_ids = zone_ids(&self.config.center, &["window_title"]);
-        let mut right_ids = zone_ids(&self.config.right, DEFAULT_RIGHT);
+        let mut left = Vec::new();
+        let mut center = Vec::new();
+        let mut right = Vec::new();
+        resolve_zone(&self.config.left, &["workspaces"], &mut left);
+        resolve_zone(&self.config.center, &["window_title"], &mut center);
+        resolve_zone(&self.config.right, DEFAULT_RIGHT, &mut right);
 
         // Place the ▾ switcher per [bar].switcher (unless the user listed it).
-        let has_switcher = |v: &[String]| v.iter().any(|s| s == "switcher");
+        let switcher = || Placed {
+            key: "switcher".into(),
+            type_id: "switcher".into(),
+            config: empty_cfg(),
+        };
+        let has_switcher = |v: &[Placed]| v.iter().any(|p| p.type_id == "switcher");
         match self.config.bar.switcher {
-            SwitcherPos::Left if !has_switcher(&left_ids) => left_ids.insert(0, "switcher".into()),
-            SwitcherPos::Right if !has_switcher(&right_ids) => right_ids.push("switcher".into()),
+            SwitcherPos::Left if !has_switcher(&left) => left.insert(0, switcher()),
+            SwitcherPos::Right if !has_switcher(&right) => right.push(switcher()),
             _ => {}
         }
 
-        let ws_row = self.build_zone(&left_ids);
-        let title_el = self.build_zone(&center_ids);
-        let right_inner = self.build_zone(&right_ids);
+        let ws_row = self.build_zone(&left);
+        let title_el = self.build_zone(&center);
+        let right_inner = self.build_zone(&right);
 
         if matches!(self.config.theme.style, Style::Islands) {
             // Floating SQUARE islands over a transparent surface — our take on
@@ -1450,18 +1525,36 @@ impl Bar {
         }
         for name in names {
             let is_current = active.as_deref() == Some(name.as_str());
-            let (marker, color) = if is_current {
+            let (marker, label_color) = if is_current {
                 ("\u{f00c} ", accent) // check
             } else {
                 ("  ", fg)
             };
+            // accent-tinted highlight on hover; pointer cursor (a real button)
+            let hover = Color { a: 0.18, ..accent };
             col.push(
-                mouse_area(text(format!("{marker}{name}")).color(color))
+                button(text(format!("{marker}{name}")).color(label_color))
+                    .width(Length::Fill)
+                    .padding([3, 6])
                     .on_press(Message::SelectPreset(name.clone()))
+                    .style(move |_theme: &iced::Theme, status| {
+                        let bg =
+                            matches!(status, button::Status::Hovered | button::Status::Pressed)
+                                .then_some(Background::Color(hover));
+                        button::Style {
+                            background: bg,
+                            text_color: label_color,
+                            border: Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    })
                     .into(),
             );
         }
-        scrollable(column(col).spacing(6)).into()
+        scrollable(column(col).spacing(2)).into()
     }
 
     fn stock_popup(&self) -> Element<'_, Message> {
@@ -1474,16 +1567,36 @@ impl Bar {
         .into()
     }
 
+    /// Adopt a freshly-loaded config: re-resolve theme + ws-style, and rebuild the
+    /// live module set **only if** placement or any `[modules.*]` changed (so a pure
+    /// theme/preset switch is a cheap re-render that keeps module state).
+    fn apply_config(&mut self, cfg: Config) {
+        let modules_changed = resolved_module_ids(&cfg) != resolved_module_ids(&self.config)
+            || cfg.modules != self.config.modules;
+        self.config = cfg;
+        self.theme = self.config.theme_tokens();
+        if std::env::var("EZBAR_WS_STYLE").is_err() {
+            self.ws_style = self.config.theme.workspaces.style.variant();
+        }
+        if modules_changed {
+            self.rebuild_modules();
+        }
+    }
+
+    /// Shut down the old modules and construct the new set from the current config.
+    fn rebuild_modules(&mut self) {
+        for e in &mut self.modules {
+            e.module.shutdown();
+        }
+        self.modules = build_modules(&self.config);
+    }
+
     /// Map an `ezbar msg` command line to an action (RFC 0002 IPC).
     fn handle_ipc(&mut self, cmd: &str) -> Task<Message> {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         match parts.as_slice() {
             ["reload"] => {
-                self.config = config::load();
-                self.theme = self.config.theme_tokens();
-                if std::env::var("EZBAR_WS_STYLE").is_err() {
-                    self.ws_style = self.config.theme.workspaces.style.variant();
-                }
+                self.apply_config(config::load());
                 Task::none()
             }
             ["preset", dir @ ("next" | "prev")] => {
@@ -1619,11 +1732,10 @@ fn marquee(s: &str, offset: usize, max_len: usize) -> String {
 
 // ---- subscription streams (one per data source) ----
 
-fn read_parse(path: &std::path::Path) -> Result<Config, String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => config::parse_str(&s),
-        Err(_) => Ok(Config::default()), // file gone → revert to defaults
-    }
+/// Re-run the full load pipeline (config.toml + drop-in presets + active preset),
+/// so a file-watch reload keeps the user's selected preset (not just inline theme).
+fn read_parse(_path: &std::path::Path) -> Result<Config, String> {
+    config::load_result()
 }
 
 /// Watch the config directory; emit a reloaded (or errored) config on change.
