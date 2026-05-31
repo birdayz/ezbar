@@ -4,8 +4,10 @@
 [advisories]
 version = 2
 yanked = "deny"
-# Consciously ignore a specific advisory by id:
-# ignore = ["RUSTSEC-0000-0000"]
+ignore = [
+    # `paste` is unmaintained (archived) but benign; pulled in transitively by wgpu.
+    "RUSTSEC-2024-0436",
+]
 
 [bans]
 multiple-versions = "warn"

@@ -1,5 +1,6 @@
 [package]
 name = "ezbar-harness"
+publish = false                  # dev tool; consumed via path/git, not crates.io
 version.workspace = true
 edition.workspace = true
 license.workspace = true
