@@ -11,6 +11,7 @@ use iced_layershell::reexport::{
 use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 
+use ezbar::config::{self, Config};
 use ezbar::history::History;
 use ezbar::modules;
 use ezbar::sources::sway::{SwayUpdate, Workspace};
@@ -22,18 +23,6 @@ mod install;
 
 const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
-
-const THEME: ThemeTokens = ThemeTokens {
-    fg: [1.0, 1.0, 1.0, 1.0],
-    fg_dim: [0.7, 0.7, 0.7, 1.0],
-    urgent: [1.0, 0.2, 0.2, 1.0],
-    warn: [1.0, 0.67, 0.0, 1.0],
-    ok: [0.2, 0.8, 0.2, 1.0],
-    accent: [0.345, 0.65, 1.0, 1.0],
-    sep: [0.4, 0.4, 0.4, 1.0],
-    text_size: 14.0,
-    bar_height: BAR_HEIGHT as u16,
-};
 
 struct ModuleEntry {
     id: u64,
@@ -183,6 +172,10 @@ struct Bar {
     // popup anchoring: last cursor x over the bar, so a popup opens above the
     // widget the user interacted with (RFC 0001 slot-derived).
     cursor_x: f32,
+
+    // config + resolved module theme (RFC 0002)
+    config: Config,
+    theme: ThemeTokens,
 }
 
 #[to_layer_message(multi)]
@@ -281,6 +274,8 @@ impl Bar {
             settings: bar_settings(),
             id: bar_id,
         });
+        let config = config::load();
+        let theme = config.theme_tokens();
         let bar = Bar {
             bar_id,
             popup: None,
@@ -321,6 +316,8 @@ impl Bar {
             blink_on: true,
             spotify_offset: 0,
             cursor_x: 0.0,
+            config,
+            theme,
         };
         (bar, open)
     }
@@ -702,7 +699,7 @@ impl Bar {
                 if let Some(entry) = self.modules.iter().find(|e| e.id == instance) {
                     let ctx = Ctx {
                         instance_id: instance,
-                        theme: &THEME,
+                        theme: &self.theme,
                     };
                     if let Some(content) = entry.module.popup(&ctx) {
                         let mapped = content.map(move |m| Message::ModuleMsg { instance, msg: m });
@@ -760,7 +757,7 @@ impl Bar {
             }
             let ctx = Ctx {
                 instance_id: instance,
-                theme: &THEME,
+                theme: &self.theme,
             };
             right.push(
                 entry
@@ -1029,9 +1026,10 @@ impl Bar {
     }
 
     fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
+        let bg = self.config.theme.background.base().0;
         iced::theme::Style {
-            background_color: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
-            text_color: Color::WHITE,
+            background_color: Color::from_rgba(bg[0], bg[1], bg[2], self.config.theme.opacity),
+            text_color: self.config.theme.text.iced(),
         }
     }
 

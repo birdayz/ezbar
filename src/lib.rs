@@ -7,6 +7,7 @@
 //!   * the module dev harness    (`src/bin/harness.rs`, via `ezbar-harness`)
 //!   * the unit tests.
 
+pub mod config;
 pub mod history;
 pub mod modules;
 pub mod sources;
