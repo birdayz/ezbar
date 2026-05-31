@@ -42,6 +42,7 @@ jobs:
             pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
+      - run: cargo test --workspace --doc
       - run: cargo build --workspace --release
 
   deny:

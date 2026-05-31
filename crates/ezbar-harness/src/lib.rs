@@ -11,7 +11,7 @@
 //! click it, scroll it, swap the bar background to check contrast, and screenshot
 //! it. No layer-shell, no sway, no real bar.
 //!
-//! ```no_run
+//! ```ignore
 //! // your module implements ezbar_plugin::Module
 //! ezbar_harness::run(Box::new(MyModule::new(0)));
 //! ```
