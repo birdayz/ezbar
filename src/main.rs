@@ -381,11 +381,10 @@ fn all_placed(config: &Config) -> Vec<Placed> {
 /// The ordered, deduped module-instance **keys** in the resolved placement — used to
 /// detect whether a reload changed the module set.
 fn resolved_module_ids(config: &Config) -> Vec<String> {
-    let empty = empty_cfg();
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for p in all_placed(config) {
-        if seen.insert(p.key.clone()) && modules::build(&p.type_id, 0, &empty).is_some() {
+        if modules::is_module(&p.type_id) && seen.insert(p.key.clone()) {
             out.push(p.key);
         }
     }
@@ -400,8 +399,8 @@ fn build_modules(config: &Config) -> Vec<ModuleEntry> {
     let mut inst = 1u64;
     let mut seen = std::collections::HashSet::new();
     for p in all_placed(config) {
-        // skip non-module ids (widgets like clock/volume are rendered inline)
-        if modules::build(&p.type_id, 0, &empty_cfg()).is_none() {
+        // host-inline widgets (clock/volume/…) are not modules — rendered by the host
+        if !modules::is_module(&p.type_id) {
             continue;
         }
         // a key identifies exactly one module instance

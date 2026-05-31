@@ -12,6 +12,15 @@ pub mod updates;
 
 use ezbar_plugin::Module;
 
+/// Whether `id` names a built-in module (vs a host-inline widget). Kept in sync with
+/// [`build`] — the single source of truth for "is this a module?".
+pub fn is_module(id: &str) -> bool {
+    matches!(
+        id,
+        "cpu" | "github" | "claude" | "custom" | "disk" | "net" | "ip" | "updates" | "keyboard"
+    )
+}
+
 /// Construct a built-in module by its placement `id` (RFC 0001 factory). `cfg` is
 /// the `[modules.<id>]` table. Returns `None` for ids that aren't modules (those
 /// are rendered inline by the host, e.g. `clock`, `volume`, `workspaces`).
