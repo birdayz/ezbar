@@ -285,6 +285,31 @@ fn popup_size(kind: PopupKind) -> (u32, u32) {
     }
 }
 
+/// A zone's ordered render-ids: from config entries, else the shipped default.
+/// Groups are flattened to their member ids (island-per-group is a refinement).
+fn zone_ids(entries: &[config::Entry], default: &[&str]) -> Vec<String> {
+    if entries.is_empty() {
+        return default.iter().map(|s| s.to_string()).collect();
+    }
+    let mut v = Vec::new();
+    for e in entries {
+        collect_entry_ids(e, &mut v);
+    }
+    v
+}
+
+fn collect_entry_ids(e: &config::Entry, out: &mut Vec<String>) {
+    match e {
+        config::Entry::Id(id) => out.push(id.clone()),
+        config::Entry::Spec(s) => out.push(s.id.clone()),
+        config::Entry::Group(g) => {
+            for m in g {
+                collect_entry_ids(m, out);
+            }
+        }
+    }
+}
+
 fn parse_popup_kind(s: &str) -> Option<PopupKind> {
     match s {
         "calendar" => Some(PopupKind::Calendar),
@@ -993,221 +1018,233 @@ impl Bar {
         Space::new().into()
     }
 
-    fn bar_view(&self) -> Element<'_, Message> {
-        // ---- left: workspaces (square state-chips) ----
-        // One shared, uniform cell width so single- and multi-digit names read as
-        // the same square cell (fixes the "10 is a wide rectangle" wobble).
-        let variant = self.ws_style;
-        let fs = self.config.theme.font_size;
-        let max_chars = self
-            .workspaces
-            .iter()
-            .map(|w| w.name.chars().count())
-            .max()
-            .unwrap_or(1)
-            .max(1) as f32;
-        let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
-        let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
-        let mut ws_items: Vec<Element<Message>> = Vec::new();
-        if self.config.bar.switcher == SwitcherPos::Left {
-            let dim = self.config.theme.dim.iced();
-            ws_items.push(
-                mouse_area(
-                    container(text("\u{f107}").size(fs).color(dim))
-                        .padding([0, 4])
-                        .center_y(Length::Fill),
-                )
-                .on_press(Message::OpenPopup(PopupKind::Switcher))
-                .into(),
-            );
-        }
-        ws_items.extend(
-            self.workspaces
-                .iter()
-                .map(|w| self.ws_chip(w, variant, cell_w)),
-        );
-        let ws_row: Element<Message> = row(ws_items).spacing(4).align_y(Vertical::Center).into();
-
-        // ---- center: focused window title ----
-        let title_el: Element<Message> = text(self.title.clone()).into();
-
-        // ---- right: widgets ----
-        let mut right: Vec<Element<Message>> = Vec::new();
-        let sep = || text("|").color(Color::from_rgb(0.4, 0.4, 0.4));
-
-        // pluggable modules (RFC 0001) render first in the right zone.
-        for entry in &self.modules {
-            let instance = entry.id;
-            if entry.disabled {
-                // module panicked in update and was torn down — static error chip.
-                right.push(
-                    text(format!(" {}", entry.name))
-                        .color(Color::from_rgb(1.0, 0.3, 0.3))
-                        .into(),
-                );
-                right.push(sep().into());
-                continue;
-            }
-            let ctx = Ctx {
-                instance_id: instance,
-                theme: &self.theme,
-            };
-            right.push(
-                entry
-                    .module
-                    .view(&ctx)
-                    .map(move |m| Message::ModuleMsg { instance, msg: m }),
-            );
-            right.push(sep().into());
-        }
-
-        // calendar:  <text> [<countdown>], coloured by urgency; click for popup
-        {
-            let c = &self.calendar;
-            let base = if c.is_overdue {
-                Color::from_rgb(1.0, 0.27, 0.27)
-            } else if c.is_urgent {
-                Color::from_rgb(1.0, 0.67, 0.0)
-            } else {
-                Color::WHITE
-            };
-            let blinking = c.is_overdue || c.is_urgent;
-            let color = if blinking && !self.blink_on {
-                Color { a: 0.4, ..base }
-            } else {
-                base
-            };
-            let mut cal: Vec<Element<Message>> = vec![
-                text("").into(),
-                text(c.display_text.clone()).color(color).into(),
-            ];
-            if !c.time_until_next.is_empty() {
-                cal.push(text(format!("[{}]", c.time_until_next)).color(color).into());
-            }
-            right.push(
-                mouse_area(row(cal).spacing(4).align_y(Vertical::Center))
-                    .on_press(Message::OpenPopup(PopupKind::Calendar))
+    /// Render an RFC 0001 module by its `id` (looked up in the live module list).
+    fn render_module(&self, id: &str) -> Option<Element<'_, Message>> {
+        let entry = self.modules.iter().find(|e| e.name == id)?;
+        let instance = entry.id;
+        if entry.disabled {
+            return Some(
+                text(format!(" {}", entry.name))
+                    .color(Color::from_rgb(1.0, 0.3, 0.3))
                     .into(),
             );
         }
-        right.push(sep().into());
-
-        // kubectl (left-click clears; right-click opens context menu; red when production)
-        let kube_color = if self.kubectl.is_production {
-            Color::from_rgb(1.0, 0.2, 0.2)
-        } else {
-            Color::WHITE
+        let ctx = Ctx {
+            instance_id: instance,
+            theme: &self.theme,
         };
-        right.push(
-            mouse_area(text(self.kubectl.string.clone()).color(kube_color))
-                .on_press(Message::KubectlClear)
-                .on_right_press(Message::OpenPopup(PopupKind::Kubectl))
-                .into(),
-        );
-        right.push(sep().into());
+        Some(
+            entry
+                .module
+                .view(&ctx)
+                .map(move |m| Message::ModuleMsg { instance, msg: m }),
+        )
+    }
 
-        right.push(self.metric(
-            &self.temp_str,
-            self.show_temp_graph,
-            &self.temp_hist,
-            GraphKind::Temperature,
-        ));
-        right.push(sep().into());
-        right.push(self.metric(
-            &self.mem_str,
-            self.show_mem_graph,
-            &self.mem_hist,
-            GraphKind::Memory,
-        ));
-        right.push(sep().into());
-        right.push(self.metric(
-            &self.ping.string,
-            self.show_ping_graph,
-            &self.ping_hist,
-            GraphKind::Ping,
-        ));
-        right.push(sep().into());
+    /// The `▾` preset-switcher button.
+    fn switcher_button(&self) -> Element<'_, Message> {
+        let dim = self.config.theme.dim.iced();
+        mouse_area(
+            container(
+                text("\u{f107}")
+                    .size(self.config.theme.font_size)
+                    .color(dim),
+            )
+            .padding([0, 4])
+            .center_y(Length::Fill),
+        )
+        .on_press(Message::OpenPopup(PopupKind::Switcher))
+        .into()
+    }
 
-        // spotify: marquee long titles; click to play/pause/authorize, scroll to skip tracks
-        right.push(
-            mouse_area(text(marquee(
-                &self.spotify.track_string,
-                self.spotify_offset,
-                40,
-            )))
-            .on_press(Message::SpotifyClick)
-            .on_scroll(|delta| {
-                let y = match delta {
-                    iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                    iced::mouse::ScrollDelta::Pixels { y, .. } => y,
+    /// The placement registry (RFC 0002): render one entry by `id`. `None` if the
+    /// id is unknown or has nothing to show (e.g. `battery` on a desktop).
+    fn render_id(&self, id: &str) -> Option<Element<'_, Message>> {
+        match id {
+            "workspaces" => {
+                let fs = self.config.theme.font_size;
+                let variant = self.ws_style;
+                let max_chars = self
+                    .workspaces
+                    .iter()
+                    .map(|w| w.name.chars().count())
+                    .max()
+                    .unwrap_or(1)
+                    .max(1) as f32;
+                let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
+                let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
+                let items: Vec<Element<Message>> = self
+                    .workspaces
+                    .iter()
+                    .map(|w| self.ws_chip(w, variant, cell_w))
+                    .collect();
+                Some(row(items).spacing(4).align_y(Vertical::Center).into())
+            }
+            "window_title" | "title" => Some(text(self.title.clone()).into()),
+            "clock" | "time" => Some(text(self.time_str.clone()).into()),
+            "calendar" => {
+                let c = &self.calendar;
+                let base = if c.is_overdue {
+                    Color::from_rgb(1.0, 0.27, 0.27)
+                } else if c.is_urgent {
+                    Color::from_rgb(1.0, 0.67, 0.0)
+                } else {
+                    Color::WHITE
                 };
-                Message::SpotifyScroll(y > 0.0)
-            })
-            .into(),
-        );
-        right.push(sep().into());
-
-        // stock: green up / red down
-        {
-            let s = &self.stock;
-            let color = if s.is_positive && s.change != 0.0 {
-                Color::from_rgb(0.2, 0.8, 0.2)
-            } else if s.is_negative {
-                Color::from_rgb(1.0, 0.3, 0.3)
-            } else {
-                Color::WHITE
-            };
-            right.push(
-                mouse_area(text(s.display_text.clone()).color(color))
-                    .on_enter(Message::OpenPopup(PopupKind::Stock))
-                    .on_exit(Message::ClosePopup)
-                    .into(),
-            );
-        }
-        right.push(sep().into());
-
-        // volume (click mute, scroll change)
-        right.push(
-            mouse_area(text(self.volume.string.clone()))
-                .on_press(Message::VolumeClick)
+                let blinking = c.is_overdue || c.is_urgent;
+                let color = if blinking && !self.blink_on {
+                    Color { a: 0.4, ..base }
+                } else {
+                    base
+                };
+                let mut cal: Vec<Element<Message>> = vec![
+                    text("").into(),
+                    text(c.display_text.clone()).color(color).into(),
+                ];
+                if !c.time_until_next.is_empty() {
+                    cal.push(text(format!("[{}]", c.time_until_next)).color(color).into());
+                }
+                Some(
+                    mouse_area(row(cal).spacing(4).align_y(Vertical::Center))
+                        .on_press(Message::OpenPopup(PopupKind::Calendar))
+                        .into(),
+                )
+            }
+            "kubectl" => {
+                let kube_color = if self.kubectl.is_production {
+                    Color::from_rgb(1.0, 0.2, 0.2)
+                } else {
+                    Color::WHITE
+                };
+                Some(
+                    mouse_area(text(self.kubectl.string.clone()).color(kube_color))
+                        .on_press(Message::KubectlClear)
+                        .on_right_press(Message::OpenPopup(PopupKind::Kubectl))
+                        .into(),
+                )
+            }
+            "temperature" | "temp" => Some(self.metric(
+                &self.temp_str,
+                self.show_temp_graph,
+                &self.temp_hist,
+                GraphKind::Temperature,
+            )),
+            "memory" | "mem" => Some(self.metric(
+                &self.mem_str,
+                self.show_mem_graph,
+                &self.mem_hist,
+                GraphKind::Memory,
+            )),
+            "ping" => Some(self.metric(
+                &self.ping.string,
+                self.show_ping_graph,
+                &self.ping_hist,
+                GraphKind::Ping,
+            )),
+            "spotify" => Some(
+                mouse_area(text(marquee(
+                    &self.spotify.track_string,
+                    self.spotify_offset,
+                    40,
+                )))
+                .on_press(Message::SpotifyClick)
                 .on_scroll(|delta| {
                     let y = match delta {
                         iced::mouse::ScrollDelta::Lines { y, .. } => y,
                         iced::mouse::ScrollDelta::Pixels { y, .. } => y,
                     };
-                    Message::VolumeScroll(if y > 0.0 { 1 } else { -1 })
+                    Message::SpotifyScroll(y > 0.0)
                 })
                 .into(),
-        );
-        right.push(sep().into());
-
-        if self.has_battery {
-            right.push(text(self.battery_str.clone()).into());
-            right.push(sep().into());
-        }
-
-        right.push(text(self.time_str.clone()).into());
-
-        // The ▾ preset switcher (RFC 0002), if enabled for the right side.
-        let switcher_btn = || -> Element<Message> {
-            let dim = self.config.theme.dim.iced();
-            mouse_area(
-                container(
-                    text("\u{f107}")
-                        .size(self.config.theme.font_size)
-                        .color(dim),
+            ),
+            "stock" => {
+                let s = &self.stock;
+                let color = if s.is_positive && s.change != 0.0 {
+                    Color::from_rgb(0.2, 0.8, 0.2)
+                } else if s.is_negative {
+                    Color::from_rgb(1.0, 0.3, 0.3)
+                } else {
+                    Color::WHITE
+                };
+                Some(
+                    mouse_area(text(s.display_text.clone()).color(color))
+                        .on_enter(Message::OpenPopup(PopupKind::Stock))
+                        .on_exit(Message::ClosePopup)
+                        .into(),
                 )
-                .padding([0, 4])
-                .center_y(Length::Fill),
-            )
-            .on_press(Message::OpenPopup(PopupKind::Switcher))
-            .into()
-        };
-        if self.config.bar.switcher == SwitcherPos::Right {
-            right.push(switcher_btn());
+            }
+            "volume" => Some(
+                mouse_area(text(self.volume.string.clone()))
+                    .on_press(Message::VolumeClick)
+                    .on_scroll(|delta| {
+                        let y = match delta {
+                            iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                            iced::mouse::ScrollDelta::Pixels { y, .. } => y,
+                        };
+                        Message::VolumeScroll(if y > 0.0 { 1 } else { -1 })
+                    })
+                    .into(),
+            ),
+            "battery" => self
+                .has_battery
+                .then(|| text(self.battery_str.clone()).into()),
+            "switcher" => Some(self.switcher_button()),
+            // anything else: an RFC 0001 module placed by its id (cpu/github/claude/…)
+            other => self.render_module(other),
+        }
+    }
+
+    /// Build one zone (a row of items) from an ordered id list, inserting the
+    /// configured separator between items (never before the `▾` switcher).
+    fn build_zone(&self, ids: &[String]) -> Element<'_, Message> {
+        let s = &self.config.theme.separator;
+        let glyph = s.glyph.clone().unwrap_or_else(|| "|".to_string());
+        let sep_color = s.color.iced();
+        let mut items: Vec<Element<Message>> = Vec::new();
+        for id in ids {
+            if let Some(el) = self.render_id(id) {
+                if !items.is_empty() && id != "switcher" {
+                    items.push(text(glyph.clone()).color(sep_color).into());
+                }
+                items.push(el);
+            }
+        }
+        row(items).spacing(6).align_y(Vertical::Center).into()
+    }
+
+    fn bar_view(&self) -> Element<'_, Message> {
+        // Config placement (RFC 0002) drives which widgets render and in what order;
+        // an empty zone falls back to the shipped default (today's bar).
+        const DEFAULT_RIGHT: &[&str] = &[
+            "cpu",
+            "github",
+            "claude",
+            "calendar",
+            "kubectl",
+            "temperature",
+            "memory",
+            "ping",
+            "spotify",
+            "stock",
+            "volume",
+            "battery",
+            "clock",
+        ];
+        let mut left_ids = zone_ids(&self.config.left, &["workspaces"]);
+        let center_ids = zone_ids(&self.config.center, &["window_title"]);
+        let mut right_ids = zone_ids(&self.config.right, DEFAULT_RIGHT);
+
+        // Place the ▾ switcher per [bar].switcher (unless the user listed it).
+        let has_switcher = |v: &[String]| v.iter().any(|s| s == "switcher");
+        match self.config.bar.switcher {
+            SwitcherPos::Left if !has_switcher(&left_ids) => left_ids.insert(0, "switcher".into()),
+            SwitcherPos::Right if !has_switcher(&right_ids) => right_ids.push("switcher".into()),
+            _ => {}
         }
 
-        let right_inner: Element<Message> = row(right).spacing(6).align_y(Vertical::Center).into();
+        let ws_row = self.build_zone(&left_ids);
+        let title_el = self.build_zone(&center_ids);
+        let right_inner = self.build_zone(&right_ids);
 
         if matches!(self.config.theme.style, Style::Islands) {
             // Floating SQUARE islands over a transparent surface — our take on
