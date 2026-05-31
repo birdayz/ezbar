@@ -73,11 +73,17 @@ GPU 7-day chart shown:
 
 ![stock popup](assets/popup.png)
 
-> These are captures of the **current implementation** (config parsing, theme
-> hot-reload, square chips, islands, GPU graphs, and layer-shell popups all run
-> today). The **preset switcher `▾`**, `[palette]` `$ref` resolution, and `ezbar msg`
-> are the *proposed* additions this RFC specifies; they're built on the proven
-> hot-reload path above.
+**Preset switcher** — the `▾` on the bar opens this list of drop-in presets; selecting
+one applies **live** (theme-only hot-reload) and persists to the state file. Shipped:
+
+![preset switcher](assets/switcher.png)
+
+> These are captures of the **current implementation** — config parsing, theme
+> hot-reload, square chips, islands, GPU graphs, layer-shell popups, **drop-in
+> presets, `$palette` `$ref` resolution, and the `▾` switcher** all run today.
+> Still *proposed* here: `ezbar msg` IPC, config-driven module placement, the
+> floating `[bar].margin/radius` surface geometry, and `[modules.<id>.graph]` knobs —
+> each built on the proven hot-reload path above.
 
 ## Motivation
 

@@ -11,7 +11,7 @@ use iced_layershell::reexport::{
 use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 
-use ezbar::config::{self, Config, Style};
+use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::history::History;
 use ezbar::modules;
 use ezbar::sources::sway::{SwayUpdate, Workspace};
@@ -131,6 +131,7 @@ enum PopupKind {
     Calendar,
     Kubectl,
     Stock,
+    Switcher,
 }
 
 struct Bar {
@@ -212,6 +213,7 @@ enum Message {
     SpotifyClick,
     SpotifyScroll(bool),
     SwitchWorkspace(String),
+    SelectPreset(String),
     OpenPopup(PopupKind),
     ClosePopup,
     BlinkTick,
@@ -240,6 +242,7 @@ fn popup_size(kind: PopupKind) -> (u32, u32) {
         PopupKind::Calendar => (380, 320),
         PopupKind::Kubectl => (320, 360),
         PopupKind::Stock => (520, 300),
+        PopupKind::Switcher => (220, 280),
     }
 }
 
@@ -341,6 +344,7 @@ impl Bar {
             let kind = match k.as_str() {
                 "kubectl" => PopupKind::Kubectl,
                 "stock" => PopupKind::Stock,
+                "switcher" => PopupKind::Switcher,
                 _ => PopupKind::Calendar,
             };
             return (
@@ -510,6 +514,20 @@ impl Bar {
                 },
                 |()| Message::Noop,
             ),
+            Message::SelectPreset(name) => {
+                // Persist the choice (state file, never config.toml), then reload so
+                // the preset applies live through the theme path. Closes the popup.
+                if let Err(e) = config::save_active_preset(&name) {
+                    log::warn!("could not save preset selection: {e}");
+                }
+                let close = self.close_popup_task();
+                self.config = config::load();
+                self.theme = self.config.theme_tokens();
+                if std::env::var("EZBAR_WS_STYLE").is_err() {
+                    self.ws_style = self.config.theme.workspaces.style.variant();
+                }
+                close
+            }
             Message::OpenPopup(kind) => {
                 // One popup at a time: a hardcoded popup also closes any module popup.
                 let close_mod = self.close_module_popup_any();
@@ -904,11 +922,24 @@ impl Bar {
             .max(1) as f32;
         let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
         let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
-        let ws_items: Vec<Element<Message>> = self
-            .workspaces
-            .iter()
-            .map(|w| self.ws_chip(w, variant, cell_w))
-            .collect();
+        let mut ws_items: Vec<Element<Message>> = Vec::new();
+        if self.config.bar.switcher == SwitcherPos::Left {
+            let dim = self.config.theme.dim.iced();
+            ws_items.push(
+                mouse_area(
+                    container(text("\u{f107}").size(fs).color(dim))
+                        .padding([0, 4])
+                        .center_y(Length::Fill),
+                )
+                .on_press(Message::OpenPopup(PopupKind::Switcher))
+                .into(),
+            );
+        }
+        ws_items.extend(
+            self.workspaces
+                .iter()
+                .map(|w| self.ws_chip(w, variant, cell_w)),
+        );
         let ws_row: Element<Message> = row(ws_items).spacing(4).align_y(Vertical::Center).into();
 
         // ---- center: focused window title ----
@@ -1071,6 +1102,25 @@ impl Bar {
 
         right.push(text(self.time_str.clone()).into());
 
+        // The ▾ preset switcher (RFC 0002), if enabled for the right side.
+        let switcher_btn = || -> Element<Message> {
+            let dim = self.config.theme.dim.iced();
+            mouse_area(
+                container(
+                    text("\u{f107}")
+                        .size(self.config.theme.font_size)
+                        .color(dim),
+                )
+                .padding([0, 4])
+                .center_y(Length::Fill),
+            )
+            .on_press(Message::OpenPopup(PopupKind::Switcher))
+            .into()
+        };
+        if self.config.bar.switcher == SwitcherPos::Right {
+            right.push(switcher_btn());
+        }
+
         let right_inner: Element<Message> = row(right).spacing(6).align_y(Vertical::Center).into();
 
         if matches!(self.config.theme.style, Style::Islands) {
@@ -1168,6 +1218,7 @@ impl Bar {
             PopupKind::Calendar => self.calendar_popup(),
             PopupKind::Kubectl => self.kubectl_popup(),
             PopupKind::Stock => self.stock_popup(),
+            PopupKind::Switcher => self.switcher_popup(),
         };
         container(body)
             .width(Length::Fill)
@@ -1236,6 +1287,37 @@ impl Bar {
             );
         }
         scrollable(column(col).spacing(4)).into()
+    }
+
+    fn switcher_popup(&self) -> Element<'_, Message> {
+        let accent = self.config.theme.primary.iced();
+        let fg = self.config.theme.text.iced();
+        let dim = self.config.theme.dim.iced();
+        let active = config::active_preset();
+        let mut col: Vec<Element<Message>> = vec![text("Theme").size(15).color(dim).into()];
+        let names = config::preset_names();
+        if names.is_empty() {
+            col.push(
+                text("(drop presets into ~/.config/ezbar/presets/)")
+                    .size(11)
+                    .color(dim)
+                    .into(),
+            );
+        }
+        for name in names {
+            let is_current = active.as_deref() == Some(name.as_str());
+            let (marker, color) = if is_current {
+                ("\u{f00c} ", accent) // check
+            } else {
+                ("  ", fg)
+            };
+            col.push(
+                mouse_area(text(format!("{marker}{name}")).color(color))
+                    .on_press(Message::SelectPreset(name.clone()))
+                    .into(),
+            );
+        }
+        scrollable(column(col).spacing(6)).into()
     }
 
     fn stock_popup(&self) -> Element<'_, Message> {

@@ -154,9 +154,11 @@ The live theme switch from RFC 0002, surfaced on the bar. A small `▾` `icon_bu
 (`[bar].switcher`, default right end) opens a `popup_frame` list of presets (inline +
 the `presets/*.toml` drop-ins), current one marked; selecting one applies **live** via
 the theme-only hot-reload path (no module churn, feels instant) and persists to the
-state file. Also driven headless by `ezbar msg preset <name|next|prev>`. This is a
-front-page feature with **no ashell equivalent**; it's why presets are worth the
-machinery.
+state file. Also driven headless by `ezbar msg preset <name|next|prev>` (proposed).
+This is a front-page feature with **no ashell equivalent**; it's why presets are worth
+the machinery. **Shipped** — the `▾` opens this list of drop-in presets:
+
+![preset switcher](assets/switcher.png)
 
 ## Default appearance (what 90% see)
 

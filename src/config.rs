@@ -85,6 +85,16 @@ pub enum Style {
     Islands,
 }
 
+/// Where the `▾` preset switcher sits on the bar (RFC 0002).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SwitcherPos {
+    Off,
+    Left,
+    #[default]
+    Right,
+}
+
 /// `"all"` or an explicit list of output names.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -326,6 +336,7 @@ pub struct Bar {
     pub outputs: Outputs,
     pub font: Option<String>,
     pub scale: f32,
+    pub switcher: SwitcherPos,
 }
 
 impl Default for Bar {
@@ -337,6 +348,7 @@ impl Default for Bar {
             outputs: Outputs::default(),
             font: None,
             scale: 1.0,
+            switcher: SwitcherPos::default(),
         }
     }
 }
