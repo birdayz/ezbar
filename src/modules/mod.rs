@@ -7,7 +7,10 @@ pub mod disk;
 pub mod github;
 pub mod ip;
 pub mod keyboard;
+pub mod memory;
 pub mod net;
+pub mod ping;
+pub mod temperature;
 pub mod updates;
 pub mod workspaces;
 
@@ -28,6 +31,9 @@ pub fn is_module(id: &str) -> bool {
             | "updates"
             | "keyboard"
             | "workspaces"
+            | "memory"
+            | "temperature"
+            | "ping"
     )
 }
 
@@ -46,6 +52,9 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "updates" => Some(Box::new(updates::Updates::new(instance, cfg))),
         "keyboard" => Some(Box::new(keyboard::Keyboard::new(instance, cfg))),
         "workspaces" => Some(Box::new(workspaces::Workspaces::new(instance, cfg))),
+        "memory" => Some(Box::new(memory::Memory::new(instance))),
+        "temperature" => Some(Box::new(temperature::Temperature::new(instance))),
+        "ping" => Some(Box::new(ping::Ping::new(instance, cfg))),
         _ => None,
     }
 }

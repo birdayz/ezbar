@@ -12,17 +12,15 @@ use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
 use iced_layershell::to_layer_message;
 
 use ezbar::config::{self, Config, Style, SwitcherPos};
-use ezbar::history::History;
 use ezbar::modules;
 use ezbar::sources::sway::SwayUpdate;
-use ezbar::sources::{battery, calendar, kubectl, ping, spotify, stock, sway, system, volume};
-use ezbar_plugin::ui::graph::{Graph, GraphKind, StockChart};
+use ezbar::sources::{battery, calendar, kubectl, spotify, stock, sway, volume};
+use ezbar_plugin::ui::graph::StockChart;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
 mod install;
 mod ipc;
 
-const PING_TARGET: &str = "8.8.8.8";
 const BAR_HEIGHT: u32 = 34;
 
 /// Default right-zone placement (today's bar) when `right` is unconfigured.
@@ -175,26 +173,13 @@ struct Bar {
     module_popup: Option<(window::Id, u64, PopupMode)>,
     modules: Vec<ModuleEntry>,
 
-    // system
-    mem_str: String,
-    temp_str: String,
-    ping: ping::PingData,
+    // system (cpu/memory/temperature/ping are their own modules now)
     time_str: String,
     battery_str: String,
     has_battery: bool,
     volume: volume::VolumeData,
     kubectl: kubectl::KubectlData,
     kubectl_contexts: Vec<String>,
-
-    // graph histories
-    mem_hist: History,
-    temp_hist: History,
-    ping_hist: History,
-
-    // graph visibility (memory + ping start hidden, like the Go version)
-    show_mem_graph: bool,
-    show_temp_graph: bool,
-    show_ping_graph: bool,
 
     // sway (workspaces is its own module now; the host only tracks the title)
     title: String,
@@ -240,9 +225,6 @@ fn focused_output_width() -> u32 {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
-    Mem(String),
-    Temp(String),
-    Ping(ping::PingData),
     Time(String),
     Battery(String),
     Volume(volume::VolumeData),
@@ -254,7 +236,6 @@ enum Message {
     StockChart(Vec<f64>),
     Spotify(spotify::SpotifyData),
 
-    ToggleGraph(GraphKind),
     VolumeClick,
     VolumeScroll(i32),
     KubectlClear,
@@ -507,21 +488,12 @@ impl Bar {
             popup: None,
             module_popup: None,
             modules: build_modules(&config),
-            mem_str: " --".to_string(),
-            temp_str: " --".to_string(),
-            ping: ping::PingData::default(),
             time_str: "Loading…".to_string(),
             battery_str: " --".to_string(),
             has_battery: battery::has_battery(),
             volume: volume::VolumeData::default(),
             kubectl: kubectl::KubectlData::default(),
             kubectl_contexts: Vec::new(),
-            mem_hist: History::new(20),
-            temp_hist: History::new(60),
-            ping_hist: History::new(40),
-            show_mem_graph: false,
-            show_temp_graph: true,
-            show_ping_graph: false,
             title: String::new(),
             calendar: calendar::CalendarData {
                 display_text: " …".to_string(),
@@ -563,23 +535,6 @@ impl Bar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Mem(s) => {
-                self.mem_hist.add(system::extract_memory_usage_value(&s));
-                self.mem_str = s;
-                Task::none()
-            }
-            Message::Temp(s) => {
-                self.temp_hist.add(system::extract_temperature_value(&s));
-                self.temp_str = s;
-                Task::none()
-            }
-            Message::Ping(d) => {
-                if d.is_up {
-                    self.ping_hist.add(d.latency);
-                }
-                self.ping = d;
-                Task::none()
-            }
             Message::Time(s) => {
                 self.time_str = s;
                 self.spotify_offset = self.spotify_offset.wrapping_add(1);
@@ -620,16 +575,6 @@ impl Bar {
             }
             Message::Spotify(d) => {
                 self.spotify = d;
-                Task::none()
-            }
-            Message::ToggleGraph(kind) => {
-                match kind {
-                    // cpu is a module now; it toggles its own graph internally.
-                    GraphKind::Cpu => {}
-                    GraphKind::Memory => self.show_mem_graph = !self.show_mem_graph,
-                    GraphKind::Temperature => self.show_temp_graph = !self.show_temp_graph,
-                    GraphKind::Ping => self.show_ping_graph = !self.show_ping_graph,
-                }
                 Task::none()
             }
             Message::VolumeClick => Task::perform(
@@ -1062,24 +1007,7 @@ impl Bar {
                         .into(),
                 )
             }
-            "temperature" | "temp" => Some(self.metric(
-                &self.temp_str,
-                self.show_temp_graph,
-                &self.temp_hist,
-                GraphKind::Temperature,
-            )),
-            "memory" | "mem" => Some(self.metric(
-                &self.mem_str,
-                self.show_mem_graph,
-                &self.mem_hist,
-                GraphKind::Memory,
-            )),
-            "ping" => Some(self.metric(
-                &self.ping.string,
-                self.show_ping_graph,
-                &self.ping_hist,
-                GraphKind::Ping,
-            )),
+            // cpu/memory/temperature/ping are Modules now (rendered by key)
             "spotify" => Some(
                 mouse_area(text(marquee(
                     &self.spotify.track_string,
@@ -1248,28 +1176,6 @@ impl Bar {
                 .height(Length::Fill)
                 .padding([0, 8])
                 .into()
-        }
-    }
-
-    /// A metric label plus optional canvas graph; click toggles graph visibility.
-    fn metric<'a>(
-        &self,
-        label: &str,
-        show_graph: bool,
-        hist: &History,
-        kind: GraphKind,
-    ) -> Element<'a, Message> {
-        let lbl = mouse_area(text(label.to_string())).on_press(Message::ToggleGraph(kind));
-        if show_graph {
-            let g = canvas(Graph {
-                values: hist.ordered(),
-                kind,
-            })
-            .width(Length::Fixed(80.0))
-            .height(Length::Fixed(20.0));
-            row![lbl, g].spacing(4).align_y(Vertical::Center).into()
-        } else {
-            lbl.into()
         }
     }
 
@@ -1492,11 +1398,8 @@ impl Bar {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
-            Subscription::run(mem_stream),
             Subscription::run(config_stream),
             Subscription::run(ipc_stream),
-            Subscription::run(temp_stream),
-            Subscription::run(ping_stream),
             Subscription::run(time_stream),
             Subscription::run(volume_stream),
             Subscription::run(kubectl_stream),
@@ -1629,51 +1532,6 @@ fn config_stream() -> impl Stream<Item = Message> {
                 }
             }
             drop(watcher);
-        },
-    )
-}
-
-fn mem_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let s = tokio::task::spawn_blocking(system::get_memory_usage)
-                    .await
-                    .unwrap_or_else(|_| " --".to_string());
-                let _ = output.send(Message::Mem(s)).await;
-                tokio::time::sleep(Duration::from_secs(3)).await;
-            }
-        },
-    )
-}
-
-fn temp_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let s = tokio::task::spawn_blocking(system::get_cpu_temperature)
-                    .await
-                    .unwrap_or_else(|_| " --".to_string());
-                let _ = output.send(Message::Temp(s)).await;
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        },
-    )
-}
-
-fn ping_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let d = tokio::task::spawn_blocking(|| ping::perform_ping(PING_TARGET))
-                    .await
-                    .unwrap_or_default();
-                let _ = output.send(Message::Ping(d)).await;
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
         },
     )
 }
