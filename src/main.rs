@@ -14,9 +14,10 @@ use iced_layershell::to_layer_message;
 use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::history::History;
 use ezbar::modules;
-use ezbar::sources::sway::{SwayUpdate, Workspace};
+use ezbar::sources::sway::SwayUpdate;
 use ezbar::sources::{battery, calendar, kubectl, ping, spotify, stock, sway, system, volume};
 use ezbar::widgets::graph::{Graph, GraphKind, StockChart};
+use ezbar::widgets::workspaces::{WorkspacesView, WsAction};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
 mod install;
@@ -197,10 +198,8 @@ struct Bar {
     show_ping_graph: bool,
 
     // sway
-    workspaces: Vec<Workspace>,
+    workspaces: WorkspacesView,
     title: String,
-    // trackpad scroll accumulator for workspace switching (pixel deltas)
-    ws_scroll_accum: f32,
 
     // network widgets
     calendar: calendar::CalendarData,
@@ -220,9 +219,6 @@ struct Bar {
     // config + resolved module theme (RFC 0002)
     config: Config,
     theme: ThemeTokens,
-
-    // temporary A/B switch for the workspace-chip style (env EZBAR_WS_STYLE)
-    ws_style: u8,
 
     // focused output width, so popups can be clamped on-screen
     screen_w: u32,
@@ -510,11 +506,6 @@ impl Bar {
             id: bar_id,
         });
         let theme = config.theme_tokens();
-        // Workspace chip style: config drives it; EZBAR_WS_STYLE overrides (dev A/B).
-        let ws_style = std::env::var("EZBAR_WS_STYLE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| config.theme.workspaces.style.variant());
         let bar = Bar {
             bar_id,
             popup: None,
@@ -535,9 +526,8 @@ impl Bar {
             show_mem_graph: false,
             show_temp_graph: true,
             show_ping_graph: false,
-            workspaces: Vec::new(),
+            workspaces: WorkspacesView::default(),
             title: String::new(),
-            ws_scroll_accum: 0.0,
             calendar: calendar::CalendarData {
                 display_text: " …".to_string(),
                 ..Default::default()
@@ -554,7 +544,6 @@ impl Bar {
             cursor_x: 0.0,
             config,
             theme,
-            ws_style,
             screen_w: focused_output_width(),
         };
         // Dev/screenshot hook: open a popup on startup for deterministic capture.
@@ -618,7 +607,7 @@ impl Bar {
                 Task::none()
             }
             Message::Sway(SwayUpdate::Workspaces(ws)) => {
-                self.workspaces = ws;
+                self.workspaces.set(ws);
                 Task::none()
             }
             Message::Sway(SwayUpdate::Title(t)) => {
@@ -733,33 +722,9 @@ impl Bar {
                 |()| Message::Noop,
             ),
             Message::WorkspaceScroll(delta) => {
-                // scroll up = previous workspace, down = next. Mouse wheels emit
-                // discrete Lines (one switch per notch); trackpads emit small Pixels,
-                // so accumulate to a threshold to avoid flying through workspaces.
-                let dir = match delta {
-                    iced::mouse::ScrollDelta::Lines { y, .. } => {
-                        if y > 0.0 {
-                            -1
-                        } else if y < 0.0 {
-                            1
-                        } else {
-                            0
-                        }
-                    }
-                    iced::mouse::ScrollDelta::Pixels { y, .. } => {
-                        self.ws_scroll_accum += y;
-                        const STEP: f32 = 40.0;
-                        if self.ws_scroll_accum >= STEP {
-                            self.ws_scroll_accum = 0.0;
-                            -1
-                        } else if self.ws_scroll_accum <= -STEP {
-                            self.ws_scroll_accum = 0.0;
-                            1
-                        } else {
-                            0
-                        }
-                    }
-                };
+                // up = previous workspace, down = next (the widget owns the
+                // trackpad-pixel accumulator and returns the step direction).
+                let dir = self.workspaces.scroll_dir(delta);
                 if dir == 0 {
                     return Task::none();
                 }
@@ -1003,118 +968,6 @@ impl Bar {
         }
     }
 
-    /// One workspace rendered as a square, state-filled chip (our square/dark
-    /// identity — not ashell's rounded morphing pill). State drives the *fill*,
-    /// not the width; `cell_w` is a shared, uniform cell width so `1` and `10`
-    /// read as the same square cell. `variant` (env `EZBAR_WS_STYLE`, 1-4) is a
-    /// temporary A/B switch for design selection; the winner becomes the default.
-    fn ws_chip<'a>(&'a self, w: &'a Workspace, variant: u8, cell_w: f32) -> Element<'a, Message> {
-        let th = &self.config.theme;
-        let accent = th.primary.iced();
-        let fg = th.text.iced();
-        let dim = th.dim.iced();
-        let urg = th.urgent.iced();
-        let base = th.background.base().iced(); // dark text on a bright fill
-        let radius: f32 = 0.0; // square identity (theme.radius.item once wired)
-        let fs = th.font_size;
-        let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
-
-        let focused = w.focused;
-        let visible = w.visible && !w.focused;
-        let urgent = w.urgent;
-        let blink = urgent && !self.blink_on;
-        let fade = |c: Color| if blink { Color { a: 0.4, ..c } } else { c };
-        let tint = |c: Color, a: f32| Color { a, ..c };
-
-        // 4 — accent underbar: numbers + a 2px bar under the active ws.
-        if variant == 4 {
-            let (txt, bar_color) = if urgent {
-                (fade(urg), fade(urg))
-            } else if focused {
-                (fg, accent)
-            } else if visible {
-                (fg, Color::TRANSPARENT)
-            } else {
-                (dim, Color::TRANSPARENT)
-            };
-            let label = container(text(w.name.clone()).size(fs).color(txt))
-                .width(Length::Fixed(cell_w))
-                .height(Length::Fill)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center);
-            let underbar = container(Space::new().height(Length::Fixed(2.0)))
-                .width(Length::Fixed(cell_w))
-                .style(move |_: &iced::Theme| container::Style {
-                    background: Some(Background::Color(bar_color)),
-                    ..Default::default()
-                });
-            return mouse_area(column![label, underbar].height(Length::Fixed(chip_h)))
-                .on_press(Message::SwitchWorkspace(w.name.clone()))
-                .into();
-        }
-
-        // (background, border_width, border_color, text_color) per state.
-        let (bg, bw, bc, txt): (Option<Color>, f32, Color, Color) = match variant {
-            // 1 — filled focus only: just the active ws is a solid square.
-            1 => {
-                if urgent {
-                    (Some(fade(urg)), 0.0, urg, base)
-                } else if focused {
-                    (Some(accent), 0.0, accent, base)
-                } else if visible {
-                    (None, 0.0, fg, fg)
-                } else {
-                    (None, 0.0, dim, dim)
-                }
-            }
-            // 3 — outlined focus: square accent border, transparent fill.
-            3 => {
-                if urgent {
-                    (None, 1.5, fade(urg), fade(urg))
-                } else if focused {
-                    (None, 1.5, accent, accent)
-                } else if visible {
-                    (None, 1.0, tint(fg, 0.35), fg)
-                } else {
-                    (None, 1.0, tint(fg, 0.12), dim)
-                }
-            }
-            // 2 — all boxed (default): every ws a defined cell, tiered by state.
-            // Each idle cell carries a hairline border so it separates cleanly
-            // from the panel even at low fill (the v1 boxes were too muddy).
-            _ => {
-                if urgent {
-                    (Some(fade(urg)), 0.0, urg, base)
-                } else if focused {
-                    (Some(accent), 0.0, accent, base)
-                } else if visible {
-                    (Some(tint(accent, 0.28)), 1.0, tint(accent, 0.55), fg)
-                } else {
-                    (Some(tint(fg, 0.10)), 1.0, tint(fg, 0.16), tint(fg, 0.78))
-                }
-            }
-        };
-
-        let inner = container(text(w.name.clone()).size(fs).color(txt))
-            .width(Length::Fixed(cell_w))
-            .height(Length::Fixed(chip_h))
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
-            .style(move |_: &iced::Theme| container::Style {
-                background: bg.map(Background::Color),
-                border: Border {
-                    color: bc,
-                    width: bw,
-                    radius: radius.into(),
-                },
-                text_color: Some(txt),
-                ..Default::default()
-            });
-        mouse_area(inner)
-            .on_press(Message::SwitchWorkspace(w.name.clone()))
-            .into()
-    }
-
     fn close_popup_task(&mut self) -> Task<Message> {
         if let Some((pid, _)) = self.popup.take() {
             iced::window::close(pid)
@@ -1208,31 +1061,14 @@ impl Bar {
     /// show (e.g. `battery` on a desktop).
     fn render_widget(&self, id: &str) -> Option<Element<'_, Message>> {
         match id {
-            "workspaces" => {
-                let fs = self.config.theme.font_size;
-                let variant = self.ws_style;
-                let max_chars = self
-                    .workspaces
-                    .iter()
-                    .map(|w| w.name.chars().count())
-                    .max()
-                    .unwrap_or(1)
-                    .max(1) as f32;
-                let chip_h = (self.config.bar.height as f32 - 10.0).max(14.0);
-                let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
-                let items: Vec<Element<Message>> = self
-                    .workspaces
-                    .iter()
-                    .map(|w| self.ws_chip(w, variant, cell_w))
-                    .collect();
-                // scroll over the zone to switch workspace (chips handle clicks; the
-                // outer mouse_area catches scroll the chips don't consume)
-                Some(
-                    mouse_area(row(items).spacing(4).align_y(Vertical::Center))
-                        .on_scroll(Message::WorkspaceScroll)
-                        .into(),
-                )
-            }
+            "workspaces" => Some(
+                self.workspaces
+                    .view(&self.config.theme, self.config.bar.height, self.blink_on)
+                    .map(|action| match action {
+                        WsAction::Switch(name) => Message::SwitchWorkspace(name),
+                        WsAction::Scroll(delta) => Message::WorkspaceScroll(delta),
+                    }),
+            ),
             "window_title" | "title" => Some(text(self.title.clone()).into()),
             "clock" | "time" => Some(text(self.time_str.clone()).into()),
             "calendar" => {
@@ -1624,17 +1460,15 @@ impl Bar {
         .into()
     }
 
-    /// Adopt a freshly-loaded config: re-resolve theme + ws-style, and rebuild the
-    /// live module set **only if** placement or any `[modules.*]` changed (so a pure
-    /// theme/preset switch is a cheap re-render that keeps module state).
+    /// Adopt a freshly-loaded config: re-resolve theme, and rebuild the live module
+    /// set **only if** placement or any `[modules.*]` changed (so a pure theme/preset
+    /// switch is a cheap re-render that keeps module state). The workspaces widget
+    /// reads its style straight from `self.config.theme.workspaces` on render.
     fn apply_config(&mut self, cfg: Config) {
         let modules_changed = resolved_module_ids(&cfg) != resolved_module_ids(&self.config)
             || cfg.modules != self.config.modules;
         self.config = cfg;
         self.theme = self.config.theme_tokens();
-        if std::env::var("EZBAR_WS_STYLE").is_err() {
-            self.ws_style = self.config.theme.workspaces.style.variant();
-        }
         if modules_changed {
             self.rebuild_modules();
         }
