@@ -1,6 +1,8 @@
 //! Compile-in modules implementing `ezbar_plugin::Module` (RFC 0001, phase 1).
 
+pub mod battery;
 pub mod claude;
+pub mod clock;
 pub mod cpu;
 pub mod custom;
 pub mod disk;
@@ -12,6 +14,7 @@ pub mod net;
 pub mod ping;
 pub mod temperature;
 pub mod updates;
+pub mod volume;
 pub mod window_title;
 pub mod workspaces;
 
@@ -36,6 +39,9 @@ pub fn is_module(id: &str) -> bool {
             | "temperature"
             | "ping"
             | "window_title"
+            | "clock"
+            | "volume"
+            | "battery"
     )
 }
 
@@ -58,6 +64,9 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "temperature" => Some(Box::new(temperature::Temperature::new(instance))),
         "ping" => Some(Box::new(ping::Ping::new(instance, cfg))),
         "window_title" => Some(Box::new(window_title::WindowTitle::new(instance, cfg))),
+        "clock" => Some(Box::new(clock::Clock::new(instance, cfg))),
+        "volume" => Some(Box::new(volume::Volume::new(instance))),
+        "battery" => Some(Box::new(battery::Battery::new(instance))),
         _ => None,
     }
 }

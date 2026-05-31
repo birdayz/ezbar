@@ -167,6 +167,12 @@ pub trait Module: Send {
         Response::none()
     }
 
+    /// Whether the module has anything to show right now. `false` hides it (and its
+    /// separators) entirely — e.g. a `battery` module on a desktop with no battery.
+    fn visible(&self) -> bool {
+        true
+    }
+
     /// Bar content. Full iced: `canvas`, `mouse_area`, etc.
     fn view(&self, ctx: &Ctx) -> iced::Element<'_, ModMsg>;
 

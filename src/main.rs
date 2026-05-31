@@ -13,7 +13,7 @@ use iced_layershell::to_layer_message;
 
 use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::modules;
-use ezbar::sources::{battery, calendar, kubectl, spotify, stock, volume};
+use ezbar::sources::{calendar, kubectl, spotify, stock, volume};
 use ezbar_plugin::ui::graph::StockChart;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
 
@@ -172,11 +172,7 @@ struct Bar {
     module_popup: Option<(window::Id, u64, PopupMode)>,
     modules: Vec<ModuleEntry>,
 
-    // system (cpu/memory/temperature/ping are their own modules now)
-    time_str: String,
-    battery_str: String,
-    has_battery: bool,
-    volume: volume::VolumeData,
+    // remaining host widgets (kubectl/calendar/stock/spotify still inline)
     kubectl: kubectl::KubectlData,
     kubectl_contexts: Vec<String>,
 
@@ -221,9 +217,6 @@ fn focused_output_width() -> u32 {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
-    Time(String),
-    Battery(String),
-    Volume(volume::VolumeData),
     Kubectl(kubectl::KubectlData),
     KubectlContexts(Vec<String>),
     Calendar(calendar::CalendarData),
@@ -231,8 +224,7 @@ enum Message {
     StockChart(Vec<f64>),
     Spotify(spotify::SpotifyData),
 
-    VolumeClick,
-    VolumeScroll(i32),
+    VolumeAdjust(i32), // IPC volume keybind path (0 = mute, ±1 = change)
     KubectlClear,
     KubectlSelect(String),
     SpotifyClick,
@@ -483,10 +475,6 @@ impl Bar {
             popup: None,
             module_popup: None,
             modules: build_modules(&config),
-            time_str: "Loading…".to_string(),
-            battery_str: " --".to_string(),
-            has_battery: battery::has_battery(),
-            volume: volume::VolumeData::default(),
             kubectl: kubectl::KubectlData::default(),
             kubectl_contexts: Vec::new(),
             calendar: calendar::CalendarData {
@@ -529,19 +517,6 @@ impl Bar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Time(s) => {
-                self.time_str = s;
-                self.spotify_offset = self.spotify_offset.wrapping_add(1);
-                Task::none()
-            }
-            Message::Battery(s) => {
-                self.battery_str = s;
-                Task::none()
-            }
-            Message::Volume(d) => {
-                self.volume = d;
-                Task::none()
-            }
             Message::Kubectl(d) => {
                 self.kubectl = d;
                 Task::none()
@@ -566,27 +541,18 @@ impl Bar {
                 self.spotify = d;
                 Task::none()
             }
-            Message::VolumeClick => Task::perform(
-                async {
-                    tokio::task::spawn_blocking(|| {
-                        volume::toggle_mute();
-                        volume::update_volume()
-                    })
-                    .await
-                    .unwrap_or_default()
-                },
-                Message::Volume,
-            ),
-            Message::VolumeScroll(dir) => Task::perform(
+            Message::VolumeAdjust(dir) => Task::perform(
                 async move {
-                    tokio::task::spawn_blocking(move || {
-                        volume::change_volume(dir);
-                        volume::update_volume()
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if dir == 0 {
+                            volume::toggle_mute();
+                        } else {
+                            volume::change_volume(dir);
+                        }
                     })
-                    .await
-                    .unwrap_or_default()
+                    .await;
                 },
-                Message::Volume,
+                |()| Message::Noop,
             ),
             Message::KubectlClear => Task::perform(
                 async {
@@ -668,6 +634,8 @@ impl Bar {
             Message::ClosePopup => self.close_popup_task(),
             Message::BlinkTick => {
                 self.blink_on = !self.blink_on;
+                // drive the spotify marquee scroll (was piggybacking on the clock tick)
+                self.spotify_offset = self.spotify_offset.wrapping_add(1);
                 Task::none()
             }
             Message::ConfigReloaded(Ok(cfg)) => {
@@ -912,6 +880,9 @@ impl Bar {
     fn render_module(&self, id: &str) -> Option<Element<'_, Message>> {
         let entry = self.modules.iter().find(|e| e.name == id)?;
         let instance = entry.id;
+        if !entry.disabled && !entry.module.visible() {
+            return None; // nothing to show (e.g. battery on a desktop)
+        }
         if entry.disabled {
             return Some(
                 text(format!(" {}", entry.name))
@@ -954,7 +925,7 @@ impl Bar {
         match id {
             // workspaces is a Module now (rendered by key via render_module)
             // window_title is a Module now (rendered by key)
-            "clock" | "time" => Some(text(self.time_str.clone()).into()),
+            // clock is a Module now (rendered by key)
             "calendar" => {
                 let c = &self.calendar;
                 let base = if c.is_overdue {
@@ -1029,21 +1000,7 @@ impl Bar {
                         .into(),
                 )
             }
-            "volume" => Some(
-                mouse_area(text(self.volume.string.clone()))
-                    .on_press(Message::VolumeClick)
-                    .on_scroll(|delta| {
-                        let y = match delta {
-                            iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                            iced::mouse::ScrollDelta::Pixels { y, .. } => y,
-                        };
-                        Message::VolumeScroll(if y > 0.0 { 1 } else { -1 })
-                    })
-                    .into(),
-            ),
-            "battery" => self
-                .has_battery
-                .then(|| text(self.battery_str.clone()).into()),
+            // volume + battery are Modules now (rendered by key)
             "switcher" => Some(self.switcher_button()),
             // not a host widget → it's a module, rendered by key in build_zone
             _ => None,
@@ -1361,9 +1318,9 @@ impl Bar {
                     Task::none()
                 }
             },
-            ["volume", "up"] => Task::done(Message::VolumeScroll(1)),
-            ["volume", "down"] => Task::done(Message::VolumeScroll(-1)),
-            ["volume", "mute"] => Task::done(Message::VolumeClick),
+            ["volume", "up"] => Task::done(Message::VolumeAdjust(1)),
+            ["volume", "down"] => Task::done(Message::VolumeAdjust(-1)),
+            ["volume", "mute"] => Task::done(Message::VolumeAdjust(0)),
             _ => {
                 log::warn!("ipc: unknown command: {cmd:?}");
                 Task::none()
@@ -1389,8 +1346,6 @@ impl Bar {
         let mut subs = vec![
             Subscription::run(config_stream),
             Subscription::run(ipc_stream),
-            Subscription::run(time_stream),
-            Subscription::run(volume_stream),
             Subscription::run(kubectl_stream),
             Subscription::run(calendar_stream),
             Subscription::run(stock_stream),
@@ -1421,9 +1376,6 @@ impl Bar {
                     .with(instance)
                     .map(|(instance, m)| Message::ModuleMsg { instance, msg: m }),
             );
-        }
-        if self.has_battery {
-            subs.push(Subscription::run(battery_stream));
         }
         Subscription::batch(subs)
     }
@@ -1524,34 +1476,6 @@ fn config_stream() -> impl Stream<Item = Message> {
     )
 }
 
-fn time_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let s = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                let _ = output.send(Message::Time(s)).await;
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        },
-    )
-}
-
-fn volume_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let d = tokio::task::spawn_blocking(volume::update_volume)
-                    .await
-                    .unwrap_or_default();
-                let _ = output.send(Message::Volume(d)).await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        },
-    )
-}
-
 fn kubectl_stream() -> impl Stream<Item = Message> {
     iced::stream::channel(
         1,
@@ -1561,21 +1485,6 @@ fn kubectl_stream() -> impl Stream<Item = Message> {
                     .await
                     .unwrap_or_default();
                 let _ = output.send(Message::Kubectl(d)).await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        },
-    )
-}
-
-fn battery_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(
-        1,
-        |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                let s = tokio::task::spawn_blocking(battery::get_battery_status)
-                    .await
-                    .unwrap_or_else(|_| " --".to_string());
-                let _ = output.send(Message::Battery(s)).await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         },
