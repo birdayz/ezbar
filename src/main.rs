@@ -199,6 +199,8 @@ struct Bar {
     // sway
     workspaces: Vec<Workspace>,
     title: String,
+    // trackpad scroll accumulator for workspace switching (pixel deltas)
+    ws_scroll_accum: f32,
 
     // network widgets
     calendar: calendar::CalendarData,
@@ -266,6 +268,7 @@ enum Message {
     SpotifyClick,
     SpotifyScroll(bool),
     SwitchWorkspace(String),
+    WorkspaceScroll(iced::mouse::ScrollDelta),
     SelectPreset(String),
     Ipc(String),
     OpenPopup(PopupKind),
@@ -534,6 +537,7 @@ impl Bar {
             show_ping_graph: false,
             workspaces: Vec::new(),
             title: String::new(),
+            ws_scroll_accum: 0.0,
             calendar: calendar::CalendarData {
                 display_text: " …".to_string(),
                 ..Default::default()
@@ -728,6 +732,54 @@ impl Bar {
                 },
                 |()| Message::Noop,
             ),
+            Message::WorkspaceScroll(delta) => {
+                // scroll up = previous workspace, down = next. Mouse wheels emit
+                // discrete Lines (one switch per notch); trackpads emit small Pixels,
+                // so accumulate to a threshold to avoid flying through workspaces.
+                let dir = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => {
+                        if y > 0.0 {
+                            -1
+                        } else if y < 0.0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => {
+                        self.ws_scroll_accum += y;
+                        const STEP: f32 = 40.0;
+                        if self.ws_scroll_accum >= STEP {
+                            self.ws_scroll_accum = 0.0;
+                            -1
+                        } else if self.ws_scroll_accum <= -STEP {
+                            self.ws_scroll_accum = 0.0;
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                };
+                if dir == 0 {
+                    return Task::none();
+                }
+                let cmd = if dir < 0 {
+                    "workspace prev_on_output"
+                } else {
+                    "workspace next_on_output"
+                };
+                Task::perform(
+                    async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(mut conn) = swayipc::Connection::new() {
+                                let _ = conn.run_command(cmd);
+                            }
+                        })
+                        .await;
+                    },
+                    |()| Message::Noop,
+                )
+            }
             Message::SelectPreset(name) => {
                 // Persist the choice (state file, never config.toml), then reload so
                 // the preset applies live through the theme path. Closes the popup.
@@ -1173,7 +1225,13 @@ impl Bar {
                     .iter()
                     .map(|w| self.ws_chip(w, variant, cell_w))
                     .collect();
-                Some(row(items).spacing(4).align_y(Vertical::Center).into())
+                // scroll over the zone to switch workspace (chips handle clicks; the
+                // outer mouse_area catches scroll the chips don't consume)
+                Some(
+                    mouse_area(row(items).spacing(4).align_y(Vertical::Center))
+                        .on_scroll(Message::WorkspaceScroll)
+                        .into(),
+                )
             }
             "window_title" | "title" => Some(text(self.title.clone()).into()),
             "clock" | "time" => Some(text(self.time_str.clone()).into()),
