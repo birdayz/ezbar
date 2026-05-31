@@ -134,6 +134,10 @@ struct Bar {
     // animation / polish state
     blink_on: bool,
     spotify_offset: usize,
+
+    // popup anchoring: last cursor x over the bar, so a popup opens above the
+    // widget the user interacted with (RFC 0001 slot-derived).
+    cursor_x: f32,
 }
 
 #[to_layer_message(multi)]
@@ -164,6 +168,7 @@ enum Message {
     ClosePopup,
     BlinkTick,
     WindowClosed(window::Id),
+    Cursor(window::Id, f32),
     Noop,
     ModuleMsg { instance: u64, msg: ModMsg },
 }
@@ -181,47 +186,33 @@ fn bar_settings() -> NewLayerShellSettings {
     }
 }
 
-fn popup_settings(kind: PopupKind) -> NewLayerShellSettings {
-    let (w, h, right) = match kind {
-        PopupKind::Calendar => (380u32, 320u32, 220i32),
-        PopupKind::Kubectl => (320, 360, 40),
-        PopupKind::Stock => (520, 300, 40),
-    };
-    NewLayerShellSettings {
-        size: Some((w, h)),
-        exclusive_zone: None,
-        anchor: Anchor::Bottom | Anchor::Right,
-        layer: Layer::Overlay,
-        // margin order: (top, right, bottom, left); float above the bar.
-        margin: Some((0, right, BAR_HEIGHT as i32 + 6, 0)),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: OutputOption::None,
-        namespace: Some("ezbar-popup".to_string()),
-        ..Default::default()
+fn popup_size(kind: PopupKind) -> (u32, u32) {
+    match kind {
+        PopupKind::Calendar => (380, 320),
+        PopupKind::Kubectl => (320, 360),
+        PopupKind::Stock => (520, 300),
     }
 }
 
-fn open_popup(kind: PopupKind) -> (window::Id, Task<Message>) {
-    let id = window::Id::unique();
-    (
-        id,
-        Task::done(Message::NewLayerShell {
-            settings: popup_settings(kind),
-            id,
-        }),
-    )
-}
+const MODULE_POPUP_SIZE: (u32, u32) = (480, 400);
 
-fn module_popup_settings(mode: PopupMode) -> NewLayerShellSettings {
+/// Layer-shell settings for a popup floating above the bar, with its left edge
+/// at `left_margin`. The host derives `left_margin` from the cursor so the popup
+/// sits over the widget the user interacted with (RFC 0001, slot-derived).
+fn popup_layer_settings(
+    size: (u32, u32),
+    left_margin: i32,
+    events_transparent: bool,
+) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((480, 400)),
+        size: Some(size),
         exclusive_zone: None,
-        anchor: Anchor::Bottom | Anchor::Right,
+        anchor: Anchor::Bottom | Anchor::Left,
         layer: Layer::Overlay,
-        margin: Some((0, 40, BAR_HEIGHT as i32 + 6, 0)),
+        // margin order: (top, right, bottom, left); float above the bar.
+        margin: Some((0, 0, BAR_HEIGHT as i32 + 6, left_margin)),
         keyboard_interactivity: KeyboardInteractivity::None,
-        // Hover popups are display-only: let pointer events pass through.
-        events_transparent: matches!(mode, PopupMode::Hover),
+        events_transparent,
         output_option: OutputOption::None,
         namespace: Some("ezbar-popup".to_string()),
         ..Default::default()
@@ -281,6 +272,7 @@ impl Bar {
             spotify: spotify::SpotifyData::default(),
             blink_on: true,
             spotify_offset: 0,
+            cursor_x: 0.0,
         };
         (bar, open)
     }
@@ -443,17 +435,23 @@ impl Bar {
                         return Task::batch([close_mod, iced::window::close(pid)]);
                     }
                     let close = iced::window::close(pid);
-                    let (id, open) = open_popup(kind);
+                    let (id, open) = self.open_popup(kind);
                     self.popup = Some((id, kind));
                     return Task::batch([close_mod, close, open, self.popup_extra(kind)]);
                 }
-                let (id, open) = open_popup(kind);
+                let (id, open) = self.open_popup(kind);
                 self.popup = Some((id, kind));
                 Task::batch([close_mod, open, self.popup_extra(kind)])
             }
             Message::ClosePopup => self.close_popup_task(),
             Message::BlinkTick => {
                 self.blink_on = !self.blink_on;
+                Task::none()
+            }
+            Message::Cursor(id, x) => {
+                if id == self.bar_id {
+                    self.cursor_x = x;
+                }
                 Task::none()
             }
             Message::WindowClosed(id) => {
@@ -522,8 +520,13 @@ impl Bar {
                 let close_existing = self.close_any_popup();
                 let id = window::Id::unique();
                 self.module_popup = Some((id, instance, mode));
+                let left = self.popup_left_margin(MODULE_POPUP_SIZE.0);
                 let open = Task::done(Message::NewLayerShell {
-                    settings: module_popup_settings(mode),
+                    settings: popup_layer_settings(
+                        MODULE_POPUP_SIZE,
+                        left,
+                        matches!(mode, PopupMode::Hover),
+                    ),
                     id,
                 });
                 Task::batch([close_existing, open])
@@ -567,6 +570,28 @@ impl Bar {
         } else {
             Task::none()
         }
+    }
+
+    /// Left margin so a `popup_w`-wide popup is centered above the cursor (i.e.
+    /// the widget that triggered it), clamped to stay on the output.
+    fn popup_left_margin(&self, popup_w: u32) -> i32 {
+        // Center the popup above the cursor (i.e. the widget that triggered it),
+        // clamped only to the left edge. No right clamp: no popup-bearing widget
+        // sits within half a popup width of the bar's right edge.
+        (self.cursor_x as i32 - popup_w as i32 / 2).max(0)
+    }
+
+    fn open_popup(&self, kind: PopupKind) -> (window::Id, Task<Message>) {
+        let id = window::Id::unique();
+        let size = popup_size(kind);
+        let left = self.popup_left_margin(size.0);
+        (
+            id,
+            Task::done(Message::NewLayerShell {
+                settings: popup_layer_settings(size, left, false),
+                id,
+            }),
+        )
     }
 
     fn wrap_popup<'a>(&self, body: Element<'a, Message>) -> Element<'a, Message> {
@@ -936,6 +961,9 @@ impl Bar {
             iced::time::every(Duration::from_millis(500)).map(|_| Message::BlinkTick),
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Cursor(id, position.x))
+                }
                 _ => None,
             }),
         ];
