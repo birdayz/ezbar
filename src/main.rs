@@ -608,9 +608,15 @@ impl Bar {
                     // A bar surface went away (monitor unplugged/slept). Drop it and
                     // reconcile — if the output is truly gone it stays gone; if it
                     // returns the output-event path re-adds it. We do NOT exit the
-                    // whole bar over one output anymore (RFC 0004).
+                    // whole bar over one output anymore (RFC 0004). This is the
+                    // compositor-initiated close (a self-initiated reconcile close
+                    // removes the surface from `self.bars` first, so it never reaches
+                    // here); a transient popup may have lived on this output, so close
+                    // it too — `reconcile_surfaces` won't (it closed nothing itself).
                     self.bars.retain(|b| b.id != id);
-                    return self.reconcile_surfaces();
+                    let popups = self.close_any_popup();
+                    let surfaces = self.reconcile_surfaces();
+                    return Task::batch([popups, surfaces]);
                 }
                 if let Some((pid, _)) = self.popup {
                     if pid == id {
@@ -1245,14 +1251,13 @@ impl Bar {
                         }
                     }
                 },
-                // added. If this id was seen before (a key removed earlier and now
-                // re-added), bump its generation so the new instance's recipes don't
-                // collide with a not-yet-drained stream from the old one.
+                // added. Bump generation unconditionally so the new instance's
+                // recipe key is fresh — startup-built instances run at generation 0
+                // without ever being recorded in the map, so a remove→re-add must
+                // step past 0 to avoid reusing the old (id, 0) recipe key.
                 None => {
                     if let Some(m) = modules::build(&s.type_id, id, &s.cfg) {
-                        if self.generation.contains_key(&id) {
-                            self.bump_generation(id);
-                        }
+                        self.bump_generation(id);
                         next.push(ModuleEntry::new(id, s.key, m, s.cfg));
                     }
                 }
