@@ -3,10 +3,11 @@
 
 use std::time::Duration;
 
+use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{canvas, mouse_area, text};
+use ezbar_plugin::iced::widget::{canvas, mouse_area, row, text};
 use ezbar_plugin::iced::{Color, Element, Length, Subscription};
-use ezbar_plugin::ui::graph::StockChart;
+use ezbar_plugin::ui::graph::{MiniTrend, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 use crate::sources::stock::{self, StockData};
@@ -60,16 +61,43 @@ impl Module for Stock {
         Response::none()
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let s = &self.data;
+        // Trend colour (stocks are universally green up / red down — semantic, not
+        // theme). Tuned a touch brighter so the sparkline pops over the dark island.
         let color = if s.is_positive && s.change != 0.0 {
-            Color::from_rgb(0.2, 0.8, 0.2)
+            Color::from_rgb(0.30, 0.86, 0.42)
         } else if s.is_negative {
-            Color::from_rgb(1.0, 0.3, 0.3)
+            Color::from_rgb(1.0, 0.36, 0.42)
         } else {
-            Color::WHITE
+            Color::from_rgb(0.62, 0.66, 0.78)
         };
-        mouse_area(text(s.display_text.clone()).color(color))
+
+        // The icon is a tiny live gradient sparkline of the price series — the bar's
+        // GPU-graph identity at glyph size: crisp, colourful, data-driven, themeable.
+        // (Replaces the bitmap trend emoji, which scaled to a blurry blob and was
+        // stuck at one colour.) Once price data is in, show "SYMBOL: $price change";
+        // before that, the source's status/loading text.
+        let rest = if s.price > 0.0 {
+            format!("{}: {} {}", s.symbol, s.price_string, s.change_string)
+        } else {
+            s.display_text.trim_start().to_string()
+        };
+        let mut parts: Vec<Element<ModMsg>> = Vec::new();
+        if self.chart.len() >= 2 {
+            parts.push(
+                canvas(MiniTrend {
+                    values: self.chart.clone(),
+                    color,
+                    bg: ctx.bg(),
+                })
+                .width(Length::Fixed(28.0))
+                .height(Length::Fixed(18.0))
+                .into(),
+            );
+        }
+        parts.push(text(rest).color(color).into());
+        mouse_area(row(parts).spacing(8).align_y(Vertical::Center))
             .on_enter(ModMsg::new(Msg::Enter))
             .on_exit(ModMsg::new(Msg::Leave))
             .into()
