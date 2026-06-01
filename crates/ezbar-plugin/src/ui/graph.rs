@@ -290,6 +290,126 @@ fn with_alpha(c: Color, a: f32) -> Color {
     Color { a, ..c }
 }
 
+/// The stock module's inline "icon": a tiny smoothed sparkline of the recent price
+/// series with a vertical gradient fill and a round end-cap dot, in the trend colour
+/// (green up / red down). It's the bar's GPU-graph identity shrunk to glyph size —
+/// crisp at any scale and fully themeable, unlike a bitmap emoji. Draws on a
+/// transparent surface; the caller sizes it (~24×15).
+pub struct MiniTrend {
+    pub values: Vec<f64>,
+    pub color: Color,
+    /// the surface colour behind the icon (the island/bar bg) — used to punch a
+    /// hair of gap around the end-cap dot so it reads as a distinct marker.
+    pub bg: Color,
+}
+
+impl<Message> canvas::Program<Message> for MiniTrend {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let n = self.values.len();
+        if n < 2 {
+            return vec![frame.into_geometry()];
+        }
+        // Inset so the 1.6px stroke and the end dot stay inside the bounds.
+        let pad = 2.0_f32;
+        let (x0, x1) = (pad, (bounds.width - pad).max(pad + 1.0));
+        let (y_top, y_bot) = (pad, (bounds.height - pad).max(pad + 1.0));
+        let (cw, ch) = (x1 - x0, y_bot - y_top);
+
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for &v in &self.values {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        if (hi - lo).abs() < f64::EPSILON {
+            hi = lo + 1.0;
+        }
+        let range = hi - lo;
+        lo -= range * 0.18;
+        hi += range * 0.18;
+        let y_of = |v: f64| y_top + ch - (((v - lo) / (hi - lo)) as f32) * ch;
+        let x_of = |i: usize| x0 + (i as f32 / (n as f32 - 1.0)) * cw;
+        let pts: Vec<Point> = self
+            .values
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| Point::new(x_of(i), y_of(v)))
+            .collect();
+        let segs = smooth_controls(&pts, y_top, y_bot);
+
+        // gradient area fill under the smoothed curve
+        let area = Path::new(|b| {
+            b.move_to(Point::new(pts[0].x, y_bot));
+            b.line_to(pts[0]);
+            for &(c1, c2, end) in &segs {
+                b.bezier_curve_to(c1, c2, end);
+            }
+            b.line_to(Point::new(pts[n - 1].x, y_bot));
+            b.close();
+        });
+        frame.fill(
+            &area,
+            Fill::from(
+                gradient::Linear::new(Point::new(0.0, y_top), Point::new(0.0, y_bot))
+                    .add_stop(0.0, with_alpha(self.color, 0.55))
+                    .add_stop(0.6, with_alpha(self.color, 0.18))
+                    .add_stop(1.0, with_alpha(self.color, 0.0)),
+            ),
+        );
+
+        let line = Path::new(|b| {
+            b.move_to(pts[0]);
+            for &(c1, c2, end) in &segs {
+                b.bezier_curve_to(c1, c2, end);
+            }
+        });
+        // a very soft wide glow under a crisp uniform stroke — the GPU-glow identity
+        // at glyph size, without muddying the line.
+        frame.stroke(
+            &line,
+            Stroke {
+                style: Style::Solid(with_alpha(self.color, 0.16)),
+                width: 4.0,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Stroke::default()
+            },
+        );
+        frame.stroke(
+            &line,
+            Stroke {
+                style: Style::Solid(self.color),
+                width: 1.5,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Stroke::default()
+            },
+        );
+        // end-cap marker at the latest price: a wide *opaque* bg halo punches a clear
+        // gap through the line + glow, and a brightened dot sits in it — so it reads
+        // as a deliberate marker, not a fat line terminus.
+        let last = pts[n - 1];
+        let halo = Color { a: 1.0, ..self.bg };
+        let dot = Color::from_rgb(
+            self.color.r * 0.6 + 0.4,
+            self.color.g * 0.6 + 0.4,
+            self.color.b * 0.6 + 0.4,
+        );
+        frame.fill(&Path::circle(last, 3.8), halo);
+        frame.fill(&Path::circle(last, 1.9), dot);
+        vec![frame.into_geometry()]
+    }
+}
+
 /// A canvas `Text` with sane defaults; `ax`/`ay` anchor it (e.g. right/center).
 fn mk_text(content: String, pos: Point, color: Color, size: f32, weight: Weight) -> Text {
     Text {
