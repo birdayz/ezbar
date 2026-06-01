@@ -53,11 +53,21 @@ pub fn is_module(id: &str) -> bool {
     )
 }
 
+/// Read `[modules.<id>.graph].line_color` from a module's config table.
+/// `None` (absent or not a string) means the default per-value threshold colouring
+/// (green→red by load); a value is resolved against the theme by `Ctx::graph_paint`.
+pub(crate) fn graph_line_color(cfg: &toml::Value) -> Option<String> {
+    cfg.get("graph")?
+        .get("line_color")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// Construct a built-in module by its placement `id` (RFC 0001 factory). `cfg` is
 /// the `[modules.<id>]` table. Returns `None` for ids that are not modules.
 pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Module>> {
     match id {
-        "cpu" => Some(Box::new(cpu::Cpu::new(instance))),
+        "cpu" => Some(Box::new(cpu::Cpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance))),
         "claude" => Some(Box::new(claude::Claude::new(instance))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
@@ -67,8 +77,8 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "updates" => Some(Box::new(updates::Updates::new(instance, cfg))),
         "keyboard" => Some(Box::new(keyboard::Keyboard::new(instance, cfg))),
         "workspaces" => Some(Box::new(workspaces::Workspaces::new(instance, cfg))),
-        "memory" => Some(Box::new(memory::Memory::new(instance))),
-        "temperature" => Some(Box::new(temperature::Temperature::new(instance))),
+        "memory" => Some(Box::new(memory::Memory::new(instance, cfg))),
+        "temperature" => Some(Box::new(temperature::Temperature::new(instance, cfg))),
         "ping" => Some(Box::new(ping::Ping::new(instance, cfg))),
         "window_title" => Some(Box::new(window_title::WindowTitle::new(instance, cfg))),
         "clock" => Some(Box::new(clock::Clock::new(instance, cfg))),

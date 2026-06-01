@@ -252,11 +252,25 @@ font     = "Iosevka"         # per-module font/size/weight allowed here
 [modules.cpu.graph]          # the sparkline knobs (our identity, now tunable)
 samples    = 48              # history width
 height     = 16
-line_color = "$green"        # or a token / hex; default = the module's threshold color
+line_color = "threshold"     # IMPLEMENTED — see below; default = the module's green→red threshold
 line_width = 1.5
 fill       = { gradient = true, alpha = 0.18 }   # area under the line; off = stroke only
 smooth     = true            # catmull-rom vs polyline
 ```
+
+**`line_color` (implemented).** The first of these knobs to land. It decides whether a
+module's inline sparkline keeps its **functional** colour or takes a **fixed** one:
+
+| value | line colour |
+|-------|-------------|
+| `"threshold"` *(default, or omitted)* | per-value green→yellow→orange→red by load — the monitor signal |
+| `"accent"` / `"ok"` / `"warn"` / `"urgent"` / `"fg"` / `"fg_dim"` | that theme token, flat |
+| `"#rrggbb"` / `"#rrggbbaa"` | that literal colour, flat |
+
+An unrecognised string degrades to `threshold` (a typo can't blank the graph). Resolution
+is `Ctx::graph_paint`; it applies to every graph-capable module (`cpu`, `memory`,
+`temperature`, `ping`). Threshold is the default *on purpose* — colour carries meaning on a
+monitor, so going flat-accent is an opt-in aesthetic choice, never forced.
 
 The example palette above is **ezbar's own** dark identity. Tokyo Night, Catppuccin,
 Gruvbox, Nord ship as **reference presets** in `presets/`, not as the default.

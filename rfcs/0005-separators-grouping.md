@@ -108,10 +108,14 @@ Iterated against a ricer reviewer across eight rounds to a pixel-verified **10/1
 - **Border `@50% → @75% → @90%` + a drop shadow:** a lilac edge alone washed out over
   bright wallpaper; the framing now rests on a soft drop shadow (`#000@45%`, y+2, blur 8)
   that lifts each pill off *any* wallpaper, with the `@90%` lilac as accent.
-- **Inline sparklines harmonised:** the idle/ok tier recoloured saturated green → flieder
-  lilac (green now means only one thing in the bar — money up, on the stock spark); the
-  inline graphs shrunk 80→48px and lifted off the baseline with a line-anchored gradient
-  area-fill, so even an idle trace reads as a low area chart, not a flat "underline".
+- **Inline sparklines re-seated (not recoloured):** the inline graphs shrank 80→48px and
+  lifted off the baseline with a line-anchored gradient area-fill, so even an idle trace
+  reads as a low area chart, not a flat "underline". The reviewer also pushed to recolour
+  the idle/ok tier saturated-green → flieder lilac for palette purity — **rejected.** The
+  green→red threshold *is* the functional point of a monitor; recolouring it for aesthetics
+  inverts the priority. Line colour is instead a **per-widget opt-in**:
+  `[modules.<id>.graph].line_color` (RFC 0002) is `"threshold"` by default, with `"accent"`
+  / a theme token / a `#hex` to fix it. Function ships as the default; aesthetics is a choice.
 
 ## Migration / implementation
 
@@ -128,9 +132,11 @@ pills" — that's the point.
 
 ## Resolved in this pass
 
-- Inline graphs seated on the text line (20→16px), idle traces lifted off the baseline
-  with a gradient area-fill, and recoloured to the lilac palette (was the review's last
-  blocker). The pill drop shadow makes the framing wallpaper-independent.
+- Inline graphs seated on the text line (20→16px) and idle traces lifted off the baseline
+  with a gradient area-fill. The pill drop shadow makes the framing wallpaper-independent.
+- Graph **line colour stays threshold (green→red) by default** — the functional signal —
+  and is now a per-widget `[modules.<id>.graph].line_color` knob (`threshold` | `accent` |
+  a theme token | a `#hex`) for anyone who wants a fixed accent instead. See RFC 0002.
 
 ## Open questions
 

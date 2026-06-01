@@ -15,13 +15,14 @@ use ezbar_plugin::Module;
 
 fn main() -> ezbar_plugin::iced::Result {
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
+    let cfg = toml::Value::Table(Default::default()); // modules that read `[modules.<id>]` get an empty table here
     let modules: Vec<Box<dyn Module>> = match which.as_str() {
-        "cpu" => vec![Box::new(Cpu::new(0))],
+        "cpu" => vec![Box::new(Cpu::new(0, &cfg))],
         "github" => vec![Box::new(GitHub::new(0))],
         "claude" => vec![Box::new(Claude::new(0))],
         "calendar" => vec![Box::new(Calendar::new(0))],
         "all" => vec![
-            Box::new(Cpu::new(0)),
+            Box::new(Cpu::new(0, &cfg)),
             Box::new(GitHub::new(1)),
             Box::new(Claude::new(2)),
         ],

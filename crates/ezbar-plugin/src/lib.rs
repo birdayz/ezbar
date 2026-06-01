@@ -103,6 +103,42 @@ impl Ctx<'_> {
     pub fn bg(&self) -> iced::Color {
         ThemeTokens::color(self.theme.bg)
     }
+
+    /// Resolve a `[modules.<id>.graph].line_color` spec to a fixed graph colour,
+    /// or `None` for the default per-value threshold colour (green→red by load).
+    ///
+    /// Accepts: `None` / `""` / `"threshold"` → `None` (functional, the default);
+    /// a theme token (`accent`/`ok`/`warn`/`urgent`/`fg`/`fg_dim`); or a `#rrggbb`
+    /// / `#rrggbbaa` hex. An unrecognised string falls back to `None` (threshold)
+    /// rather than panicking, so a typo degrades to the safe default.
+    pub fn graph_paint(&self, spec: Option<&str>) -> Option<iced::Color> {
+        match spec.map(str::trim) {
+            None | Some("") | Some("threshold") => None,
+            Some("accent") => Some(self.accent()),
+            Some("ok") => Some(self.ok()),
+            Some("warn") => Some(self.warn()),
+            Some("urgent") => Some(self.urgent()),
+            Some("fg") => Some(self.fg()),
+            Some("fg_dim") | Some("dim") => Some(self.fg_dim()),
+            Some(hex) => parse_hex(hex),
+        }
+    }
+}
+
+/// Parse `#rrggbb` / `#rrggbbaa` into an `iced::Color`; `None` on any malformed input.
+fn parse_hex(s: &str) -> Option<iced::Color> {
+    let s = s.strip_prefix('#')?;
+    let byte = |i: usize| u8::from_str_radix(s.get(i..i + 2)?, 16).ok();
+    match s.len() {
+        6 => Some(iced::Color::from_rgb8(byte(0)?, byte(2)?, byte(4)?)),
+        8 => Some(iced::Color::from_rgba8(
+            byte(0)?,
+            byte(2)?,
+            byte(4)?,
+            byte(6)? as f32 / 255.0,
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,5 +258,37 @@ pub mod sub {
         S: Stream<Item = ModMsg> + Send + 'static,
     {
         Subscription::run_with(instance, builder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex;
+
+    #[test]
+    fn parse_hex_rgb_and_rgba() {
+        assert_eq!(
+            parse_hex("#cba6f7"),
+            Some(iced::Color::from_rgb8(0xcb, 0xa6, 0xf7))
+        );
+        // alpha byte maps onto the 0..=1 float channel
+        let c = parse_hex("#cba6f780").unwrap();
+        assert_eq!(
+            (c.r, c.g, c.b),
+            (
+                0xcb as f32 / 255.0,
+                0xa6 as f32 / 255.0,
+                0xf7 as f32 / 255.0
+            )
+        );
+        assert!((c.a - 0x80 as f32 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_hex_rejects_malformed() {
+        assert_eq!(parse_hex("cba6f7"), None); // no '#'
+        assert_eq!(parse_hex("#abc"), None); // wrong length
+        assert_eq!(parse_hex("#gggggg"), None); // non-hex digits
+        assert_eq!(parse_hex("#"), None);
     }
 }

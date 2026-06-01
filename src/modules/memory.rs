@@ -22,15 +22,17 @@ pub struct Memory {
     text: String,
     hist: History,
     show_graph: bool,
+    graph_line: Option<String>,
 }
 
 impl Memory {
-    pub fn new(instance: u64) -> Self {
+    pub fn new(instance: u64, cfg: &toml::Value) -> Self {
         Memory {
             instance,
             text: " --".to_string(),
             hist: History::new(20),
             show_graph: false,
+            graph_line: crate::modules::graph_line_color(cfg),
         }
     }
 }
@@ -56,12 +58,13 @@ impl Module for Memory {
         Response::none()
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let lbl = mouse_area(text(self.text.clone())).on_press(ModMsg::new(Msg::Toggle));
         if self.show_graph {
             let g = canvas(Graph {
                 values: self.hist.ordered(),
                 kind: GraphKind::Memory,
+                line_color: ctx.graph_paint(self.graph_line.as_deref()),
             })
             .width(Length::Fixed(48.0))
             .height(Length::Fixed(16.0));

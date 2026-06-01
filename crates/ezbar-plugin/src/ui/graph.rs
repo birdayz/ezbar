@@ -21,11 +21,22 @@ pub enum GraphKind {
 pub struct Graph {
     pub values: Vec<f64>,
     pub kind: GraphKind,
+    /// `Some(c)` paints the whole line `c` (a `[modules.<id>.graph].line_color`
+    /// override); `None` uses the per-value threshold colour (green→red by load).
+    pub line_color: Option<Color>,
+}
+
+impl Graph {
+    /// The colour for a point of value `v`: the fixed `line_color` if set, else the
+    /// kind's threshold colour (so an idle graph is green and a hot one red).
+    fn seg_color(&self, threshold: fn(f64) -> Color, v: f64) -> Color {
+        self.line_color.unwrap_or_else(|| threshold(v))
+    }
 }
 
 fn cpu_color(v: f64) -> Color {
     if v <= 25.0 {
-        Color::from_rgb(0.796, 0.651, 0.969) // flieder/lilac — the idle/ok tier (RFC 0005 palette)
+        Color::from_rgb(0.2, 0.8, 0.2) // green = ok/idle — the threshold signal matters more than palette purity
     } else if v <= 50.0 {
         Color::from_rgb(1.0, 1.0, 0.0)
     } else if v <= 75.0 {
@@ -37,7 +48,7 @@ fn cpu_color(v: f64) -> Color {
 
 fn memory_color(v: f64) -> Color {
     if v <= 50.0 {
-        Color::from_rgb(0.796, 0.651, 0.969) // flieder/lilac — the idle/ok tier (RFC 0005 palette)
+        Color::from_rgb(0.2, 0.8, 0.2) // green = ok/idle — the threshold signal matters more than palette purity
     } else if v <= 70.0 {
         Color::from_rgb(1.0, 1.0, 0.0)
     } else if v <= 85.0 {
@@ -49,7 +60,7 @@ fn memory_color(v: f64) -> Color {
 
 fn temperature_color(v: f64) -> Color {
     if v <= 50.0 {
-        Color::from_rgb(0.796, 0.651, 0.969) // flieder/lilac — the idle/ok tier (RFC 0005 palette)
+        Color::from_rgb(0.2, 0.8, 0.2) // green = ok/idle — the threshold signal matters more than palette purity
     } else if v <= 60.0 {
         Color::from_rgb(1.0, 1.0, 0.0)
     } else if v <= 70.0 {
@@ -61,7 +72,7 @@ fn temperature_color(v: f64) -> Color {
 
 fn ping_color(v: f64) -> Color {
     if v <= 20.0 {
-        Color::from_rgb(0.796, 0.651, 0.969) // flieder/lilac — the idle/ok tier (RFC 0005 palette)
+        Color::from_rgb(0.2, 0.8, 0.2) // green = ok/idle — the threshold signal matters more than palette purity
     } else if v <= 50.0 {
         Color::from_rgb(1.0, 1.0, 0.0)
     } else if v <= 100.0 {
@@ -179,11 +190,11 @@ impl Graph {
         }
         let max_val = pts.iter().map(|p| p.2).fold(min, f64::max);
         let xy: Vec<(f32, f32)> = pts.iter().map(|p| (p.0, p.1)).collect();
-        fill_under(frame, &xy, h, color(max_val));
+        fill_under(frame, &xy, h, self.seg_color(color, max_val));
         for seg in pts.windows(2) {
             let (px, py, pv) = seg[0];
             let (x, y, v) = seg[1];
-            let c = color(if pv > v { pv } else { v });
+            let c = self.seg_color(color, if pv > v { pv } else { v });
             stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
         }
     }
@@ -210,11 +221,11 @@ impl Graph {
         }
         let max_t_val = pts.iter().map(|p| p.2).fold(min_t, f64::max);
         let xy: Vec<(f32, f32)> = pts.iter().map(|p| (p.0, p.1)).collect();
-        fill_under(frame, &xy, h, temperature_color(max_t_val));
+        fill_under(frame, &xy, h, self.seg_color(temperature_color, max_t_val));
         for seg in pts.windows(2) {
             let (px, py, pt) = seg[0];
             let (x, y, t) = seg[1];
-            let c = temperature_color(if pt > t { pt } else { t });
+            let c = self.seg_color(temperature_color, if pt > t { pt } else { t });
             stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
         }
     }
@@ -260,7 +271,8 @@ impl Graph {
                 let y = h - (((p - min_p) / denom) as f32) * h;
                 if let Some((px, py, pp)) = prev {
                     let seg = if pp > p { pp } else { p };
-                    stroke_segment(frame, Point::new(px, py), Point::new(x, y), ping_color(seg));
+                    let c = self.seg_color(ping_color, seg);
+                    stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
                 }
                 prev = Some((x, y, p));
             } else {
@@ -797,12 +809,31 @@ mod tests {
 
     #[test]
     fn colors_by_threshold() {
-        let lilac = Color::from_rgb(0.796, 0.651, 0.969);
-        assert_eq!(cpu_color(10.0), lilac); // idle/ok tier (RFC 0005)
+        let green = Color::from_rgb(0.2, 0.8, 0.2);
+        assert_eq!(cpu_color(10.0), green); // ok/idle
         assert_eq!(cpu_color(40.0), Color::from_rgb(1.0, 1.0, 0.0));
         assert_eq!(cpu_color(60.0), Color::from_rgb(1.0, 0.6, 0.0));
-        assert_eq!(cpu_color(90.0), Color::from_rgb(1.0, 0.2, 0.2));
-        assert_eq!(ping_color(10.0), lilac);
+        assert_eq!(cpu_color(90.0), Color::from_rgb(1.0, 0.2, 0.2)); // hot = red
+        assert_eq!(ping_color(10.0), green);
         assert_eq!(ping_color(150.0), Color::from_rgb(1.0, 0.2, 0.2));
+    }
+
+    #[test]
+    fn override_color_beats_threshold() {
+        let accent = Color::from_rgb(0.8, 0.65, 0.97);
+        let g = Graph {
+            values: vec![10.0, 90.0],
+            kind: GraphKind::Cpu,
+            line_color: Some(accent),
+        };
+        // a fixed line_color paints every segment, ignoring the load threshold.
+        assert_eq!(g.seg_color(cpu_color, 10.0), accent);
+        assert_eq!(g.seg_color(cpu_color, 90.0), accent);
+        // None falls back to the per-value threshold (red when hot).
+        let t = Graph {
+            line_color: None,
+            ..g
+        };
+        assert_eq!(t.seg_color(cpu_color, 90.0), Color::from_rgb(1.0, 0.2, 0.2));
     }
 }
