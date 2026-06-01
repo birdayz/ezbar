@@ -359,6 +359,11 @@ host. Each carries an optional `--no-osd`.
 
 ### Surface lifecycle (re-roll honesty)
 
+> **Superseded by RFC 0004.** The premise below — that geometry "can't be live-resized"
+> and must re-roll — is **wrong**. A PoC shows `iced_layershell` reconfigures a live layer
+> surface in place (anchor/margin/exclusive-zone/size). Re-roll is needed only for `output`
+> moves and surface add/remove. See RFC 0004 §"Surface geometry reconcile".
+
 `bar.height`/`position`/`layer`/`outputs`/`margin`/`radius` changes **re-roll** the
 layer surface (can't be live-resized): the host opens the new surface, waits for its
 first commit, **then** closes the old one (double-buffer, no visible gap), and
