@@ -96,7 +96,12 @@ impl Module for Kubectl {
         } else {
             Color::WHITE
         };
-        mouse_area(text(self.data.string.clone()).color(color))
+        // Middle-truncate the context on the bar — a long k8s context (e.g.
+        // `proxy.tp.redpanda.com-…-k8s`) is the single widest chip and shoves the
+        // right-hand modules off a narrow output. Keep the domain head + cluster
+        // tail (both are the recognisable parts); the full name stays in the
+        // right-click picker.
+        mouse_area(text(truncate_mid(&self.data.string, 26)).color(color))
             .on_press(ModMsg::new(Msg::Clear))
             .on_right_press(ModMsg::new(Msg::Toggle))
             .into()
@@ -146,4 +151,41 @@ fn kube_stream(_id: &u64) -> impl Stream<Item = ModMsg> {
             }
         },
     )
+}
+
+/// Middle-truncate to `max` chars, keeping the head and tail around a `…` (so a
+/// long context shows both its domain prefix and cluster suffix). Counts chars,
+/// not bytes, so it never splits a glyph.
+fn truncate_mid(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('\u{2026}');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_mid;
+
+    #[test]
+    fn short_passes_through() {
+        assert_eq!(truncate_mid("\u{f10fe} prod", 26), "\u{f10fe} prod");
+    }
+
+    #[test]
+    fn long_keeps_head_and_tail() {
+        let s = "\u{f10fe} proxy.tp.redpanda.com-d5tp5kntujt599ksadgg-k8s";
+        let t = truncate_mid(s, 26);
+        assert_eq!(t.chars().count(), 26);
+        assert!(t.contains('\u{2026}'));
+        assert!(t.starts_with("\u{f10fe} proxy"));
+        assert!(t.ends_with("-k8s"));
+    }
 }
