@@ -1,6 +1,7 @@
 # RFC 0004: Config-reconciled surfaces & modules
 
-- **Status:** Draft (v1 — PoC-validated: in-place surface reconcile works on sway)
+- **Status:** Draft (v2 — implemented on branch `rfc-0004-reconcile-poc`; passed an
+  adversarial wlr-layer-shell review, fixes applied. v1 was PoC-only.)
 - **Created:** 2026-06-01
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
 - **Depends on:** RFC 0001 (module SDK, `Factory`, phase-2 dlopen), RFC 0002 (config,
@@ -197,21 +198,55 @@ The PoC already shipped step 1 of this (geometry).
 
 ## Migration
 
-1. `apply_config -> Task`; add `reconcile_bar_geometry` (in place). Ship geometry hot-reload
-   + `ezbar msg position`. **← small; this is the PoC, minus polish.**
-2. Stable `key`-based identity → module reconcile by diff (preserve unchanged). **← the real
-   refactor; own PoC first.**
-3. Per-output surface set + hotplug reconcile. **← medium.**
-4. Dynamic discovery feeds the module reconcile. **← RFC 0001 phase 2.**
+1. ✅ `apply_config -> Task`; `reconcile_bar_geometry` (in place, all of
+   position/height/margin/layer). Geometry hot-reload + `ezbar msg position`.
+2. ✅ Stable `key`-based identity (`instance_id = stable_id(key)`) → module reconcile by
+   diff; unchanged instances keep state + streams; `reconfigure()`/generation for changed.
+3. ✅ Per-output surface set + reconcile, driven by `[bar].outputs`, config reload, a
+   surface closing, and a sway output-event subscription. A surface closing no longer
+   exits the bar. Popups follow the bar edge and the cursor's output.
+4. ☐ Dynamic discovery feeds the module reconcile. **← RFC 0001 phase 2 (not built).**
+
+Steps 1–3 are implemented on `rfc-0004-reconcile-poc` and validated live on sway
+(single 5120×1440 output): top↔bottom flip in place, floating margin, the cpu graph's
+state surviving an unrelated reload, the `outputs` filter add/dropping the surface, and
+the app surviving zero surfaces.
+
+### Implementation notes & residual risks (from the layer-shell review)
+
+- **Geometry is committed as few times as possible.** Each iced_layershell mutator
+  commits the surface itself, so `reconcile_bar_geometry` applies layer/margin/exclusive-
+  zone first, then anchor+size *together and last* via `AnchorSizeChange` — one reflow per
+  logical change, not up to four.
+- **`OutputName` bind race (the one real multi-output caveat).** iced_layershell resolves
+  `OutputOption::OutputName` against its own `wl_output` cache; if a name isn't cached yet
+  (sway's Output IPC event can precede the `wl_output` global reaching the client), the
+  surface binds to the compositor-default output instead of failing. We *mitigate* with a
+  250 ms settle delay before reconciling on an output event, which lets the global land —
+  but the **true fix needs an upstream API**: either `OutputOption::Output(wl_output)`
+  resolved from the same enumeration, or a bind-result the host can verify and retry on.
+  Tracked as the top multi-output follow-up. Single-output and steady-state multi-output
+  are correct; the residual is a narrow hotplug-instant race.
+- **Subscription generation is monotonic per id** (never reset on removal; bumped on
+  re-add) so a removed-then-readded key re-keys past any still-draining recipe.
+- **Zero surfaces is a valid state** (iced `StartMode::Background` does not exit at zero
+  windows); the output subscription re-adds surfaces as outputs appear, and emits one
+  synthetic reconcile per (re)connect so a cold start / sway restart converges.
 
 ## Open questions
 
-1. **Exclusive-zone races** on large height changes / mixed-DPI multi-output — PoC was clean
-   at a single 5120×1440 output; stress-test multi-output before step 3.
-2. **Identity** — adopt RFC 0002 `key` semantics verbatim, plus an explicit `id` escape hatch?
-   Collision handling = validation error with the offending line (as RFC 0002).
-3. **Output hotplug source** — raw `wl_output` events vs sway IPC (we already use `swayipc`
-   for output width). Pick one; sway IPC is the lower-LOC start, `wl_output` the portable one.
+1. **`OutputName` bind race** — the residual from the review (see *Implementation notes*).
+   The proper fix is upstream: expose `OutputOption::Output(wl_output)` or a bind-result.
+   Until then we ship the 250 ms settle-delay mitigation. **Top multi-output follow-up.**
+2. **Identity** — adopted RFC 0002 `key` semantics (`instance_id = stable_id(key)`). Still
+   open: an explicit `id` escape hatch and collision handling (validation error with the
+   offending line, as RFC 0002) — today duplicate keys just warn-and-skip the second.
+3. ~~**Output hotplug source**~~ — **resolved: sway IPC** (`swayipc` output events). ezbar is
+   a sway bar and already depends on swayipc; the host-side reconcile is compositor-agnostic,
+   so a `wl_output` source could be swapped in later without touching the reconcile.
 4. **`ezbar msg position` persistence** — write to the state file (like presets) or stay
-   ephemeral? The PoC is ephemeral, so an IPC re-anchor diverges from `config` until the next
-   reload re-asserts it. Persisting to state (never `config.toml`) mirrors the preset model.
+   ephemeral? Today it is ephemeral, so an IPC re-anchor diverges from `config` until the
+   next reload re-asserts it. Persisting to state (never `config.toml`) mirrors the preset
+   model.
+5. **Multi-output stress test** — exclusive-zone / mixed-DPI behaviour was validated on a
+   single 5120×1440 output; the per-output path needs a real two-monitor + hotplug pass.
