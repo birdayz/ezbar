@@ -190,12 +190,31 @@ impl Default for Border {
     }
 }
 
-/// Separator between items in a zone: a bare hex color, or
-/// `{ color, width?, glyph? }` (RFC 0002). A `glyph` (e.g. `""`, `"|"`) draws
-/// that string instead of a hairline rule.
+/// How adjacent widgets *within a group* are divided (RFC 0005). Grouping itself
+/// (sub-islands / wider gaps) carries the macro structure; this is the optional
+/// per-widget mark on top of the spacing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SepStyle {
+    /// pure spacing, no mark — the islands default (gaps between sub-islands do the
+    /// separating; a glyph here is what made the bar read like a "CSV row").
+    #[default]
+    None,
+    /// a dim middle dot `·`
+    Dot,
+    /// a thin vertical hairline
+    Line,
+    /// a custom glyph (`separator.glyph`, e.g. `"|"`)
+    Glyph,
+}
+
+/// Separator between widgets in a zone: a bare hex color (⇒ a `line` of that color),
+/// or `{ style?, color?, width?, glyph? }` (RFC 0005, extends RFC 0002's table).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Separator {
+    pub style: SepStyle,
     pub color: Color,
+    /// line thickness / dot radius, in px.
     pub width: f32,
     pub glyph: Option<String>,
 }
@@ -203,6 +222,7 @@ pub struct Separator {
 impl Default for Separator {
     fn default() -> Self {
         Separator {
+            style: SepStyle::None,
             color: Color::rgba(0.4, 0.4, 0.4, 1.0),
             width: 1.0,
             glyph: None,
@@ -217,6 +237,8 @@ impl<'de> Deserialize<'de> for Separator {
         enum Raw {
             Hex(String),
             Table {
+                #[serde(default)]
+                style: SepStyle,
                 #[serde(default = "default_sep_color")]
                 color: Color,
                 #[serde(default = "default_sep_width")]
@@ -226,16 +248,25 @@ impl<'de> Deserialize<'de> for Separator {
             },
         }
         Ok(match Raw::deserialize(d)? {
+            // a bare color string means "draw a hairline of this colour".
             Raw::Hex(s) => Separator {
+                style: SepStyle::Line,
                 color: Color::parse(&s)
                     .ok_or_else(|| serde::de::Error::custom(format!("invalid color: {s:?}")))?,
                 ..Separator::default()
             },
             Raw::Table {
+                style,
                 color,
                 width,
                 glyph,
             } => Separator {
+                // an explicit `glyph` with no `style` implies the glyph style.
+                style: if style == SepStyle::None && glyph.is_some() {
+                    SepStyle::Glyph
+                } else {
+                    style
+                },
                 color,
                 width,
                 glyph,
@@ -402,7 +433,11 @@ pub struct Theme {
     pub style: Style,
     pub opacity: f32,
     pub font_size: f32,
+    /// gap between widgets within a group (px).
     pub spacing: f32,
+    /// gap between groups — the space between sub-islands (islands) or the gap a
+    /// group divider sits in (solid). Wider than `spacing` so grouping reads (RFC 0005).
+    pub group_gap: f32,
     pub padding: f32,
     pub radius: Radius,
     pub border: Border,
@@ -428,7 +463,8 @@ impl Default for Theme {
             style: Style::Islands,
             opacity: 0.97,
             font_size: 14.0,
-            spacing: 6.0,
+            spacing: 8.0,
+            group_gap: 14.0,
             padding: 6.0,
             radius: Radius::Uniform(4.0), // near-square; islands need a hair of corner
             border: Border {
@@ -447,6 +483,7 @@ impl Default for Theme {
             warn: hex("#f9e2af"),
             urgent: hex("#f38ba8"),
             separator: Separator {
+                style: SepStyle::None,
                 color: hex("#585b70"),
                 width: 1.0,
                 glyph: None,
@@ -926,11 +963,27 @@ mod tests {
 
     #[test]
     fn separator_accepts_hex_or_table() {
+        // a bare hex ⇒ a hairline of that colour (RFC 0005).
         let hex = parse_str("[theme]\nseparator = \"#30363d\"").unwrap();
         assert_eq!(hex.theme.separator.color, Color::parse("#30363d").unwrap());
         assert_eq!(hex.theme.separator.glyph, None);
+        assert_eq!(hex.theme.separator.style, SepStyle::Line);
+        // a table with a glyph but no style ⇒ glyph style.
         let tbl = parse_str("[theme.separator]\nglyph = \"\"\nwidth = 1").unwrap();
         assert_eq!(tbl.theme.separator.glyph.as_deref(), Some(""));
+        assert_eq!(tbl.theme.separator.style, SepStyle::Glyph);
+    }
+
+    #[test]
+    fn separator_style_and_group_gap() {
+        let c = parse_str("[theme.separator]\nstyle = \"dot\"").unwrap();
+        assert_eq!(c.theme.separator.style, SepStyle::Dot);
+        // defaults: no within-group mark, grouping carries the structure.
+        assert_eq!(Config::default().theme.separator.style, SepStyle::None);
+        assert_eq!(Config::default().theme.group_gap, 14.0);
+        assert_eq!(Config::default().theme.spacing, 8.0);
+        let g = parse_str("[theme]\ngroup_gap = 20").unwrap();
+        assert_eq!(g.theme.group_gap, 20.0);
     }
 
     #[test]
