@@ -216,33 +216,58 @@ enum Message {
     ModuleMsg { instance: u64, msg: ModMsg },
 }
 
-fn bar_settings(cfg: &Config) -> NewLayerShellSettings {
-    let b = &cfg.bar;
-    let h = b.height.max(1);
-    let m = b.margin;
-    // Top or bottom edge; span the full width minus L/R margins.
-    let edge = match b.position {
-        config::Position::Top => Anchor::Top,
-        config::Position::Bottom => Anchor::Bottom,
-    };
-    let layer = match b.layer {
+fn iced_layer(l: config::Layer) -> Layer {
+    match l {
         config::Layer::Background => Layer::Background,
         config::Layer::Bottom => Layer::Bottom,
         config::Layer::Top => Layer::Top,
         config::Layer::Overlay => Layer::Overlay,
+    }
+}
+
+/// The full layer-shell geometry for the bar at `pos`, derived purely from config.
+/// Single source of truth: both surface creation (`bar_settings`) and the live
+/// reconcile (`reconcile_bar_geometry`) read it, so they can never drift (RFC 0004).
+struct BarGeom {
+    anchor: Anchor,
+    /// (top, right, bottom, left) — layer-shell margin order.
+    margin: (i32, i32, i32, i32),
+    exclusive_zone: i32,
+    /// (width, height); width 0 = span the anchored axis.
+    size: (u32, u32),
+    layer: Layer,
+}
+
+fn bar_geom(b: &config::Bar, pos: config::Position) -> BarGeom {
+    let h = b.height.max(1);
+    let m = b.margin;
+    // Top or bottom edge; span the full width minus L/R margins.
+    let edge = match pos {
+        config::Position::Top => Anchor::Top,
+        config::Position::Bottom => Anchor::Bottom,
     };
     // Reserve the bar's height plus its near-edge gap so windows never overlap it.
-    let near_gap = match b.position {
+    let near_gap = match pos {
         config::Position::Top => m.top,
         config::Position::Bottom => m.bottom,
     };
-    NewLayerShellSettings {
-        size: Some((0, h)),
-        exclusive_zone: Some(h as i32 + near_gap.max(0)),
+    BarGeom {
         anchor: edge | Anchor::Left | Anchor::Right,
-        // layer-shell margin order: (top, right, bottom, left)
-        margin: Some((m.top, m.right, m.bottom, m.left)),
-        layer,
+        margin: (m.top, m.right, m.bottom, m.left),
+        exclusive_zone: h as i32 + near_gap.max(0),
+        size: (0, h),
+        layer: iced_layer(b.layer),
+    }
+}
+
+fn bar_settings(cfg: &Config) -> NewLayerShellSettings {
+    let g = bar_geom(&cfg.bar, cfg.bar.position);
+    NewLayerShellSettings {
+        size: Some(g.size),
+        exclusive_zone: Some(g.exclusive_zone),
+        anchor: g.anchor,
+        margin: Some(g.margin),
+        layer: g.layer,
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::None,
         namespace: Some("ezbar".to_string()),
@@ -961,9 +986,13 @@ impl Bar {
     fn apply_config(&mut self, cfg: Config) -> Task<Message> {
         let modules_changed = resolved_module_ids(&cfg) != resolved_module_ids(&self.config)
             || cfg.modules != self.config.modules;
-        // PoC (RFC 0004): geometry is now reconciled, not baked-at-creation.
-        let geom_changed = cfg.bar.position != self.config.bar.position
-            || cfg.bar.height != self.config.bar.height;
+        // RFC 0004: surface geometry is reconciled in place, not baked at creation.
+        // `position` may also have been overridden live via IPC (`bar_pos`), so diff
+        // against the live value, not the previous config's.
+        let geom_changed = cfg.bar.position != self.bar_pos
+            || cfg.bar.height != self.config.bar.height
+            || cfg.bar.margin != self.config.bar.margin
+            || cfg.bar.layer != self.config.bar.layer;
         self.config = cfg;
         self.theme = self.config.theme_tokens();
         if modules_changed {
@@ -976,38 +1005,24 @@ impl Bar {
         }
     }
 
-    /// PoC (RFC 0004): re-anchor / re-size the *live* bar surface to `pos` by emitting
-    /// iced_layershell's in-place mutation messages — no surface re-roll, no
-    /// exit-on-close dance. The change messages are consumed by the layershell
-    /// runtime (not our `update`). Updates `bar_pos` so a later diff is a no-op.
+    /// RFC 0004: re-anchor / re-size / re-layer the *live* bar surface to match the
+    /// current config (at position `pos`) by emitting iced_layershell's in-place
+    /// mutation messages — no surface re-roll, no exit-on-close dance. The change
+    /// messages are consumed by the layershell runtime (not our `update`). Updates
+    /// `bar_pos` so a later diff is a no-op.
     fn reconcile_bar_geometry(&mut self, pos: config::Position) -> Task<Message> {
-        let b = &self.config.bar;
-        let h = b.height.max(1);
-        let m = b.margin;
-        let edge = match pos {
-            config::Position::Top => Anchor::Top,
-            config::Position::Bottom => Anchor::Bottom,
-        };
-        let near_gap = match pos {
-            config::Position::Top => m.top,
-            config::Position::Bottom => m.bottom,
-        };
+        let g = bar_geom(&self.config.bar, pos);
         let id = self.bar_id;
         self.bar_pos = pos;
         Task::batch([
-            Task::done(Message::AnchorChange {
-                id,
-                anchor: edge | Anchor::Left | Anchor::Right,
-            }),
-            Task::done(Message::MarginChange {
-                id,
-                margin: (m.top, m.right, m.bottom, m.left),
-            }),
+            Task::done(Message::AnchorChange { id, anchor: g.anchor }),
+            Task::done(Message::MarginChange { id, margin: g.margin }),
             Task::done(Message::ExclusiveZoneChange {
                 id,
-                zone_size: h as i32 + near_gap.max(0),
+                zone_size: g.exclusive_zone,
             }),
-            Task::done(Message::SizeChange { id, size: (0, h) }),
+            Task::done(Message::SizeChange { id, size: g.size }),
+            Task::done(Message::LayerChange { id, layer: g.layer }),
         ])
     }
 

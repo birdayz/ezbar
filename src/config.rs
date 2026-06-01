@@ -360,7 +360,7 @@ impl Default for Bar {
 }
 
 /// Per-side gap from the screen edges (RFC 0002). Non-zero floats the bar.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(default)]
 pub struct Margin {
     pub top: i32,
