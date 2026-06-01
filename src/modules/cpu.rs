@@ -64,8 +64,8 @@ impl Module for Cpu {
                 values: self.hist.ordered(),
                 kind: GraphKind::Cpu,
             })
-            .width(Length::Fixed(80.0))
-            .height(Length::Fixed(20.0));
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(16.0));
             row(vec![lbl.into(), g.into()])
                 .spacing(4)
                 .align_y(Vertical::Center)
