@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "ezbar"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64",
  "chrono",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "ezbar-harness"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ezbar-plugin",
  "iced",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "ezbar-plugin"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "iced",
  "tokio",
