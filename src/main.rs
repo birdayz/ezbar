@@ -888,12 +888,14 @@ impl Bar {
 
     /// The `▾` preset-switcher button.
     fn switcher_button(&self) -> Element<'_, Message> {
-        let dim = self.config.theme.dim.iced();
+        // The ▾ is the bar's one always-on accent in the right cluster — drawn in the
+        // signature colour so lilac (not just the green data) reads as "the bar".
+        let accent = self.config.theme.primary.iced();
         mouse_area(
             container(
                 text("\u{f107}")
                     .size(self.config.theme.font_size)
-                    .color(dim),
+                    .color(accent),
             )
             .padding([0, 4])
             .center_y(Length::Fill),
@@ -916,8 +918,17 @@ impl Bar {
     /// host chrome renders by `type_id`. A configured separator goes between items (never
     /// before the `▾` switcher).
     fn build_zone(&self, items: &[Placed]) -> Element<'_, Message> {
+        let islands = matches!(self.config.theme.style, Style::Islands);
         let s = &self.config.theme.separator;
-        let glyph = s.glyph.clone().unwrap_or_else(|| "|".to_string());
+        // Islands are clean panels: the pill padding + spacing separates modules, so
+        // no glyph rule between them. Solid is a single slab, so it *needs* a divider —
+        // the configured glyph, or a "|" fallback. (Drawing "|" inside islands is what
+        // made the bar read like a CSV row.)
+        let sep_glyph = if islands {
+            None
+        } else {
+            Some(s.glyph.clone().unwrap_or_else(|| "|".to_string()))
+        };
         let sep_color = s.color.iced();
         let mut out: Vec<Element<Message>> = Vec::new();
         for p in items {
@@ -929,12 +940,15 @@ impl Bar {
             };
             if let Some(el) = el {
                 if !out.is_empty() && p.type_id != "switcher" {
-                    out.push(text(glyph.clone()).color(sep_color).into());
+                    if let Some(g) = &sep_glyph {
+                        out.push(text(g.clone()).color(sep_color).into());
+                    }
                 }
                 out.push(el);
             }
         }
-        row(out).spacing(6).align_y(Vertical::Center).into()
+        let spacing = if islands { 11.0 } else { 6.0 };
+        row(out).spacing(spacing).align_y(Vertical::Center).into()
     }
 
     fn bar_view(&self) -> Element<'_, Message> {
