@@ -68,11 +68,10 @@ impl Module for Calendar {
         let glyph = text("\u{f133}").color(ctx.fg_dim());
 
         let chip: Element<ModMsg> = if !c.has_next {
-            // "No meetings" / setup hint — calm, dim.
-            row![glyph, text(c.display_text.clone()).color(ctx.fg_dim())]
-                .spacing(6)
-                .align_y(Vertical::Center)
-                .into()
+            // Nothing upcoming (or not configured): a quiet glyph only — never a
+            // raw file path or long status text on the bar. Detail lives in the
+            // hover popup (an empty-day agenda or a one-line setup hint).
+            glyph.into()
         } else {
             let state = if c.is_overdue {
                 ctx.urgent()
@@ -149,7 +148,10 @@ impl Module for Calendar {
             .collect();
 
         let body: Element<ModMsg> = if all_day.is_empty() && timed.is_empty() {
-            empty_state(pal)
+            // Distinguish "configured, free day" from "not set up yet": the latter is
+            // where the one-line setup hint belongs (kept off the bar itself).
+            let unconfigured = self.data.display_text.starts_with("Setup");
+            empty_state(pal, unconfigured)
         } else {
             let mut items: Vec<Element<ModMsg>> = Vec::new();
             for ev in &all_day {
@@ -217,16 +219,15 @@ fn event_row<'a>(ev: &CalendarEvent, now: DateTime<Local>, pal: Pal) -> Element<
     let time_c = if ongoing { pal.ok } else { pal.dim };
     let when = format!("{} – {}", ev.start.format("%H:%M"), ev.end.format("%H:%M"));
 
-    // Right-aligned countdown: time until start, or time left while ongoing.
+    // Right-aligned countdown: time until start, or time left while ongoing. Kept
+    // muted (metadata, not a headline) so only the time range + title carry the
+    // event's state colour.
     let trailing: Element<ModMsg> = if ev.start > now {
-        text(rel(ev.start - now))
-            .size(12)
-            .color(Color { a: 0.75, ..title_c })
-            .into()
+        text(rel(ev.start - now)).size(12).color(pal.dim).into()
     } else if ongoing {
         text(format!("ends {}", rel(ev.end - now)))
             .size(12)
-            .color(Color { a: 0.8, ..pal.ok })
+            .color(pal.dim)
             .into()
     } else {
         Space::new().into()
@@ -270,21 +271,37 @@ fn chip_row<'a>(time: &str, title: &str, accent: Color, pal: Pal) -> Element<'a,
     card(Color::TRANSPARENT, None, content.into())
 }
 
-/// The "now" line that separates finished events from upcoming ones. Shares the
-/// card geometry so its dot lines up with the events above and below.
+/// The "now" line that separates finished events from upcoming ones — the popup's
+/// hero element, so it's a filled accent time-chip plus a solid accent rule (not a
+/// faint hairline). Shares the card geometry so it lines up with the rows.
 fn now_marker<'a>(now: DateTime<Local>, pal: Pal) -> Element<'a, ModMsg> {
-    let content = row![
-        dot(pal.accent, 7.0),
-        text(format!("now · {}", now.format("%H:%M")))
+    // Dark text on the accent fill reads regardless of the theme's accent hue.
+    let ink = Color::from_rgb(0.10, 0.10, 0.12);
+    let chip = container(
+        text(format!("now  {}", now.format("%H:%M")))
             .size(11)
-            .color(pal.accent),
+            .color(ink),
+    )
+    .padding([1, 7])
+    .style(move |_| container::Style {
+        background: Some(Background::Color(pal.accent)),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 7.0.into(),
+        },
+        text_color: Some(ink),
+        ..Default::default()
+    });
+    let content = row![
+        chip,
         rule(
             Color {
-                a: 0.45,
+                a: 0.6,
                 ..pal.accent
             },
-            1.0,
-        ),
+            2.0
+        )
     ]
     .spacing(8)
     .align_y(Vertical::Center);
@@ -330,13 +347,24 @@ fn card<'a>(
     .into()
 }
 
-fn empty_state<'a>(pal: Pal) -> Element<'a, ModMsg> {
-    let inner = column![
+fn empty_state<'a>(pal: Pal, unconfigured: bool) -> Element<'a, ModMsg> {
+    let (line, hint) = if unconfigured {
+        (
+            "Calendar not set up",
+            Some("Save your secret iCal URL to\n~/.config/ezbar/calendar_url"),
+        )
+    } else {
+        ("No meetings today", None)
+    };
+    let mut inner = column![
         text("\u{f133}").size(30).color(pal.dim),
-        text("No meetings today").size(14).color(pal.dim),
+        text(line.to_string()).size(14).color(pal.fg),
     ]
     .spacing(10)
     .align_x(Horizontal::Center);
+    if let Some(h) = hint {
+        inner = inner.push(text(h.to_string()).size(12).color(pal.dim));
+    }
     container(inner)
         .width(Length::Fill)
         .height(Length::Fill)
