@@ -15,7 +15,7 @@ impl Default for VolumeData {
     fn default() -> Self {
         VolumeData {
             volume: 0,
-            string: " --".to_string(),
+            string: "󰝟 --".to_string(),
             is_muted: false,
         }
     }
@@ -32,14 +32,14 @@ pub fn update_volume() -> VolumeData {
 
 fn format_volume(volume: i32, is_muted: bool) -> String {
     if is_muted {
-        return " --%".to_string();
+        return "󰝟 --%".to_string();
     }
     let icon = if volume == 0 {
-        "" // muted/zero
+        "󰝟" // muted/zero
     } else if volume < 50 {
-        "" // low
+        "󰕿" // low
     } else {
-        "" // high
+        "󰕾" // high
     };
     format!("{} {}%", icon, volume)
 }
@@ -148,10 +148,10 @@ mod tests {
 
     #[test]
     fn formats_by_level() {
-        assert_eq!(format_volume(0, false), " 0%");
-        assert_eq!(format_volume(20, false), " 20%");
-        assert_eq!(format_volume(40, false), " 40%");
-        assert_eq!(format_volume(80, false), " 80%");
-        assert_eq!(format_volume(50, true), " --%");
+        assert_eq!(format_volume(0, false), "󰝟 0%");
+        assert_eq!(format_volume(20, false), "󰕿 20%");
+        assert_eq!(format_volume(40, false), "󰕿 40%");
+        assert_eq!(format_volume(80, false), "󰕾 80%");
+        assert_eq!(format_volume(50, true), "󰝟 --%");
     }
 }

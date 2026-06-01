@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub use iced;
 
+pub mod icons;
 pub mod ui;
 
 /// Async helpers re-exported so modules need no direct `tokio` dependency. They

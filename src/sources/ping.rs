@@ -15,7 +15,7 @@ impl Default for PingData {
     fn default() -> Self {
         PingData {
             latency: 0.0,
-            string: " --".to_string(),
+            string: "󰓅 --".to_string(),
             is_up: false,
         }
     }
@@ -32,19 +32,19 @@ pub fn perform_ping(target: &str) -> PingData {
             match extract_ping_latency(&s) {
                 Some(latency) => PingData {
                     latency,
-                    string: format!(" {:.1}ms", latency),
+                    string: format!("󰓅 {:.1}ms", latency),
                     is_up: true,
                 },
                 None => PingData {
                     latency: 0.0,
-                    string: " ERROR".to_string(),
+                    string: "󰓅 ERROR".to_string(),
                     is_up: false,
                 },
             }
         }
         _ => PingData {
             latency: 0.0,
-            string: " DOWN".to_string(),
+            string: "󰓅 DOWN".to_string(),
             is_up: false,
         },
     }
@@ -76,6 +76,6 @@ mod tests {
     fn default_is_down() {
         let d = PingData::default();
         assert!(!d.is_up);
-        assert_eq!(d.string, " --");
+        assert_eq!(d.string, "󰓅 --");
     }
 }

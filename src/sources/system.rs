@@ -40,24 +40,24 @@ fn parse_cpu_stat(stat: &str) -> Option<[i64; 4]> {
     Some(values)
 }
 
-/// Returns the CPU usage display string, e.g. " 45%". Sleeps 100ms between samples.
+/// Returns the CPU usage display string, e.g. "󰻠 45%". Sleeps 100ms between samples.
 pub fn get_cpu_usage() -> String {
     let stat1 = match fs::read_to_string("/proc/stat") {
         Ok(s) => s,
-        Err(_) => return " --".to_string(),
+        Err(_) => return "󰻠 --".to_string(),
     };
     sleep(Duration::from_millis(100));
     let stat2 = match fs::read_to_string("/proc/stat") {
         Ok(s) => s,
-        Err(_) => return " --".to_string(),
+        Err(_) => return "󰻠 --".to_string(),
     };
 
     let (cpu1, cpu2) = match (parse_cpu_stat(&stat1), parse_cpu_stat(&stat2)) {
         (Some(a), Some(b)) => (a, b),
-        _ => return " --".to_string(),
+        _ => return "󰻠 --".to_string(),
     };
 
-    format!(" {}%", cpu_usage_percent(&cpu1, &cpu2))
+    format!("󰻠 {}%", cpu_usage_percent(&cpu1, &cpu2))
 }
 
 /// CPU busy percentage between two /proc/stat samples (user, nice, system, idle).
@@ -70,11 +70,11 @@ fn cpu_usage_percent(c1: &[i64; 4], c2: &[i64; 4]) -> i64 {
     100 - (idle * 100) / total
 }
 
-/// Returns the memory usage display string, e.g. " 8.2GB/16.0GB".
+/// Returns the memory usage display string, e.g. "󰆼 8.2GB/16.0GB".
 pub fn get_memory_usage() -> String {
     let meminfo = match fs::read_to_string("/proc/meminfo") {
         Ok(s) => s,
-        Err(_) => return " --".to_string(),
+        Err(_) => return "󰆼 --".to_string(),
     };
     let mut mem_total: i64 = 0;
     let mut mem_available: i64 = 0;
@@ -90,13 +90,13 @@ pub fn get_memory_usage() -> String {
         }
     }
     if mem_total == 0 {
-        return " --".to_string();
+        return "󰆼 --".to_string();
     }
     let mem_used = mem_total - mem_available;
     let used_bytes = (mem_used * 1024) as u64;
     let total_bytes = (mem_total * 1024) as u64;
     format!(
-        " {}/{}",
+        "󰆼 {}/{}",
         humanize_with_decimals(used_bytes),
         humanize_with_decimals(total_bytes)
     )
@@ -107,11 +107,11 @@ const CPU_TEMP_DRIVERS: &[&str] = &["k10temp", "zenpower", "coretemp", "cpu_ther
 /// Per-driver labels that denote the package/control temperature.
 const CPU_TEMP_LABELS: &[&str] = &["Tctl", "Tdie", "Package id 0", "Package", "Tccd1"];
 
-/// Returns the CPU temperature display string, e.g. " 45°C".
+/// Returns the CPU temperature display string, e.g. "󰔏 45°C".
 pub fn get_cpu_temperature() -> String {
     match read_cpu_temp_millic() {
-        Some(mc) => format!(" {:.0}°C", mc as f64 / 1000.0),
-        None => " --".to_string(),
+        Some(mc) => format!("󰔏 {:.0}°C", mc as f64 / 1000.0),
+        None => "󰔏 --".to_string(),
     }
 }
 
@@ -194,7 +194,7 @@ fn pick_cpu_temp(inputs: &[(String, i64)]) -> Option<i64> {
     inputs.first().map(|(_, v)| *v)
 }
 
-/// Extracts the numeric CPU percentage from a string like " 45%".
+/// Extracts the numeric CPU percentage from a string like "󰻠 45%".
 pub fn extract_cpu_usage_value(s: &str) -> f64 {
     for part in s.split(' ') {
         if part.contains('%') {
@@ -220,7 +220,7 @@ fn parse_memory_size(size: &str) -> f64 {
     0.0
 }
 
-/// Extracts the memory usage percentage from a string like " 8.2GB/16.0GB".
+/// Extracts the memory usage percentage from a string like "󰆼 8.2GB/16.0GB".
 pub fn extract_memory_usage_value(s: &str) -> f64 {
     for part in s.split(' ') {
         if part.contains('/') {
@@ -237,7 +237,7 @@ pub fn extract_memory_usage_value(s: &str) -> f64 {
     0.0
 }
 
-/// Extracts the numeric temperature from a string like " 45°C".
+/// Extracts the numeric temperature from a string like "󰔏 45°C".
 pub fn extract_temperature_value(s: &str) -> f64 {
     for part in s.split(' ') {
         if part.contains("°C") {
@@ -290,16 +290,16 @@ mod tests {
 
     #[test]
     fn extract_values_from_display_strings() {
-        assert_eq!(extract_cpu_usage_value(" 45%"), 45.0);
-        assert_eq!(extract_cpu_usage_value(" 0%"), 0.0);
-        assert_eq!(extract_cpu_usage_value(" --"), 0.0);
+        assert_eq!(extract_cpu_usage_value("󰻠 45%"), 45.0);
+        assert_eq!(extract_cpu_usage_value("󰻠 0%"), 0.0);
+        assert_eq!(extract_cpu_usage_value("󰻠 --"), 0.0);
 
-        assert_eq!(extract_temperature_value(" 45°C"), 45.0);
-        assert_eq!(extract_temperature_value(" --"), 0.0);
+        assert_eq!(extract_temperature_value("󰔏 45°C"), 45.0);
+        assert_eq!(extract_temperature_value("󰔏 --"), 0.0);
 
-        let mem = extract_memory_usage_value(" 8.0GB/16.0GB");
+        let mem = extract_memory_usage_value("󰆼 8.0GB/16.0GB");
         assert!((mem - 50.0).abs() < 0.001, "got {mem}");
-        assert_eq!(extract_memory_usage_value(" --"), 0.0);
+        assert_eq!(extract_memory_usage_value("󰆼 --"), 0.0);
     }
 
     #[test]

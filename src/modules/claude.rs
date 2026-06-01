@@ -110,9 +110,9 @@ impl Module for Claude {
 
         for i in &self.instances {
             let (marker, color) = if i.waiting {
-                ("⏳", Color::from_rgb(1.0, 0.8, 0.2))
+                ("󰔟", Color::from_rgb(1.0, 0.8, 0.2))
             } else {
-                ("▶", Color::from_rgb(0.5, 0.85, 0.5))
+                ("󰐊", Color::from_rgb(0.5, 0.85, 0.5))
             };
             col.push(
                 row(vec![

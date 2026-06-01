@@ -8,7 +8,7 @@ use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
 use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text};
 use ezbar_plugin::iced::{Color, Element, Length, Subscription, Task};
-use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
+use ezbar_plugin::{icons, Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 use crate::sources::github::{self, GitHubData, GitHubNotification};
 
@@ -32,7 +32,7 @@ impl GitHub {
         GitHub {
             instance,
             data: GitHubData {
-                display_text: "GH …".to_string(),
+                display_text: format!("{} …", icons::GITHUB),
                 ..Default::default()
             },
             token: github::find_token(),
@@ -42,7 +42,7 @@ impl GitHub {
     fn remove(&mut self, id: &str) {
         self.data.notifications.retain(|n| n.id != id);
         self.data.count = self.data.notifications.len();
-        self.data.display_text = format!("GH {}", self.data.count);
+        self.data.display_text = format!("{} {}", icons::GITHUB, self.data.count);
     }
 
     fn mark_task(&self, id: &str) -> Response {
@@ -76,7 +76,7 @@ impl Module for GitHub {
             Some(Msg::TogglePopup) => Response::request(HostRequest::OpenPopup(PopupMode::Click)),
             Some(Msg::MarkAll) => {
                 self.data = GitHubData {
-                    display_text: "GH 0".to_string(),
+                    display_text: format!("{} 0", icons::GITHUB),
                     ..Default::default()
                 };
                 let mut resp = Response::request(HostRequest::ClosePopup);
@@ -229,7 +229,7 @@ fn gh_stream(_id: &u64) -> impl Stream<Item = ModMsg> {
                 None => {
                     let _ = out
                         .send(ModMsg::new(Msg::Loaded(GitHubData {
-                            display_text: "GH ?".to_string(),
+                            display_text: format!("{} ?", icons::GITHUB),
                             ..Default::default()
                         })))
                         .await;
