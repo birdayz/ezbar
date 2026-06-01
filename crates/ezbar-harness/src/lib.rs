@@ -143,10 +143,17 @@ impl Harness {
                 panicked: false,
             })
             .collect();
+        // Dev/screenshot hook: HARNESS_OPEN_POPUP=1 opens module 0's popup at
+        // startup so a non-interactive capture shows the popup without hovering.
+        let popup = if std::env::var("HARNESS_OPEN_POPUP").is_ok() {
+            Some((0, PopupMode::Click))
+        } else {
+            None
+        };
         Harness {
             theme,
             modules,
-            popup: None,
+            popup,
             bar_bg: BarBg::Black,
         }
     }
