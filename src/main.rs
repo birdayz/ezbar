@@ -21,8 +21,6 @@ use std::collections::HashMap;
 mod install;
 mod ipc;
 
-const BAR_HEIGHT: u32 = 34;
-
 /// Default right-zone placement (today's bar) when `right` is unconfigured.
 const DEFAULT_RIGHT: &[&str] = &[
     "cpu",
@@ -170,21 +168,32 @@ enum PopupKind {
     Switcher,
 }
 
+/// One bar layer surface, bound to a named sway output (RFC 0004 per-output set).
+struct BarSurface {
+    id: window::Id,
+    output: String,
+    /// the output's pixel width, for clamping popups opened over this surface.
+    width: u32,
+}
+
 struct Bar {
-    bar_id: window::Id,
+    /// One layer surface per matching output (RFC 0004), reconciled on hotplug.
+    bars: Vec<BarSurface>,
     popup: Option<(window::Id, PopupKind)>,
     module_popup: Option<(window::Id, u64, PopupMode)>,
     modules: Vec<ModuleEntry>,
 
-    // popup anchoring: last cursor x over the bar, so a popup opens above the
+    // popup anchoring: last cursor x over a bar, so a popup opens above the
     // widget the user interacted with (RFC 0001 slot-derived).
     cursor_x: f32,
+    // the output whose bar the cursor was last over, so a popup opens there.
+    cursor_output: Option<String>,
 
     // config + resolved module theme (RFC 0002)
     config: Config,
     theme: ThemeTokens,
 
-    // focused output width, so popups can be clamped on-screen
+    // width of the output the cursor is over, so popups can be clamped on-screen
     screen_w: u32,
 
     // RFC 0004: the live bar surface's current geometry position, so a reconcile
@@ -197,19 +206,37 @@ struct Bar {
     generation: HashMap<u64, u64>,
 }
 
-/// Width of the focused sway output (for clamping popups). Falls back to 1920.
-fn focused_output_width() -> u32 {
+/// A connected sway output a bar may be placed on.
+struct OutputInfo {
+    name: String,
+    width: u32,
+}
+
+/// All active sway outputs (name + pixel width), via sway IPC. Empty on failure
+/// (e.g. not under sway) — the bar then simply has no surfaces until one appears.
+fn sway_outputs() -> Vec<OutputInfo> {
     swayipc::Connection::new()
         .ok()
         .and_then(|mut c| c.get_outputs().ok())
-        .and_then(|outs| {
-            outs.iter()
-                .find(|o| o.focused)
-                .or_else(|| outs.first())
-                .map(|o| o.rect.width as u32)
+        .map(|outs| {
+            outs.into_iter()
+                .filter(|o| o.active)
+                .map(|o| OutputInfo {
+                    name: o.name,
+                    width: o.rect.width.max(0) as u32,
+                })
+                .collect()
         })
-        .filter(|w| *w > 0)
-        .unwrap_or(1920)
+        .unwrap_or_default()
+}
+
+/// The outputs a bar should occupy: active outputs matching `[bar].outputs`
+/// (RFC 0004). `"all"` ⇒ every output; `["DP-1", …]` ⇒ just the named ones.
+fn desired_outputs(cfg: &Config) -> Vec<OutputInfo> {
+    sway_outputs()
+        .into_iter()
+        .filter(|o| cfg.bar.outputs.matches(&o.name))
+        .collect()
 }
 
 #[to_layer_message(multi)]
@@ -223,8 +250,13 @@ enum Message {
     ConfigReloaded(Result<Config, String>),
     WindowClosed(window::Id),
     Cursor(window::Id, f32),
+    /// A sway output appeared/disappeared/changed — reconcile the surface set.
+    OutputsChanged,
     Noop,
-    ModuleMsg { instance: u64, msg: ModMsg },
+    ModuleMsg {
+        instance: u64,
+        msg: ModMsg,
+    },
 }
 
 fn iced_layer(l: config::Layer) -> Layer {
@@ -271,8 +303,8 @@ fn bar_geom(b: &config::Bar, pos: config::Position) -> BarGeom {
     }
 }
 
-fn bar_settings(cfg: &Config) -> NewLayerShellSettings {
-    let g = bar_geom(&cfg.bar, cfg.bar.position);
+fn bar_settings(cfg: &Config, pos: config::Position, output: &str) -> NewLayerShellSettings {
+    let g = bar_geom(&cfg.bar, pos);
     NewLayerShellSettings {
         size: Some(g.size),
         exclusive_zone: Some(g.exclusive_zone),
@@ -280,7 +312,7 @@ fn bar_settings(cfg: &Config) -> NewLayerShellSettings {
         margin: Some(g.margin),
         layer: g.layer,
         keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: OutputOption::None,
+        output_option: OutputOption::OutputName(output.to_string()),
         namespace: Some("ezbar".to_string()),
         ..Default::default()
     }
@@ -450,50 +482,43 @@ fn ipc_stream() -> impl Stream<Item = Message> {
 
 const MODULE_POPUP_SIZE: (u32, u32) = (480, 400);
 
-/// Layer-shell settings for a popup floating above the bar, with its left edge
-/// at `left_margin`. The host derives `left_margin` from the cursor so the popup
-/// sits over the widget the user interacted with (RFC 0001, slot-derived).
-fn popup_layer_settings(
-    size: (u32, u32),
-    left_margin: i32,
-    events_transparent: bool,
-) -> NewLayerShellSettings {
-    NewLayerShellSettings {
-        size: Some(size),
-        exclusive_zone: None,
-        anchor: Anchor::Bottom | Anchor::Left,
-        layer: Layer::Overlay,
-        // margin order: (top, right, bottom, left); float above the bar.
-        margin: Some((0, 0, BAR_HEIGHT as i32 + 6, left_margin)),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        events_transparent,
-        output_option: OutputOption::None,
-        namespace: Some("ezbar-popup".to_string()),
-    }
-}
-
 impl Bar {
     fn new() -> (Self, Task<Message>) {
-        let bar_id = window::Id::unique();
         let config = config::load();
-        let open = Task::done(Message::NewLayerShell {
-            settings: bar_settings(&config),
-            id: bar_id,
-        });
-        let theme = config.theme_tokens();
         let bar_pos = config.bar.position;
+        let theme = config.theme_tokens();
+        // One surface per matching output (RFC 0004). Empty is valid — the
+        // output-event subscription will add surfaces as outputs appear.
+        let outputs = desired_outputs(&config);
+        let screen_w = outputs.first().map(|o| o.width).unwrap_or(1920);
+        let mut bars = Vec::new();
+        let mut opens = Vec::new();
+        for o in outputs {
+            let id = window::Id::unique();
+            opens.push(Task::done(Message::NewLayerShell {
+                settings: bar_settings(&config, bar_pos, &o.name),
+                id,
+            }));
+            bars.push(BarSurface {
+                id,
+                output: o.name,
+                width: o.width,
+            });
+        }
         let bar = Bar {
-            bar_id,
+            bars,
             popup: None,
             module_popup: None,
             modules: build_modules(&config),
             cursor_x: 0.0,
+            cursor_output: None,
             config,
             theme,
-            screen_w: focused_output_width(),
+            screen_w,
             bar_pos,
             generation: HashMap::new(),
         };
+        let open = Task::batch(opens);
         // Dev/screenshot hook: open the switcher popup on startup for capture.
         if std::env::var("EZBAR_OPEN_POPUP").is_ok() {
             return (
@@ -502,6 +527,11 @@ impl Bar {
             );
         }
         (bar, open)
+    }
+
+    /// Is `id` one of our bar surfaces?
+    fn is_bar(&self, id: window::Id) -> bool {
+        self.bars.iter().any(|b| b.id == id)
     }
 
     fn namespace() -> String {
@@ -562,16 +592,22 @@ impl Bar {
                 Task::none()
             }
             Message::Cursor(id, x) => {
-                if id == self.bar_id {
+                if let Some(b) = self.bars.iter().find(|b| b.id == id) {
                     self.cursor_x = x;
+                    self.screen_w = b.width;
+                    self.cursor_output = Some(b.output.clone());
                 }
                 Task::none()
             }
+            Message::OutputsChanged => self.reconcile_surfaces(),
             Message::WindowClosed(id) => {
-                if id == self.bar_id {
-                    // Bar surface gone (e.g. monitor unplugged/slept) — exit so the
-                    // launcher respawns us and re-binds when the output returns.
-                    return iced::exit();
+                if self.is_bar(id) {
+                    // A bar surface went away (monitor unplugged/slept). Drop it and
+                    // reconcile — if the output is truly gone it stays gone; if it
+                    // returns the output-event path re-adds it. We do NOT exit the
+                    // whole bar over one output anymore (RFC 0004).
+                    self.bars.retain(|b| b.id != id);
+                    return self.reconcile_surfaces();
                 }
                 if let Some((pid, _)) = self.popup {
                     if pid == id {
@@ -640,7 +676,7 @@ impl Bar {
                 self.module_popup = Some((id, instance, mode));
                 let left = self.popup_left_margin(MODULE_POPUP_SIZE.0);
                 let open = Task::done(Message::NewLayerShell {
-                    settings: popup_layer_settings(
+                    settings: self.popup_settings(
                         MODULE_POPUP_SIZE,
                         left,
                         matches!(mode, PopupMode::Hover),
@@ -698,6 +734,45 @@ impl Bar {
         (self.cursor_x as i32 - popup_w as i32 / 2).clamp(0, max_left)
     }
 
+    /// Layer-shell settings for a popup, anchored to the **same edge as the bar** so
+    /// it floats just off the bar (below a top bar, above a bottom bar) and on the
+    /// output the cursor is over (RFC 0004 multi-output). `left_margin` places its
+    /// left edge under the triggering widget.
+    fn popup_settings(
+        &self,
+        size: (u32, u32),
+        left_margin: i32,
+        events_transparent: bool,
+    ) -> NewLayerShellSettings {
+        // Clear the bar: its height + the near-edge gap it may float by + a hair.
+        let m = self.config.bar.margin;
+        let (edge, offset) = match self.bar_pos {
+            config::Position::Top => (Anchor::Top, m.top.max(0)),
+            config::Position::Bottom => (Anchor::Bottom, m.bottom.max(0)),
+        };
+        let clear = self.config.bar.height as i32 + offset + 6;
+        // margin order: (top, right, bottom, left).
+        let margin = match self.bar_pos {
+            config::Position::Top => (clear, 0, 0, left_margin),
+            config::Position::Bottom => (0, 0, clear, left_margin),
+        };
+        let output_option = match &self.cursor_output {
+            Some(name) => OutputOption::OutputName(name.clone()),
+            None => OutputOption::None,
+        };
+        NewLayerShellSettings {
+            size: Some(size),
+            exclusive_zone: None,
+            anchor: edge | Anchor::Left,
+            layer: Layer::Overlay,
+            margin: Some(margin),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            events_transparent,
+            output_option,
+            namespace: Some("ezbar-popup".to_string()),
+        }
+    }
+
     fn open_popup(&self, kind: PopupKind) -> (window::Id, Task<Message>) {
         let id = window::Id::unique();
         let size = popup_size(kind);
@@ -705,7 +780,7 @@ impl Bar {
         (
             id,
             Task::done(Message::NewLayerShell {
-                settings: popup_layer_settings(size, left, false),
+                settings: self.popup_settings(size, left, false),
                 id,
             }),
         )
@@ -750,7 +825,8 @@ impl Bar {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
-        if id == self.bar_id {
+        if self.is_bar(id) {
+            // The same chip row renders on every output's bar surface.
             return self.bar_view();
         }
         if let Some((pid, kind)) = self.popup {
@@ -1024,12 +1100,14 @@ impl Bar {
         self.theme = self.config.theme_tokens();
         // Modules reconcile by key (idempotent: unchanged in ⇒ no churn out).
         let modules = self.reconcile_modules();
+        // `[bar].outputs` may have changed — add/drop surfaces to match.
+        let surfaces = self.reconcile_surfaces();
         let geom = if geom_changed {
             self.reconcile_bar_geometry(self.config.bar.position)
         } else {
             Task::none()
         };
-        Task::batch([modules, geom])
+        Task::batch([modules, surfaces, geom])
     }
 
     /// RFC 0004: re-anchor / re-size / re-layer the *live* bar surface to match the
@@ -1039,27 +1117,72 @@ impl Bar {
     /// `bar_pos` so a later diff is a no-op.
     fn reconcile_bar_geometry(&mut self, pos: config::Position) -> Task<Message> {
         let g = bar_geom(&self.config.bar, pos);
-        let id = self.bar_id;
         self.bar_pos = pos;
-        Task::batch([
-            Task::done(Message::AnchorChange {
+        let mut tasks = Vec::with_capacity(self.bars.len() * 5);
+        for b in &self.bars {
+            let id = b.id;
+            tasks.push(Task::done(Message::AnchorChange {
                 id,
                 anchor: g.anchor,
-            }),
-            Task::done(Message::MarginChange {
+            }));
+            tasks.push(Task::done(Message::MarginChange {
                 id,
                 margin: g.margin,
-            }),
-            Task::done(Message::ExclusiveZoneChange {
+            }));
+            tasks.push(Task::done(Message::ExclusiveZoneChange {
                 id,
                 zone_size: g.exclusive_zone,
-            }),
-            Task::done(Message::SizeChange { id, size: g.size }),
-            Task::done(Message::LayerChange { id, layer: g.layer }),
-        ])
+            }));
+            tasks.push(Task::done(Message::SizeChange { id, size: g.size }));
+            tasks.push(Task::done(Message::LayerChange { id, layer: g.layer }));
+        }
+        Task::batch(tasks)
     }
 
-    /// Shut down the old modules and construct the new set from the current config.
+    /// RFC 0004: reconcile the bar's *surface set* against the outputs matching
+    /// `[bar].outputs`. Idempotent: opens a surface for a newly-matching output,
+    /// closes one whose output vanished or no longer matches, and refreshes kept
+    /// surfaces' cached width. Driven by startup, config reload, output hotplug,
+    /// and a bar surface closing. This — not re-roll — is the only create/destroy
+    /// path; geometry-only changes mutate live surfaces in place.
+    fn reconcile_surfaces(&mut self) -> Task<Message> {
+        let desired = desired_outputs(&self.config);
+        let desired_names: std::collections::HashSet<&str> =
+            desired.iter().map(|o| o.name.as_str()).collect();
+        let mut tasks = Vec::new();
+
+        // Close surfaces whose output is gone or de-selected.
+        let mut kept = Vec::with_capacity(self.bars.len());
+        for b in self.bars.drain(..) {
+            if desired_names.contains(b.output.as_str()) {
+                kept.push(b);
+            } else {
+                tasks.push(iced::window::close(b.id));
+            }
+        }
+        self.bars = kept;
+
+        // Open surfaces for newly-matching outputs; refresh widths of kept ones.
+        for o in desired {
+            match self.bars.iter_mut().find(|b| b.output == o.name) {
+                Some(b) => b.width = o.width,
+                None => {
+                    let id = window::Id::unique();
+                    tasks.push(Task::done(Message::NewLayerShell {
+                        settings: bar_settings(&self.config, self.bar_pos, &o.name),
+                        id,
+                    }));
+                    self.bars.push(BarSurface {
+                        id,
+                        output: o.name,
+                        width: o.width,
+                    });
+                }
+            }
+        }
+        Task::batch(tasks)
+    }
+
     /// RFC 0004: reconcile the live module set against config, keyed by `key`.
     /// **Unchanged** instances keep their state, recipes, and running streams;
     /// **added** are constructed; **removed** are shut down; **config-changed** are
@@ -1196,6 +1319,7 @@ impl Bar {
         let mut subs = vec![
             Subscription::run(config_stream),
             Subscription::run(ipc_stream),
+            Subscription::run(outputs_stream),
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
@@ -1233,6 +1357,58 @@ impl Bar {
 /// so a file-watch reload keeps the user's selected preset (not just inline theme).
 fn read_parse(_path: &std::path::Path) -> Result<Config, String> {
     config::load_result()
+}
+
+/// Subscribe to sway `output` events and emit [`Message::OutputsChanged`] on each,
+/// so the host reconciles its per-output surface set on monitor hotplug/layout
+/// changes (RFC 0004). The blocking sway event iterator runs on a blocking task and
+/// forwards through a channel; the connection is re-established with a backoff if it
+/// drops (e.g. sway restart). Output naming/IPC is sway-specific by design — ezbar
+/// is a sway bar — but the host-side reconcile is compositor-agnostic.
+fn outputs_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(
+        4,
+        |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
+            loop {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
+                let handle = tokio::task::spawn_blocking(move || {
+                    let events = match swayipc::Connection::new()
+                        .and_then(|c| c.subscribe([swayipc::EventType::Output]))
+                    {
+                        Ok(e) => e,
+                        Err(e) => {
+                            log::warn!("outputs: sway subscribe: {e}");
+                            return;
+                        }
+                    };
+                    for ev in events {
+                        match ev {
+                            Ok(swayipc::Event::Output(_)) => {
+                                if tx.blocking_send(()).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                log::warn!("outputs: sway event: {e}");
+                                break;
+                            }
+                        }
+                    }
+                });
+                // Forward each output change (coalescing bursts) until the sway
+                // event stream ends.
+                while rx.recv().await.is_some() {
+                    while rx.try_recv().is_ok() {}
+                    if out.send(Message::OutputsChanged).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = handle.await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        },
+    )
 }
 
 /// Watch the config directory; emit a reloaded (or errored) config on change.
