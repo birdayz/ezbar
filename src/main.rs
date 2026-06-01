@@ -1435,9 +1435,17 @@ fn outputs_stream() -> impl Stream<Item = Message> {
                         }
                     }
                 });
-                // Forward each output change (coalescing bursts) until the sway
-                // event stream ends.
+                // Forward each output change until the sway event stream ends,
+                // coalescing bursts and letting the change settle first. The settle
+                // delay matters: sway's Output IPC event can arrive before the
+                // matching `wl_output` global reaches iced_layershell's cache, and a
+                // `NewLayerShell{OutputName}` that the cache can't yet resolve binds
+                // to the compositor-default output instead. Waiting lets the global
+                // land so the bind targets the intended output. (The true fix is an
+                // upstream `Output(wl_output)` / bind-result API — see RFC 0004.)
                 while rx.recv().await.is_some() {
+                    while rx.try_recv().is_ok() {}
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                     while rx.try_recv().is_ok() {}
                     if out.send(Message::OutputsChanged).await.is_err() {
                         return;
