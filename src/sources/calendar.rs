@@ -5,6 +5,7 @@
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 
 #[allow(dead_code)] // location/fields mirror the Go model; not all are rendered
 #[derive(Debug, Clone)]
@@ -74,7 +75,23 @@ fn param_has(p: &ical::property::Property, key: &str, val: &str) -> bool {
     false
 }
 
+/// First value of parameter `key` (e.g. `TZID`), surrounding quotes stripped.
+fn param_value<'a>(p: &'a ical::property::Property, key: &str) -> Option<&'a str> {
+    let params = p.params.as_ref()?;
+    for (k, vs) in params {
+        if k.eq_ignore_ascii_case(key) {
+            return vs.first().map(|s| s.trim_matches('"'));
+        }
+    }
+    None
+}
+
 /// Parses an iCal date/datetime value into local time. Returns (datetime, is_all_day).
+///
+/// Three datetime forms per RFC 5545: a trailing `Z` is UTC; a `TZID=<zone>`
+/// parameter names an IANA zone the wall time is expressed in (the common Google
+/// Calendar case); bare values are "floating" and read as local. Honoring `TZID`
+/// is what keeps a meeting set in another timezone from showing at the wrong hour.
 fn parse_dt(p: &ical::property::Property) -> Option<(DateTime<Local>, bool)> {
     let value = p.value.as_ref()?;
     let is_date = param_has(p, "VALUE", "DATE") || value.len() == 8;
@@ -88,6 +105,14 @@ fn parse_dt(p: &ical::property::Property) -> Option<(DateTime<Local>, bool)> {
         return Some((Utc.from_utc_datetime(&ndt).with_timezone(&Local), false));
     }
     let ndt = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").ok()?;
+    if let Some(tz) = param_value(p, "TZID").and_then(|t| t.parse::<Tz>().ok()) {
+        // Interpret the wall time in the event's zone, then convert to local.
+        // `.earliest()` resolves the DST fold/gap deterministically instead of
+        // dropping the event when the local time is ambiguous.
+        if let Some(dt) = tz.from_local_datetime(&ndt).earliest() {
+            return Some((dt.with_timezone(&Local), false));
+        }
+    }
     Some((Local.from_local_datetime(&ndt).single()?, false))
 }
 
@@ -310,6 +335,49 @@ mod tests {
     fn parse_dt_floating_is_local() {
         let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531T140000", None)).unwrap();
         assert!(!all_day);
+        assert_eq!(dt, Local.with_ymd_and_hms(2026, 5, 31, 14, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn parse_dt_honors_tzid() {
+        // 09:00 in New York is a fixed instant regardless of the machine's local
+        // zone — the bug was treating this wall time as local and showing 09:00.
+        let p = prop(
+            "DTSTART",
+            "20260531T090000",
+            Some(vec![("TZID".into(), vec!["America/New_York".into()])]),
+        );
+        let (dt, all_day) = parse_dt(&p).unwrap();
+        assert!(!all_day);
+        // 2026-05-31 is EDT (UTC-4) → 13:00 UTC.
+        assert_eq!(
+            dt.with_timezone(&Utc),
+            Utc.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_dt_quoted_tzid() {
+        let p = prop(
+            "DTSTART",
+            "20260531T090000",
+            Some(vec![("TZID".into(), vec!["\"America/New_York\"".into()])]),
+        );
+        let dt = parse_dt(&p).unwrap().0;
+        assert_eq!(
+            dt.with_timezone(&Utc),
+            Utc.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_dt_unknown_tzid_falls_back_to_local() {
+        let p = prop(
+            "DTSTART",
+            "20260531T140000",
+            Some(vec![("TZID".into(), vec!["Mars/Olympus".into()])]),
+        );
+        let dt = parse_dt(&p).unwrap().0;
         assert_eq!(dt, Local.with_ymd_and_hms(2026, 5, 31, 14, 0, 0).unwrap());
     }
 

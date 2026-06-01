@@ -38,6 +38,7 @@ notify = "6"
 log = "0.4"
 env_logger = "0.11"
 ical = "0.11.0"
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 # the module dev harness — used only by examples/harness.rs, so it stays out of
