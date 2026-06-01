@@ -172,7 +172,8 @@ enum PopupKind {
 struct BarSurface {
     id: window::Id,
     output: String,
-    /// the output's pixel width, for clamping popups opened over this surface.
+    /// the output's logical (layout) width — same space as iced's logical cursor x,
+    /// so the popup clamp stays scale-correct on fractional-scale outputs.
     width: u32,
 }
 
@@ -212,8 +213,10 @@ struct OutputInfo {
     width: u32,
 }
 
-/// All active sway outputs (name + pixel width), via sway IPC. Empty on failure
-/// (e.g. not under sway) — the bar then simply has no surfaces until one appears.
+/// All active sway outputs (name + logical width), via sway IPC. `rect` is in
+/// sway's logical layout coordinates — the same space as iced's logical cursor —
+/// so widths are scale-correct for popup clamping. Empty on failure (e.g. not
+/// under sway) — the bar then simply has no surfaces until one appears.
 fn sway_outputs() -> Vec<OutputInfo> {
     swayipc::Connection::new()
         .ok()
@@ -1118,13 +1121,16 @@ impl Bar {
     fn reconcile_bar_geometry(&mut self, pos: config::Position) -> Task<Message> {
         let g = bar_geom(&self.config.bar, pos);
         self.bar_pos = pos;
-        let mut tasks = Vec::with_capacity(self.bars.len() * 5);
+        let mut tasks = Vec::with_capacity(self.bars.len() * 4);
         for b in &self.bars {
             let id = b.id;
-            tasks.push(Task::done(Message::AnchorChange {
-                id,
-                anchor: g.anchor,
-            }));
+            // Each mutator commits the surface itself, so order to minimise visible
+            // intermediate states: the non-reflowing attributes (layer, margin,
+            // exclusive zone) first, then anchor+size *together* and *last* via
+            // AnchorSizeChange (one set_anchor+set_size+commit). The compositor then
+            // reflows tiled windows at most once, with margins/zone already correct —
+            // instead of up to four times across five separate commits.
+            tasks.push(Task::done(Message::LayerChange { id, layer: g.layer }));
             tasks.push(Task::done(Message::MarginChange {
                 id,
                 margin: g.margin,
@@ -1133,8 +1139,11 @@ impl Bar {
                 id,
                 zone_size: g.exclusive_zone,
             }));
-            tasks.push(Task::done(Message::SizeChange { id, size: g.size }));
-            tasks.push(Task::done(Message::LayerChange { id, layer: g.layer }));
+            tasks.push(Task::done(Message::AnchorSizeChange {
+                id,
+                anchor: g.anchor,
+                size: g.size,
+            }));
         }
         Task::batch(tasks)
     }
@@ -1153,11 +1162,13 @@ impl Bar {
 
         // Close surfaces whose output is gone or de-selected.
         let mut kept = Vec::with_capacity(self.bars.len());
+        let mut closed_any = false;
         for b in self.bars.drain(..) {
             if desired_names.contains(b.output.as_str()) {
                 kept.push(b);
             } else {
                 tasks.push(iced::window::close(b.id));
+                closed_any = true;
             }
         }
         self.bars = kept;
@@ -1179,6 +1190,21 @@ impl Bar {
                     });
                 }
             }
+        }
+
+        // If the cursor's output no longer has a bar, forget it (so popups don't
+        // target a dead output) and re-base the popup-clamp width on a survivor.
+        if let Some(name) = &self.cursor_output {
+            if !self.bars.iter().any(|b| &b.output == name) {
+                self.cursor_output = None;
+                self.screen_w = self.bars.first().map(|b| b.width).unwrap_or(1920);
+            }
+        }
+        // An output went away — close any transient popup (it lived on a surface
+        // that may be gone; the compositor would close it anyway, but don't leave
+        // dangling popup state pointing at a dead output).
+        if closed_any {
+            tasks.push(self.close_any_popup());
         }
         Task::batch(tasks)
     }
@@ -1219,18 +1245,23 @@ impl Bar {
                         }
                     }
                 },
-                // added.
+                // added. If this id was seen before (a key removed earlier and now
+                // re-added), bump its generation so the new instance's recipes don't
+                // collide with a not-yet-drained stream from the old one.
                 None => {
                     if let Some(m) = modules::build(&s.type_id, id, &s.cfg) {
+                        if self.generation.contains_key(&id) {
+                            self.bump_generation(id);
+                        }
                         next.push(ModuleEntry::new(id, s.key, m, s.cfg));
                     }
                 }
             }
         }
-        // whatever is left was removed from placement.
+        // Whatever is left was removed from placement. Keep its `generation` entry
+        // (monotonic per id) so a later re-add re-keys past any draining recipe.
         for (_, mut e) in live.drain() {
             e.module.shutdown();
-            self.generation.remove(&e.id);
         }
         self.modules = next;
         // A module popup whose owner no longer exists must close.
@@ -1381,6 +1412,14 @@ fn outputs_stream() -> impl Stream<Item = Message> {
                             return;
                         }
                     };
+                    // A fresh `subscribe` only delivers *deltas*, so kick one
+                    // reconcile against current reality on every (re)connect — else
+                    // a cold start where sway became reachable after launch, or a
+                    // sway restart with unchanged outputs, would leave the bar with
+                    // whatever surfaces it had (possibly none) until the next change.
+                    if tx.blocking_send(()).is_err() {
+                        return;
+                    }
                     for ev in events {
                         match ev {
                             Ok(swayipc::Event::Output(_)) => {
