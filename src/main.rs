@@ -14,7 +14,9 @@ use iced_layershell::to_layer_message;
 use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::modules;
 use ezbar::sources::volume;
-use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, ThemeTokens};
+use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Reconfigure, ThemeTokens};
+
+use std::collections::HashMap;
 
 mod install;
 mod ipc;
@@ -39,20 +41,24 @@ const DEFAULT_RIGHT: &[&str] = &[
 ];
 
 struct ModuleEntry {
+    /// Stable instance id = `stable_id(name)`; routing + recipe key (RFC 0004).
     id: u64,
+    /// The placement **key** — the instance's identity across reloads.
     name: String,
     module: Box<dyn Module>,
+    /// The resolved config this instance was last (re)built/reconfigured with, so a
+    /// reconcile can tell "unchanged" (keep state) from "changed" (reconfigure).
+    cfg: toml::Value,
     disabled: bool,
 }
 
 impl ModuleEntry {
-    /// Construct with a routing name = the placement **key** (so two instances of one
-    /// module type, distinguished by `key`, route independently).
-    fn with_name(id: u64, name: String, module: Box<dyn Module>) -> Self {
+    fn new(id: u64, name: String, module: Box<dyn Module>, cfg: toml::Value) -> Self {
         ModuleEntry {
             id,
             name,
             module,
+            cfg,
             disabled: false,
         }
     }
@@ -181,9 +187,14 @@ struct Bar {
     // focused output width, so popups can be clamped on-screen
     screen_w: u32,
 
-    // PoC (RFC 0004): the live bar surface's current geometry position, so a
-    // reconcile can diff against it and re-anchor in place instead of re-rolling.
+    // RFC 0004: the live bar surface's current geometry position, so a reconcile
+    // can diff against it and re-anchor in place instead of re-rolling.
     bar_pos: config::Position,
+
+    // RFC 0002/0004: per-instance subscription generation. Bumped when a module is
+    // reconfigured/reconstructed so the host's `.with((id, gen))` recipe key changes
+    // and iced re-rolls that instance's streams (the old config's streams drop).
+    generation: HashMap<u64, u64>,
 }
 
 /// Width of the focused sway output (for clamping popups). Falls back to 1920.
@@ -338,25 +349,29 @@ fn all_placed(config: &Config) -> Vec<Placed> {
     items
 }
 
-/// The ordered, deduped module-instance **keys** in the resolved placement — used to
-/// detect whether a reload changed the module set.
-fn resolved_module_ids(config: &Config) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for p in all_placed(config) {
-        if modules::is_module(&p.type_id) && seen.insert(p.key.clone()) {
-            out.push(p.key);
-        }
-    }
-    out
+/// Stable instance id from the placement `key` (RFC 0004 identity). The same key
+/// maps to the same id across reloads — independent of zone and order — so a
+/// reconcile can keep an unchanged instance's state and recipes. `DefaultHasher`
+/// is fixed-keyed, hence deterministic within and across runs.
+fn stable_id(key: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    h.finish()
 }
 
-/// Build the live module set (RFC 0001 factory): one instance **per placement entry**,
-/// keyed by `key` (so two `custom`/`disk`/… with distinct keys are independent),
-/// configured from `[modules.<id>]` overlaid by the entry's inline `config`.
-fn build_modules(config: &Config) -> Vec<ModuleEntry> {
+/// A desired module instance: routing `key`, module `type_id`, resolved config.
+struct ModuleSpec {
+    key: String,
+    type_id: String,
+    cfg: toml::Value,
+}
+
+/// The desired module instances from the resolved placement — one per unique `key`,
+/// in placement order, each configured from `[modules.<id>]` overlaid by the entry's
+/// inline `config`. The single source of truth for both initial build and reconcile.
+fn desired_module_specs(config: &Config) -> Vec<ModuleSpec> {
     let mut out = Vec::new();
-    let mut inst = 1u64;
     let mut seen = std::collections::HashSet::new();
     for p in all_placed(config) {
         // Skip host chrome such as `switcher`; placeable widgets are modules.
@@ -369,12 +384,25 @@ fn build_modules(config: &Config) -> Vec<ModuleEntry> {
             continue;
         }
         let cfg = config::merge_module_config(config.modules.get(&p.type_id), &p.config);
-        if let Some(m) = modules::build(&p.type_id, inst, &cfg) {
-            out.push(ModuleEntry::with_name(inst, p.key, m));
-            inst += 1;
-        }
+        out.push(ModuleSpec {
+            key: p.key,
+            type_id: p.type_id,
+            cfg,
+        });
     }
     out
+}
+
+/// Build the live module set (RFC 0001 factory) from the desired specs, keyed by
+/// `stable_id(key)`.
+fn build_modules(config: &Config) -> Vec<ModuleEntry> {
+    desired_module_specs(config)
+        .into_iter()
+        .filter_map(|s| {
+            let id = stable_id(&s.key);
+            modules::build(&s.type_id, id, &s.cfg).map(|m| ModuleEntry::new(id, s.key, m, s.cfg))
+        })
+        .collect()
 }
 
 fn parse_popup_kind(s: &str) -> Option<PopupKind> {
@@ -464,6 +492,7 @@ impl Bar {
             theme,
             screen_w: focused_output_width(),
             bar_pos,
+            generation: HashMap::new(),
         };
         // Dev/screenshot hook: open the switcher popup on startup for capture.
         if std::env::var("EZBAR_OPEN_POPUP").is_ok() {
@@ -984,8 +1013,6 @@ impl Bar {
     /// switch is a cheap re-render that keeps module state). The workspaces widget
     /// reads its style straight from `self.config.theme.workspaces` on render.
     fn apply_config(&mut self, cfg: Config) -> Task<Message> {
-        let modules_changed = resolved_module_ids(&cfg) != resolved_module_ids(&self.config)
-            || cfg.modules != self.config.modules;
         // RFC 0004: surface geometry is reconciled in place, not baked at creation.
         // `position` may also have been overridden live via IPC (`bar_pos`), so diff
         // against the live value, not the previous config's.
@@ -995,14 +1022,14 @@ impl Bar {
             || cfg.bar.layer != self.config.bar.layer;
         self.config = cfg;
         self.theme = self.config.theme_tokens();
-        if modules_changed {
-            self.rebuild_modules();
-        }
-        if geom_changed {
+        // Modules reconcile by key (idempotent: unchanged in ⇒ no churn out).
+        let modules = self.reconcile_modules();
+        let geom = if geom_changed {
             self.reconcile_bar_geometry(self.config.bar.position)
         } else {
             Task::none()
-        }
+        };
+        Task::batch([modules, geom])
     }
 
     /// RFC 0004: re-anchor / re-size / re-layer the *live* bar surface to match the
@@ -1015,8 +1042,14 @@ impl Bar {
         let id = self.bar_id;
         self.bar_pos = pos;
         Task::batch([
-            Task::done(Message::AnchorChange { id, anchor: g.anchor }),
-            Task::done(Message::MarginChange { id, margin: g.margin }),
+            Task::done(Message::AnchorChange {
+                id,
+                anchor: g.anchor,
+            }),
+            Task::done(Message::MarginChange {
+                id,
+                margin: g.margin,
+            }),
             Task::done(Message::ExclusiveZoneChange {
                 id,
                 zone_size: g.exclusive_zone,
@@ -1027,11 +1060,69 @@ impl Bar {
     }
 
     /// Shut down the old modules and construct the new set from the current config.
-    fn rebuild_modules(&mut self) {
-        for e in &mut self.modules {
-            e.module.shutdown();
+    /// RFC 0004: reconcile the live module set against config, keyed by `key`.
+    /// **Unchanged** instances keep their state, recipes, and running streams;
+    /// **added** are constructed; **removed** are shut down; **config-changed** are
+    /// `reconfigure`d (or rebuilt) with a generation bump that re-keys their
+    /// subscriptions. Order follows placement. Returns a task to close a module
+    /// popup whose owning instance went away.
+    fn reconcile_modules(&mut self) -> Task<Message> {
+        let specs = desired_module_specs(&self.config);
+        let mut live: HashMap<String, ModuleEntry> = self
+            .modules
+            .drain(..)
+            .map(|e| (e.name.clone(), e))
+            .collect();
+        let mut next: Vec<ModuleEntry> = Vec::with_capacity(specs.len());
+        for s in specs {
+            let id = stable_id(&s.key);
+            match live.remove(&s.key) {
+                // unchanged: keep the instance, its state, and its subscriptions.
+                Some(entry) if entry.cfg == s.cfg => next.push(entry),
+                // same key, changed config: adopt in place or rebuild.
+                Some(mut entry) => match entry.module.reconfigure(&s.cfg) {
+                    Reconfigure::Applied { resubscribe } => {
+                        entry.cfg = s.cfg;
+                        if resubscribe {
+                            self.bump_generation(id);
+                        }
+                        next.push(entry);
+                    }
+                    Reconfigure::Reconstruct => {
+                        entry.module.shutdown();
+                        if let Some(m) = modules::build(&s.type_id, id, &s.cfg) {
+                            self.bump_generation(id);
+                            next.push(ModuleEntry::new(id, s.key, m, s.cfg));
+                        }
+                    }
+                },
+                // added.
+                None => {
+                    if let Some(m) = modules::build(&s.type_id, id, &s.cfg) {
+                        next.push(ModuleEntry::new(id, s.key, m, s.cfg));
+                    }
+                }
+            }
         }
-        self.modules = build_modules(&self.config);
+        // whatever is left was removed from placement.
+        for (_, mut e) in live.drain() {
+            e.module.shutdown();
+            self.generation.remove(&e.id);
+        }
+        self.modules = next;
+        // A module popup whose owner no longer exists must close.
+        if let Some((pid, inst, _)) = self.module_popup {
+            if !self.modules.iter().any(|e| e.id == inst) {
+                self.module_popup = None;
+                return iced::window::close(pid);
+            }
+        }
+        Task::none()
+    }
+
+    /// Bump an instance's subscription generation so iced re-rolls its recipes.
+    fn bump_generation(&mut self, id: u64) {
+        *self.generation.entry(id).or_insert(0) += 1;
     }
 
     /// Map an `ezbar msg` command line to an action (RFC 0002 IPC).
@@ -1122,13 +1213,14 @@ impl Bar {
             if entry.disabled {
                 continue;
             }
-            let instance = entry.id;
+            let id = entry.id;
+            let generation = self.generation.get(&id).copied().unwrap_or(0);
             subs.push(
                 entry
                     .module
                     .subscription()
-                    .with(instance)
-                    .map(|(instance, m)| Message::ModuleMsg { instance, msg: m }),
+                    .with((id, generation))
+                    .map(|((instance, _gen), m)| Message::ModuleMsg { instance, msg: m }),
             );
         }
         Subscription::batch(subs)
@@ -1195,4 +1287,38 @@ fn config_stream() -> impl Stream<Item = Message> {
             drop(watcher);
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_id_is_deterministic_and_distinct() {
+        // Same key → same id across calls (so a reconcile matches instances).
+        assert_eq!(stable_id("clock"), stable_id("clock"));
+        assert_eq!(stable_id("stock:nasdaq"), stable_id("stock:nasdaq"));
+        // Different keys → different ids (no accidental aliasing of instances).
+        assert_ne!(stable_id("cpu"), stable_id("clock"));
+        assert_ne!(stable_id("stock:nasdaq"), stable_id("stock:dax"));
+    }
+
+    #[test]
+    fn desired_specs_dedup_order_and_skip_chrome() {
+        let cfg = Config::default();
+        let specs = desired_module_specs(&cfg);
+        // Default placement renders the shipped modules; keys are unique.
+        let keys: Vec<&str> = specs.iter().map(|s| s.key.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "duplicate instance key in specs");
+        // Left zone first → workspaces leads; the right cluster includes clock.
+        assert_eq!(keys.first(), Some(&"workspaces"));
+        assert!(keys.contains(&"clock"));
+        // Host chrome (the `switcher`) is never a module instance.
+        assert!(!keys.contains(&"switcher"));
+        // Every spec names a real module type.
+        assert!(specs.iter().all(|s| modules::is_module(&s.type_id)));
+    }
 }

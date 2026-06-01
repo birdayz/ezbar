@@ -183,8 +183,29 @@ pub trait Module: Send {
         None
     }
 
+    /// Adopt a changed config live, or ask to be rebuilt (RFC 0002/0004 reconcile).
+    /// Called by the host when an instance's resolved config changed but its `key`
+    /// is the same. The default rebuilds the instance (dropping in-instance state);
+    /// override to keep state across an edit. If the new config feeds a
+    /// subscription (interval, endpoint, …), return `Applied { resubscribe: true }`
+    /// so the host re-rolls this instance's streams.
+    fn reconfigure(&mut self, _cfg: &toml::Value) -> Reconfigure {
+        Reconfigure::Reconstruct
+    }
+
     /// Teardown before the instance is retired.
     fn shutdown(&mut self) {}
+}
+
+/// Outcome of a live config change handed to a [`Module::reconfigure`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reconfigure {
+    /// Adopted in place. `resubscribe` = the new config feeds a subscription, so
+    /// the host must re-roll this instance's streams (it bumps a generation that
+    /// re-keys the instance's recipes); `false` keeps the running streams.
+    Applied { resubscribe: bool },
+    /// Rebuild the instance from scratch (the safe default).
+    Reconstruct,
 }
 
 /// Subscription helpers.

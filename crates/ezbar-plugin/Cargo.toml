@@ -12,3 +12,6 @@ iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
 # Re-exported as `ezbar_plugin::task::{spawn_blocking, sleep}` so modules need no
 # direct tokio dependency. Runs on the host's executor (same tokio as iced).
 tokio = { version = "1", features = ["rt", "time"] }
+# Module config is a `toml::Value` (RFC 0002), handed to `reconfigure` on a live
+# config change. Rust-ABI only (phase-1 / bit-identical builds), like the rest.
+toml = "0.8"
