@@ -6,7 +6,6 @@ use std::process::Command;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
-use ezbar_plugin::icons;
 use reqwest::Client;
 use serde_json::Value;
 
@@ -239,7 +238,7 @@ impl GitHub {
         let data = GitHubData {
             notifications: filtered,
             count,
-            display_text: format!("{} {count}", icons::GITHUB),
+            display_text: count.to_string(),
         };
         Ok(FetchResult::Data(data))
     }

@@ -8,7 +8,8 @@ use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
 use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text};
 use ezbar_plugin::iced::{Color, Element, Length, Subscription, Task};
-use ezbar_plugin::{icons, Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
+use ezbar_plugin::icons::Icon;
+use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 use crate::sources::github::{self, GitHubData, GitHubNotification};
 
@@ -32,7 +33,7 @@ impl GitHub {
         GitHub {
             instance,
             data: GitHubData {
-                display_text: format!("{} …", icons::GITHUB),
+                display_text: "…".to_string(),
                 ..Default::default()
             },
             token: github::find_token(),
@@ -42,7 +43,7 @@ impl GitHub {
     fn remove(&mut self, id: &str) {
         self.data.notifications.retain(|n| n.id != id);
         self.data.count = self.data.notifications.len();
-        self.data.display_text = format!("{} {}", icons::GITHUB, self.data.count);
+        self.data.display_text = self.data.count.to_string();
     }
 
     fn mark_task(&self, id: &str) -> Response {
@@ -76,7 +77,7 @@ impl Module for GitHub {
             Some(Msg::TogglePopup) => Response::request(HostRequest::OpenPopup(PopupMode::Click)),
             Some(Msg::MarkAll) => {
                 self.data = GitHubData {
-                    display_text: format!("{} 0", icons::GITHUB),
+                    display_text: "0".to_string(),
                     ..Default::default()
                 };
                 let mut resp = Response::request(HostRequest::ClosePopup);
@@ -103,15 +104,22 @@ impl Module for GitHub {
         }
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let color = if self.data.count > 0 {
             Color::from_rgb(0.345, 0.65, 1.0)
         } else {
             Color::WHITE
         };
-        mouse_area(text(self.data.display_text.clone()).color(color))
-            .on_press(ModMsg::new(Msg::TogglePopup))
-            .into()
+        mouse_area(
+            row(vec![
+                Icon::Github.view(ctx.theme.text_size, color),
+                text(self.data.display_text.clone()).color(color).into(),
+            ])
+            .spacing(5)
+            .align_y(Vertical::Center),
+        )
+        .on_press(ModMsg::new(Msg::TogglePopup))
+        .into()
     }
 
     fn popup(&self, _ctx: &Ctx) -> Option<Element<'_, ModMsg>> {
@@ -229,7 +237,7 @@ fn gh_stream(_id: &u64) -> impl Stream<Item = ModMsg> {
                 None => {
                     let _ = out
                         .send(ModMsg::new(Msg::Loaded(GitHubData {
-                            display_text: format!("{} ?", icons::GITHUB),
+                            display_text: "?".to_string(),
                             ..Default::default()
                         })))
                         .await;

@@ -13,7 +13,7 @@ impl Default for KubectlData {
     fn default() -> Self {
         KubectlData {
             context: "--".to_string(),
-            string: "󱃾 --".to_string(),
+            string: "--".to_string(),
             is_production: false,
         }
     }
@@ -23,7 +23,7 @@ pub fn update_context() -> KubectlData {
     let context = get_kubectl_context();
     let is_production = is_production_context(&context);
     KubectlData {
-        string: format!("󱃾 {}", context),
+        string: context.clone(),
         is_production,
         context,
     }

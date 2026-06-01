@@ -8,6 +8,7 @@ use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
 use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text};
 use ezbar_plugin::iced::{Color, Element, Subscription};
+use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 use crate::sources::claude::{self, Block, Instance, Limits};
@@ -63,7 +64,7 @@ impl Module for Claude {
         Response::none()
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let n = self.instances.len();
         let waiting = self.instances.iter().filter(|i| i.waiting).count();
         let count_color = if waiting > 0 {
@@ -72,7 +73,7 @@ impl Module for Claude {
             Color::WHITE
         };
         let mut items: Vec<Element<ModMsg>> = vec![
-            text("󰚩").into(),
+            Icon::Bot.view(ctx.theme.text_size, ctx.fg()),
             text(format!("{}", n)).color(count_color).into(),
         ];
         if let Some(p) = self.limits.as_ref().and_then(|l| l.five_h_left) {

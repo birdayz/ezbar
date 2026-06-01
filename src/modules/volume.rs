@@ -2,9 +2,11 @@
 
 use std::time::Duration;
 
+use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{mouse_area, text};
+use ezbar_plugin::iced::widget::{mouse_area, row, text};
 use ezbar_plugin::iced::{Element, Subscription, Task};
+use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::sources::volume::{self, VolumeData};
@@ -73,17 +75,31 @@ impl Module for Volume {
         }
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
-        mouse_area(text(self.data.string.clone()))
-            .on_press(ModMsg::new(Msg::Click))
-            .on_scroll(|delta| {
-                let y = match delta {
-                    ezbar_plugin::iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                    ezbar_plugin::iced::mouse::ScrollDelta::Pixels { y, .. } => y,
-                };
-                ModMsg::new(Msg::Scroll(if y > 0.0 { 1 } else { -1 }))
-            })
-            .into()
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
+        let ico = if self.data.is_muted || self.data.volume == 0 {
+            Icon::VolumeMute
+        } else if self.data.volume < 50 {
+            Icon::VolumeMedium
+        } else {
+            Icon::VolumeHigh
+        };
+        mouse_area(
+            row(vec![
+                ico.view(ctx.theme.text_size, ctx.fg()),
+                text(self.data.string.clone()).into(),
+            ])
+            .spacing(5)
+            .align_y(Vertical::Center),
+        )
+        .on_press(ModMsg::new(Msg::Click))
+        .on_scroll(|delta| {
+            let y = match delta {
+                ezbar_plugin::iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                ezbar_plugin::iced::mouse::ScrollDelta::Pixels { y, .. } => y,
+            };
+            ModMsg::new(Msg::Scroll(if y > 0.0 { 1 } else { -1 }))
+        })
+        .into()
     }
 }
 
