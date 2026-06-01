@@ -330,7 +330,7 @@ fn build_modules(config: &Config) -> Vec<ModuleEntry> {
     let mut inst = 1u64;
     let mut seen = std::collections::HashSet::new();
     for p in all_placed(config) {
-        // host-inline widgets (clock/volume/…) are not modules — rendered by the host
+        // Skip host chrome such as `switcher`; placeable widgets are modules.
         if !modules::is_module(&p.type_id) {
             continue;
         }
@@ -758,9 +758,8 @@ impl Bar {
         .into()
     }
 
-    /// Render a host-inline **widget** by its type id (RFC 0002 registry). `None` if
-    /// it's not a host widget (then it's a module, rendered by key) or has nothing to
-    /// show (e.g. `battery` on a desktop).
+    /// Render host chrome by type id. `None` means the placement is either a module,
+    /// rendered by key, or an unknown item that should not appear.
     fn render_widget(&self, id: &str) -> Option<Element<'_, Message>> {
         // Only the ▾ switcher is host chrome now; everything placeable is a Module.
         match id {
@@ -770,7 +769,7 @@ impl Bar {
     }
 
     /// Build one zone from ordered `Placed` items: a module instance renders by `key`,
-    /// a host widget by `type_id`. A configured separator goes between items (never
+    /// host chrome renders by `type_id`. A configured separator goes between items (never
     /// before the `▾` switcher).
     fn build_zone(&self, items: &[Placed]) -> Element<'_, Message> {
         let s = &self.config.theme.separator;
@@ -778,7 +777,7 @@ impl Bar {
         let sep_color = s.color.iced();
         let mut out: Vec<Element<Message>> = Vec::new();
         for p in items {
-            // a built module instance is keyed by `key`; otherwise it's a host widget
+            // A built module instance is keyed by `key`; otherwise try host chrome.
             let el = if self.modules.iter().any(|e| e.name == p.key) {
                 self.render_module(&p.key)
             } else {

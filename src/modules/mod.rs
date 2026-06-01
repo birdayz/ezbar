@@ -24,8 +24,8 @@ pub mod workspaces;
 
 use ezbar_plugin::Module;
 
-/// Whether `id` names a built-in module (vs a host-inline widget). Kept in sync with
-/// [`build`] — the single source of truth for "is this a module?".
+/// Whether `id` names a built-in module (vs host chrome such as `switcher`).
+/// Kept in sync with [`build`] — the single source of truth for "is this a module?".
 pub fn is_module(id: &str) -> bool {
     matches!(
         id,
@@ -54,8 +54,7 @@ pub fn is_module(id: &str) -> bool {
 }
 
 /// Construct a built-in module by its placement `id` (RFC 0001 factory). `cfg` is
-/// the `[modules.<id>]` table. Returns `None` for ids that aren't modules (those
-/// are rendered inline by the host, e.g. `clock`, `volume`, `workspaces`).
+/// the `[modules.<id>]` table. Returns `None` for ids that are not modules.
 pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Module>> {
     match id {
         "cpu" => Some(Box::new(cpu::Cpu::new(instance))),
