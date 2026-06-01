@@ -180,6 +180,10 @@ struct Bar {
 
     // focused output width, so popups can be clamped on-screen
     screen_w: u32,
+
+    // PoC (RFC 0004): the live bar surface's current geometry position, so a
+    // reconcile can diff against it and re-anchor in place instead of re-rolling.
+    bar_pos: config::Position,
 }
 
 /// Width of the focused sway output (for clamping popups). Falls back to 1920.
@@ -424,6 +428,7 @@ impl Bar {
             id: bar_id,
         });
         let theme = config.theme_tokens();
+        let bar_pos = config.bar.position;
         let bar = Bar {
             bar_id,
             popup: None,
@@ -433,6 +438,7 @@ impl Bar {
             config,
             theme,
             screen_w: focused_output_width(),
+            bar_pos,
         };
         // Dev/screenshot hook: open the switcher popup on startup for capture.
         if std::env::var("EZBAR_OPEN_POPUP").is_ok() {
@@ -470,8 +476,8 @@ impl Bar {
                     log::warn!("could not save preset selection: {e}");
                 }
                 let close = self.close_popup_task();
-                self.apply_config(config::load());
-                close
+                let applied = self.apply_config(config::load());
+                Task::batch([close, applied])
             }
             Message::Ipc(cmd) => self.handle_ipc(&cmd),
             Message::OpenPopup(kind) => {
@@ -495,8 +501,7 @@ impl Bar {
             Message::ClosePopup => self.close_popup_task(),
             Message::ConfigReloaded(Ok(cfg)) => {
                 log::info!("config reloaded");
-                self.apply_config(cfg);
-                Task::none()
+                self.apply_config(cfg)
             }
             Message::ConfigReloaded(Err(e)) => {
                 log::warn!("config reload failed ({e}); keeping previous config");
@@ -953,14 +958,57 @@ impl Bar {
     /// set **only if** placement or any `[modules.*]` changed (so a pure theme/preset
     /// switch is a cheap re-render that keeps module state). The workspaces widget
     /// reads its style straight from `self.config.theme.workspaces` on render.
-    fn apply_config(&mut self, cfg: Config) {
+    fn apply_config(&mut self, cfg: Config) -> Task<Message> {
         let modules_changed = resolved_module_ids(&cfg) != resolved_module_ids(&self.config)
             || cfg.modules != self.config.modules;
+        // PoC (RFC 0004): geometry is now reconciled, not baked-at-creation.
+        let geom_changed = cfg.bar.position != self.config.bar.position
+            || cfg.bar.height != self.config.bar.height;
         self.config = cfg;
         self.theme = self.config.theme_tokens();
         if modules_changed {
             self.rebuild_modules();
         }
+        if geom_changed {
+            self.reconcile_bar_geometry(self.config.bar.position)
+        } else {
+            Task::none()
+        }
+    }
+
+    /// PoC (RFC 0004): re-anchor / re-size the *live* bar surface to `pos` by emitting
+    /// iced_layershell's in-place mutation messages — no surface re-roll, no
+    /// exit-on-close dance. The change messages are consumed by the layershell
+    /// runtime (not our `update`). Updates `bar_pos` so a later diff is a no-op.
+    fn reconcile_bar_geometry(&mut self, pos: config::Position) -> Task<Message> {
+        let b = &self.config.bar;
+        let h = b.height.max(1);
+        let m = b.margin;
+        let edge = match pos {
+            config::Position::Top => Anchor::Top,
+            config::Position::Bottom => Anchor::Bottom,
+        };
+        let near_gap = match pos {
+            config::Position::Top => m.top,
+            config::Position::Bottom => m.bottom,
+        };
+        let id = self.bar_id;
+        self.bar_pos = pos;
+        Task::batch([
+            Task::done(Message::AnchorChange {
+                id,
+                anchor: edge | Anchor::Left | Anchor::Right,
+            }),
+            Task::done(Message::MarginChange {
+                id,
+                margin: (m.top, m.right, m.bottom, m.left),
+            }),
+            Task::done(Message::ExclusiveZoneChange {
+                id,
+                zone_size: h as i32 + near_gap.max(0),
+            }),
+            Task::done(Message::SizeChange { id, size: (0, h) }),
+        ])
     }
 
     /// Shut down the old modules and construct the new set from the current config.
@@ -975,10 +1023,7 @@ impl Bar {
     fn handle_ipc(&mut self, cmd: &str) -> Task<Message> {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         match parts.as_slice() {
-            ["reload"] => {
-                self.apply_config(config::load());
-                Task::none()
-            }
+            ["reload"] => self.apply_config(config::load()),
             ["preset", dir @ ("next" | "prev")] => {
                 let names = config::preset_names();
                 if names.is_empty() {
@@ -1008,6 +1053,18 @@ impl Bar {
             ["volume", "up"] => Task::done(Message::VolumeAdjust(1)),
             ["volume", "down"] => Task::done(Message::VolumeAdjust(-1)),
             ["volume", "mute"] => Task::done(Message::VolumeAdjust(0)),
+            // PoC (RFC 0004): re-anchor the live bar surface in place.
+            ["position", p @ ("top" | "bottom" | "toggle")] => {
+                let next = match *p {
+                    "top" => config::Position::Top,
+                    "bottom" => config::Position::Bottom,
+                    _ => match self.bar_pos {
+                        config::Position::Top => config::Position::Bottom,
+                        config::Position::Bottom => config::Position::Top,
+                    },
+                };
+                self.reconcile_bar_geometry(next)
+            }
             _ => {
                 log::warn!("ipc: unknown command: {cmd:?}");
                 Task::none()
