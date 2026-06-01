@@ -1023,19 +1023,22 @@ impl Bar {
             .padding([4, 10])
             .into()
         } else {
+            // Left and right zones size to their CONTENT; the centre takes the slack
+            // and keeps the title centred in it. Forcing equal thirds (FillPortion)
+            // crushed a wide right cluster into 1/3 of the output and clipped the
+            // clock off the edge on a narrow (e.g. 1920) monitor.
             let left = container(ws_row)
-                .width(Length::FillPortion(1))
                 .align_x(Horizontal::Left)
                 .center_y(Length::Fill)
                 .padding([0, 8]);
             let center = container(title_el)
-                .width(Length::FillPortion(1))
+                .width(Length::Fill)
                 .align_x(Horizontal::Center)
                 .center_y(Length::Fill);
             let right_row = container(right_inner)
-                .width(Length::FillPortion(1))
                 .align_x(Horizontal::Right)
-                .center_y(Length::Fill);
+                .center_y(Length::Fill)
+                .padding([0, 8]);
             container(row![left, center, right_row].align_y(Vertical::Center))
                 .width(Length::Fill)
                 .height(Length::Fill)
