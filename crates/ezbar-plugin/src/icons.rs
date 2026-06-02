@@ -43,6 +43,8 @@ icon_set! {
     Keyboard => "keyboard", Clock => "clock", Calendar => "calendar",
     // ── brands (Simple Icons) ──
     Github => "github", Spotify => "spotify", Kubernetes => "kubernetes",
+    // ── weather / misc (used by plugins) ──
+    Cloud => "cloud", Sun => "sun", Moon => "moon", Alert => "alert", Dot => "dot",
 }
 
 impl Icon {

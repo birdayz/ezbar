@@ -580,6 +580,11 @@ pub fn path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config/ezbar/config.toml"))
 }
 
+/// `…/ezbar/plugins/` — where WASM plugins (`*.wasm`) are dropped (RFC 0006).
+pub fn plugins_dir() -> Option<PathBuf> {
+    Some(path()?.with_file_name("plugins"))
+}
+
 /// Pure: parse a config from a TOML string (inline `[presets.*]` + `$palette` only;
 /// no file I/O). [`parse_with`] adds drop-in `presets/*.toml` files.
 pub fn parse_str(s: &str) -> Result<Config, String> {

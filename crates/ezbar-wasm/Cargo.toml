@@ -1,0 +1,16 @@
+# Host runtime for ezbar WASM plugins (RFC 0006 phase 2): loads `.wasm`
+# components, runs each on its own off-GUI thread, and renders the lifted widget
+# tree as real iced widgets inside the bar.
+[package]
+name = "ezbar-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "wasmtime host runtime that turns an ezbar WASM plugin into a Module."
+license = "MIT"
+
+[dependencies]
+ezbar-plugin = { path = "../ezbar-plugin" }
+wasmtime = "45"
+wasmtime-wasi = "45"
+anyhow = "1"
+log = "0.4"

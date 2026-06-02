@@ -1,0 +1,545 @@
+//! Host runtime for ezbar WASM plugins (RFC 0006 phase 2).
+//!
+//! [`WasmModule`] turns a `.wasm` component into a regular bar [`Module`]: an
+//! off-GUI **actor thread** owns the wasmtime `Store`, drives the plugin's
+//! `update`/`view` loop, lifts the returned widget tree (capped + validated) into
+//! a `Send` arena, and parks it in a shared slot. The bar's `view` only ever
+//! reads that cached slot and renders it as **real iced widgets** — it never
+//! calls into the store. A trap (epoch/OOM) disables the plugin; the bar is
+//! untouched.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::Result;
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::p2::add_to_linker_sync;
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
+use ezbar_plugin::iced::{alignment, Color, Element, Length, Subscription};
+use ezbar_plugin::ui::graph::{Graph, GraphKind};
+use ezbar_plugin::{icons, Ctx, ModMsg, Module, Response};
+
+wasmtime::component::bindgen!({
+    world: "plugin",
+    path: "../../wit/since-v0.1.0",
+});
+
+// `Tree` is re-exported at the bindgen root by the world's `use`.
+use ezbar::plugin::ui::Node;
+
+// resource bounds (RFC 0006 §1a, v2.1: fixed constants)
+const EPOCH_TICK: Duration = Duration::from_millis(10);
+const DEADLINE_TICKS: u64 = 20; // ~200ms per guest call
+const MEM_LIMIT: usize = 8 << 20; // 8 MiB per plugin store
+const MAX_NODES: usize = 2_000;
+const MAX_DEPTH: usize = 32;
+const POLL: Duration = Duration::from_secs(2); // v1 timer cadence
+
+// ── host store data + the gated import interface ─────────────────────────────
+
+struct Host {
+    table: ResourceTable,
+    wasi: WasiCtx,
+    limits: StoreLimits,
+    granted_network: Vec<String>,
+}
+
+impl WasiView for Host {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+impl ezbar::plugin::host::Host for Host {
+    fn log(&mut self, msg: String) {
+        log::info!("[wasm plugin] {msg}");
+    }
+    fn text_size(&mut self) -> f32 {
+        14.0
+    }
+    fn fg(&mut self) -> ezbar::plugin::types::Paint {
+        ezbar::plugin::types::Paint::Token(ezbar::plugin::types::ThemeToken::Fg)
+    }
+    fn set_timeout(&mut self, _ms: u32) {}
+    fn subscribe(&mut self, _kinds: Vec<ezbar::plugin::types::EventKind>) {}
+    fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        let h = url.split("://").nth(1).unwrap_or(&url);
+        let h = h.split('/').next().unwrap_or(h);
+        if self.granted_network.iter().any(|g| g == h) {
+            Ok(Vec::new()) // PoC: granted, but the sync host doesn't fetch yet
+        } else {
+            Err(format!("capability denied: network host '{h}' not granted"))
+        }
+    }
+    fn read_file(&mut self, _path: String) -> Result<Vec<u8>, String> {
+        Err("capability denied: read-file not granted".into())
+    }
+    fn feed_subscribe(&mut self, _feed: ezbar::plugin::types::FeedKind, _min: u32) {}
+}
+
+impl ezbar::plugin::types::Host for Host {}
+impl ezbar::plugin::ui::Host for Host {}
+impl ezbar::plugin::events::Host for Host {}
+
+// ── the lifted (Send) widget arena, decoupled from the wasmtime types ────────
+
+#[derive(Clone, Debug)]
+enum Paint {
+    Token(u8), // index into the theme tokens, see `paint_color`
+    Rgba(u8, u8, u8, u8),
+}
+
+#[derive(Clone, Debug)]
+enum LNode {
+    Text {
+        content: String,
+        color: Paint,
+        size: Option<f32>,
+    },
+    Row {
+        children: Vec<u32>,
+        spacing: f32,
+        align: u8,
+    },
+    Column {
+        children: Vec<u32>,
+        spacing: f32,
+        align: u8,
+    },
+    Container {
+        child: u32,
+        padding: f32,
+    },
+    MouseArea {
+        child: u32,
+    },
+    Icon {
+        id: icons::Icon,
+        color: Paint,
+        size: f32,
+    },
+    Graph {
+        values: Vec<f64>,
+        kind: GraphKind,
+        line: Paint,
+    },
+    Spacer(f32),
+}
+
+#[derive(Clone, Debug, Default)]
+struct Lifted {
+    nodes: Vec<LNode>,
+    root: u32,
+}
+
+/// Lift the wasmtime `Tree` into a `Send` arena, enforcing the node cap and
+/// validating the arena is forward-referencing (a DAG) so the bar's render
+/// recursion is bounded (RFC 0006 §1a / v2.1).
+fn lift(t: &Tree) -> Result<Lifted, String> {
+    if t.nodes.len() > MAX_NODES {
+        return Err(format!(
+            "node cap exceeded: {} > {MAX_NODES}",
+            t.nodes.len()
+        ));
+    }
+    let mut nodes = Vec::with_capacity(t.nodes.len());
+    for (i, n) in t.nodes.iter().enumerate() {
+        nodes.push(lift_node(n, i as u32)?);
+    }
+    if t.root as usize >= nodes.len() {
+        return Err("root out of range".into());
+    }
+    Ok(Lifted {
+        nodes,
+        root: t.root,
+    })
+}
+
+fn check_fwd(parent: u32, c: u32) -> Result<u32, String> {
+    // `lower()` emits post-order, so a child always precedes its parent.
+    if c >= parent {
+        Err(format!("malformed arena: non-forward ref {c} >= {parent}"))
+    } else {
+        Ok(c)
+    }
+}
+
+fn lift_node(n: &Node, idx: u32) -> Result<LNode, String> {
+    use ezbar::plugin::ui::Node as N;
+    Ok(match n {
+        N::Text(t) => LNode::Text {
+            content: t.content.clone(),
+            color: paint(&t.color),
+            size: t.size,
+        },
+        N::Row(l) => LNode::Row {
+            children: l
+                .children
+                .iter()
+                .map(|&c| check_fwd(idx, c))
+                .collect::<Result<Vec<u32>, String>>()?,
+            spacing: l.spacing,
+            align: align_u8(l.align),
+        },
+        N::Column(l) => LNode::Column {
+            children: l
+                .children
+                .iter()
+                .map(|&c| check_fwd(idx, c))
+                .collect::<Result<Vec<u32>, String>>()?,
+            spacing: l.spacing,
+            align: align_u8(l.align),
+        },
+        N::Container(b) => LNode::Container {
+            child: check_fwd(idx, b.child)?,
+            padding: b.padding,
+        },
+        N::MouseArea(m) => LNode::MouseArea {
+            child: check_fwd(idx, m.child)?,
+        },
+        N::Icon(i) => LNode::Icon {
+            id: icon(i.id),
+            color: paint(&i.color),
+            size: i.size,
+        },
+        N::Graph(g) => LNode::Graph {
+            values: g.values.clone(),
+            kind: graph_kind(g.kind),
+            line: paint(&g.line),
+        },
+        N::Spacer(px) => LNode::Spacer(*px),
+    })
+}
+
+fn align_u8(a: ezbar::plugin::types::Align) -> u8 {
+    use ezbar::plugin::types::Align::*;
+    match a {
+        Start => 0,
+        Center => 1,
+        End => 2,
+    }
+}
+
+fn paint(p: &ezbar::plugin::types::Paint) -> Paint {
+    use ezbar::plugin::types::{Paint as P, ThemeToken as T};
+    match p {
+        P::Token(t) => Paint::Token(match t {
+            T::Fg => 0,
+            T::FgDim => 1,
+            T::Accent => 2,
+            T::Ok => 3,
+            T::Warn => 4,
+            T::Urgent => 5,
+            T::Bg => 6,
+        }),
+        P::Rgba(c) => Paint::Rgba(c.r, c.g, c.b, c.a),
+    }
+}
+
+fn icon(i: ezbar::plugin::types::IconId) -> icons::Icon {
+    use ezbar::plugin::types::IconId as W;
+    use icons::Icon as I;
+    match i {
+        W::Cpu => I::Cpu,
+        W::Memory => I::Memory,
+        W::Temperature => I::Temperature,
+        W::Ping => I::Ping,
+        W::VolumeHigh => I::VolumeHigh,
+        W::VolumeMedium => I::VolumeMedium,
+        W::VolumeMute => I::VolumeMute,
+        W::Battery => I::Battery,
+        W::BatteryCharging => I::BatteryCharging,
+        W::BatteryWarning => I::BatteryWarning,
+        W::Bot => I::Bot,
+        W::Github => I::Github,
+        W::Spotify => I::Spotify,
+        W::Kubernetes => I::Kubernetes,
+        W::Clock => I::Clock,
+        W::Calendar => I::Calendar,
+        W::Disk => I::Disk,
+        W::Net => I::Net,
+        W::Ip => I::Ip,
+        W::Updates => I::Updates,
+        W::Keyboard => I::Keyboard,
+        W::Cloud => I::Cloud,
+        W::Sun => I::Sun,
+        W::Moon => I::Moon,
+        W::Alert => I::Alert,
+        W::Dot => I::Dot,
+    }
+}
+
+fn graph_kind(k: ezbar::plugin::types::GraphKind) -> GraphKind {
+    use ezbar::plugin::types::GraphKind as W;
+    match k {
+        W::Cpu => GraphKind::Cpu,
+        W::Memory => GraphKind::Memory,
+        W::Temperature => GraphKind::Temperature,
+        W::Ping => GraphKind::Ping,
+        W::Generic => GraphKind::Cpu, // line colour is overridden anyway
+    }
+}
+
+// ── the off-GUI actor: owns the Store, drives the plugin, fills the slot ─────
+
+type Slot = Arc<Mutex<Option<Lifted>>>;
+
+fn spawn_actor(path: PathBuf, config: Vec<(String, String)>, slot: Slot, grants: Vec<String>) {
+    std::thread::spawn(move || {
+        if let Err(e) = run_actor(&path, config, &slot, grants) {
+            log::warn!("ezbar-wasm: plugin {path:?} stopped: {e:#}");
+        }
+    });
+}
+
+fn run_actor(
+    path: &Path,
+    config: Vec<(String, String)>,
+    slot: &Slot,
+    grants: Vec<String>,
+) -> Result<()> {
+    let mut cfg = Config::new();
+    cfg.epoch_interruption(true);
+    let engine = Engine::new(&cfg)?;
+    let component = Component::from_file(&engine, path)?;
+    let mut linker: Linker<Host> = Linker::new(&engine);
+    add_to_linker_sync(&mut linker)?;
+    Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker, |h: &mut Host| h)?;
+
+    // epoch ticker for this plugin's engine
+    {
+        let eng = engine.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(EPOCH_TICK);
+            eng.increment_epoch();
+        });
+    }
+
+    let wasi = WasiCtxBuilder::new().build();
+    let mut store = Store::new(
+        &engine,
+        Host {
+            table: ResourceTable::new(),
+            wasi,
+            limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
+            granted_network: grants,
+        },
+    );
+    store.limiter(|h| &mut h.limits);
+
+    store.set_epoch_deadline(DEADLINE_TICKS);
+    let plugin = Plugin::instantiate(&mut store, &component, &linker)?;
+    plugin.call_init(&mut store, &config)?;
+
+    loop {
+        store.set_epoch_deadline(DEADLINE_TICKS); // re-arm per call
+        let dirty = match plugin.call_update(&mut store, &ezbar::plugin::events::Event::Timer) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
+                return Ok(()); // terminal for instance
+            }
+        };
+        if dirty {
+            store.set_epoch_deadline(DEADLINE_TICKS);
+            match plugin.call_view(&mut store) {
+                Ok(tree) => match lift(&tree) {
+                    Ok(l) => *slot.lock().unwrap() = Some(l),
+                    Err(e) => log::warn!("ezbar-wasm: view rejected: {e}"),
+                },
+                Err(e) => {
+                    log::warn!("ezbar-wasm: view trapped — disabling plugin: {e}");
+                    return Ok(());
+                }
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+// ── the bar Module ───────────────────────────────────────────────────────────
+
+enum Msg {
+    Tick,
+}
+
+/// A loaded WASM plugin, presented to the bar as a [`Module`].
+pub struct WasmModule {
+    id: String,
+    instance: u64,
+    slot: Slot,
+}
+
+impl WasmModule {
+    /// Load `path` as a plugin with the placement `id`. `config` is the
+    /// `[modules.<id>]` table flattened to string pairs; `grants` are the
+    /// granted network hosts (capabilities).
+    pub fn new(
+        instance: u64,
+        id: impl Into<String>,
+        path: PathBuf,
+        config: Vec<(String, String)>,
+        grants: Vec<String>,
+    ) -> Self {
+        let slot: Slot = Arc::new(Mutex::new(None));
+        spawn_actor(path, config, slot.clone(), grants);
+        WasmModule {
+            id: id.into(),
+            instance,
+            slot,
+        }
+    }
+}
+
+impl Module for WasmModule {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn subscription(&self) -> Subscription<ModMsg> {
+        ezbar_plugin::sub::keyed(self.instance, tick_stream)
+    }
+
+    fn update(&mut self, msg: ModMsg) -> Response {
+        // a Tick just forces a re-render; `view` reads the latest lifted tree.
+        let _ = msg.get::<Msg>();
+        Response::none()
+    }
+
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
+        let lifted = self.slot.lock().unwrap().clone();
+        match lifted {
+            Some(l) if !l.nodes.is_empty() => build(&l, l.root, ctx, 0),
+            _ => text("\u{2026}").color(ctx.fg_dim()).into(),
+        }
+    }
+}
+
+fn tick_stream(_id: &u64) -> impl ezbar_plugin::iced::futures::Stream<Item = ModMsg> {
+    use ezbar_plugin::iced::futures::SinkExt;
+    ezbar_plugin::iced::stream::channel(
+        1,
+        |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
+            loop {
+                ezbar_plugin::task::sleep(Duration::from_millis(150)).await;
+                if out.send(ModMsg::new(Msg::Tick)).await.is_err() {
+                    break;
+                }
+            }
+        },
+    )
+}
+
+// ── render the lifted tree as real iced widgets ──────────────────────────────
+
+fn paint_color(p: &Paint, ctx: &Ctx) -> Color {
+    match p {
+        Paint::Token(t) => match t {
+            0 => ctx.fg(),
+            1 => ctx.fg_dim(),
+            2 => ctx.accent(),
+            3 => ctx.ok(),
+            4 => ctx.warn(),
+            5 => ctx.urgent(),
+            _ => ctx.bg(),
+        },
+        Paint::Rgba(r, g, b, a) => Color::from_rgba8(*r, *g, *b, *a as f32 / 255.0),
+    }
+}
+
+fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMsg> {
+    if depth > MAX_DEPTH {
+        return text("\u{2026}").into();
+    }
+    match &l.nodes[idx as usize] {
+        LNode::Text {
+            content,
+            color,
+            size,
+        } => {
+            let mut t = text(content.clone()).color(paint_color(color, ctx));
+            if let Some(s) = size {
+                t = t.size(*s);
+            }
+            t.into()
+        }
+        LNode::Row {
+            children,
+            spacing,
+            align,
+        } => {
+            let kids: Vec<_> = children
+                .iter()
+                .map(|&c| build(l, c, ctx, depth + 1))
+                .collect();
+            row(kids)
+                .spacing(*spacing)
+                .align_y(match align {
+                    0 => alignment::Vertical::Top,
+                    2 => alignment::Vertical::Bottom,
+                    _ => alignment::Vertical::Center,
+                })
+                .into()
+        }
+        LNode::Column {
+            children,
+            spacing,
+            align,
+        } => {
+            let kids: Vec<_> = children
+                .iter()
+                .map(|&c| build(l, c, ctx, depth + 1))
+                .collect();
+            column(kids)
+                .spacing(*spacing)
+                .align_x(match align {
+                    1 => alignment::Horizontal::Center,
+                    2 => alignment::Horizontal::Right,
+                    _ => alignment::Horizontal::Left,
+                })
+                .into()
+        }
+        LNode::Container { child, padding } => container(build(l, *child, ctx, depth + 1))
+            .padding(*padding)
+            .into(),
+        // interactivity (pointer events) is phase-2b; render the child for now
+        LNode::MouseArea { child } => mouse_area(build(l, *child, ctx, depth + 1)).into(),
+        LNode::Icon { id, color, size } => id.view(*size, paint_color(color, ctx)),
+        LNode::Graph { values, kind, line } => canvas(Graph {
+            values: values.clone(),
+            kind: *kind,
+            line_color: Some(paint_color(line, ctx)),
+        })
+        .width(Length::Fixed(48.0))
+        .height(Length::Fixed(16.0))
+        .into(),
+        LNode::Spacer(px) => container(text("")).width(Length::Fixed(*px)).into(),
+    }
+}
+
+// ── discovery ────────────────────────────────────────────────────────────────
+
+/// Scan a plugins directory for `*.wasm`, returning `(id, path)` pairs. The id is
+/// the file stem (a manifest is read in phase-2b).
+pub fn discover(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("wasm") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    out.push((stem.to_string(), p));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}

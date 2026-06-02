@@ -133,6 +133,11 @@ fn print_help() {
 fn run_bar() -> iced_layershell::Result {
     // Default to a Nerd Font so the icon glyphs render; overridable via [bar].font.
     let cfg = config::load();
+    // Discover WASM plugins (RFC 0006) before any module is built so their ids
+    // are placeable like built-ins.
+    if let Some(dir) = config::plugins_dir() {
+        modules::register_wasm_plugins(&dir);
+    }
     let name = cfg
         .bar
         .font
@@ -398,12 +403,32 @@ fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
         .collect()
 }
 
+/// WASM plugins the user did not explicitly place, as items to auto-add to the
+/// center zone (RFC 0006) — so dropping a `.wasm` in the plugins dir just works.
+fn unplaced_wasm_plugins(placed: &std::collections::HashSet<&str>) -> Vec<Placed> {
+    modules::wasm_plugin_ids()
+        .into_iter()
+        .filter(|id| !placed.contains(id.as_str()))
+        .map(|id| Placed {
+            key: id.clone(),
+            type_id: id,
+            config: empty_cfg(),
+        })
+        .collect()
+}
+
 /// All placed items across the three zones, in order (zones fall back to defaults).
 fn all_placed(config: &Config) -> Vec<Placed> {
     let mut items = Vec::new();
     resolve_zone(&config.left, &["workspaces"], &mut items);
     resolve_zone(&config.center, &["window_title"], &mut items);
     items.extend(resolve_right_groups(config).into_iter().flatten());
+    let plugins = {
+        let placed: std::collections::HashSet<&str> =
+            items.iter().map(|p| p.type_id.as_str()).collect();
+        unplaced_wasm_plugins(&placed)
+    };
+    items.extend(plugins);
     items
 }
 
@@ -1012,6 +1037,19 @@ impl Bar {
                 }
             }
             _ => {}
+        }
+
+        // Auto-place discovered WASM plugins (RFC 0006) into the center zone, unless
+        // the user already placed them — keeps `bar_view` in step with `all_placed`.
+        {
+            let placed: std::collections::HashSet<&str> = left
+                .iter()
+                .chain(center.iter())
+                .chain(right_groups.iter().flatten())
+                .map(|p| p.type_id.as_str())
+                .collect();
+            let plugins = unplaced_wasm_plugins(&placed);
+            center.extend(plugins);
         }
 
         let ws_row = self.build_widgets(&left);
