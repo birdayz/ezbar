@@ -101,6 +101,20 @@ fn main() -> iced_layershell::Result {
     // Launcher: re-spawn the bar child forever (restart on crash / monitor change),
     // unless we ARE the child. A short backoff avoids hot-spinning (improves on the Go original).
     if std::env::var("EZBAR_CHILD").as_deref() != Ok("1") {
+        // Singleton guard: at most one ezbar supervisor per wayland session.
+        // `exec_always ezbar` re-runs on every `swaymsg reload` — which a monitor
+        // change commonly triggers — so without this a second supervisor+child
+        // stacks a *duplicate bar*. The already-running instance reconciles
+        // outputs on hotplug (RFC 0004) and watches its own config, so the new
+        // invocation just exits. The lock self-clears when its owner dies, so a
+        // crashed instance is cleanly replaced (no stale lockfiles).
+        let _singleton = match acquire_singleton() {
+            Ok(guard) => guard,
+            Err(()) => {
+                log::info!("ezbar already running for this session — exiting");
+                return Ok(());
+            }
+        };
         loop {
             let exe = std::env::current_exe().expect("current_exe");
             match std::process::Command::new(exe)
@@ -128,6 +142,30 @@ fn print_help() {
          ezbar --help       print this help\n\n\
          EZBAR_CHILD=1 ezbar   run a single foreground instance (no respawn)"
     );
+}
+
+/// Acquire a per-session singleton lock via a Linux **abstract** socket: the
+/// kernel drops it automatically when the owning process exits, so it's
+/// self-cleaning (unlike a pidfile, which can go stale after a crash). `Err(())`
+/// means another ezbar already holds it for this `(XDG_RUNTIME_DIR,
+/// WAYLAND_DISPLAY)` — i.e. this wayland session.
+#[cfg(target_os = "linux")]
+fn acquire_singleton() -> Result<std::os::unix::net::UnixListener, ()> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+    let key = format!(
+        "ezbar.{}.{}",
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
+        std::env::var("WAYLAND_DISPLAY").unwrap_or_default()
+    );
+    SocketAddr::from_abstract_name(key.as_bytes())
+        .and_then(|addr| UnixListener::bind_addr(&addr))
+        .map_err(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn acquire_singleton() -> Result<(), ()> {
+    Ok(()) // singleton guard is Linux-only; elsewhere just proceed
 }
 
 fn run_bar() -> iced_layershell::Result {
