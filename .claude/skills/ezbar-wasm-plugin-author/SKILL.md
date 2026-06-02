@@ -11,6 +11,10 @@ and renders. You write a `Plugin`: an Elm loop that builds its chip from a
 the host renders it with real iced and themes it. See `rfcs/0006-wasm-plugins.md`
 for the full design and `wasm/weather/` for a complete, working example.
 
+**Rust or Go.** The default path below is Rust (the richest SDK). The same plugin
+can be written in **Go/TinyGo** with a mirror SDK — see *Writing it in Go* at the
+end. Pick Rust unless the user asks for Go.
+
 **This is NOT arbitrary iced.** There is no `canvas`/`Shader`/custom widget —
 that's a compile-in module, not a plugin. The plugin describes *intent*
 (text, an icon, a sparkline over your data, a popup list); the host owns the
@@ -19,28 +23,48 @@ module (`.claude/skills/ezbar-plugin-author`), not a wasm plugin.
 
 ## The 5-minute path
 
-1. **Copy the example** — it's the template:
+1. **Scaffold** — writes a buildable crate (Cargo.toml + a `Plugin` stub + README):
    ```bash
-   cp -r wasm/weather wasm/<your-plugin>   # then edit name in Cargo.toml
+   wasm/new-plugin.sh <your-plugin>            # creates wasm/<your-plugin>/
    ```
-   The whole file is `impl Plugin for Weather { … }` + `export_plugin!(Weather);`.
-   There is **no glue** to copy or understand — the SDK owns wit-bindgen and the
-   generated bindings.
+   The stub is `impl Plugin for YourType { … }` + `export_plugin!(YourType);` and
+   nothing else — there is **no glue** to copy or understand (the SDK owns
+   wit-bindgen and the generated bindings). Prefer a richer starting point? Copy
+   the worked example instead: `cp -r wasm/weather wasm/<your-plugin>`.
 
-2. **Build it to a component:**
+2. **One-time toolchain setup** (only the first time you ever build a plugin):
+   ```bash
+   rustup target add wasm32-wasip2
+   ```
+
+3. **Build it to a component:**
    ```bash
    cd wasm/<your-plugin> && cargo build --target wasm32-wasip2 --release
    ```
-   The `.wasm` lands in `target/wasm32-wasip2/release/`. Drop it into
-   `~/.config/ezbar/plugins/` and the bar loads it as a pill.
+   The `.wasm` lands in `target/wasm32-wasip2/release/`.
 
-3. **Write your `Plugin` impl.** That plus the one `export_plugin!(YourType);`
+4. **Preview it in a real window** — *see your chip render* before it touches the
+   bar. This runs your component through the actual host runtime + the themed
+   harness (same drive loop the bar uses), so the chip, its colours, and the
+   hover popup look exactly as they will live:
+   ```bash
+   cargo run -p ezbar-wasm --example preview -- \
+       wasm/<your-plugin>/target/wasm32-wasip2/release/<your-plugin>.wasm
+   ```
+   - Network plugin? Grant the host and pass config the same way the bar would:
+     `--net api.example.com --set key=value` (repeatable). Without `--net`,
+     `ctx.http_get` is denied — exactly as in the bar.
+   - Hover the chip to fire its popup; check contrast on the swatches; screenshot
+     for a visual record. This is your sub-30s "does it render + stay under caps"
+     loop — iterate here, *then* drop the `.wasm` into `~/.config/ezbar/plugins/`.
+
+5. **Write your `Plugin` impl.** That plus the one `export_plugin!(YourType);`
    line is the entire plugin — see below.
 
 ## The whole plugin: a `Plugin` impl + one macro
 
 ```rust
-use ezbar_plugin_wasm::{export_plugin, widget::*, Ctx, Event, Icon, Plugin, Render, Token};
+use ezbar_plugin_wasm::prelude::*;   // brings in widget::*, export_plugin!, Icon, Event, Token, …
 
 #[derive(Default)]
 struct Clock { now: String }
@@ -76,16 +100,19 @@ pub trait Plugin {                                       // + a `Default` impl
 - **`update` gets a `Ctx`** with the gated host services: `ctx.http_get(url)`
   (real HTTP — see *Capabilities*), `ctx.log(msg)`. It runs off the GUI thread,
   so a blocking fetch is fine. Drive ticks via `Event::Timer`.
-- **Hover popups are free:** implement `popup()` and the runtime opens it on
-  hover, closes it on leave, and sizes the surface to your content. Nothing else
-  to wire.
+- **Hover popups are free:** implement `popup()` and the runtime hovers the
+  **whole chip** for you — opens the popup on enter, closes on leave, and
+  content-sizes the surface (chart, text list, or a mix). You do **not** need a
+  `mouse_area` for the hover popup; reach for `mouse_area` only when *you* want to
+  handle clicks/scroll yourself (see *Interactivity*).
 
 ## The widget DSL
 
-Build a `Render` with the `widget` builders + our components:
+Build a `Render` with the `widget` builders + our components (all under the
+`prelude`):
 
 ```rust
-use ezbar_plugin_wasm::{widget::*, Icon, Graph, GraphKind, Token, Paint};
+use ezbar_plugin_wasm::prelude::*;
 
 // a chip: ☁ 21°C
 row([Icon::Cloud.view(14.0, Token::Fg), text("21°C").color(Token::Fg)]).spacing(5.0)
@@ -99,42 +126,49 @@ row([
 
 - Builders: `text`, `row`, `column`, `container`, `mouse_area(id, child)`, `spacer`.
 - Fluent setters: `.color(token|rgba)`, `.size(px)`, `.spacing(px)`, `.align(..)`, `.padding(px)`.
+  `.color(..)` is sugar that applies to whatever the node is — text/icon foreground,
+  or a graph/chart line; it's a no-op on a node that has no colour (e.g. a `row`).
 - **Colours are theme tokens** (`Token::{Fg,FgDim,Accent,Ok,Warn,Urgent,Bg}`) or
   `Paint::Rgba(..)`. Prefer tokens so the chip respects the user's theme.
-- **Icons** are the host set (`Icon::{Cpu,Cloud,Github,Spotify,…}`). **Graph** is
-  the host sparkline over your `values`.
+- **Icons** are the host set (`Icon::{Cpu,Cloud,Github,Spotify,…}`). The view call
+  is `Icon::Cloud.view(size_px, color)` — size first, then colour. **Graph** is the
+  host sparkline over your `values`; `GraphKind` only hints the host's auto-scaling
+  (`Generic` = min/max of your data — a fine default; `Percent`/`Temperature` pin a
+  domain), it does **not** change colour — set that with `line`.
 
 ## Interactivity
 
-Wrap a region in `mouse_area("id", child)`. The host sends
+`mouse_area` is **only** for handling your own clicks/scroll — it is *not* needed
+for the hover popup (the host already hovers the whole chip; just implement
+`popup()`). Wrap a region in `mouse_area("id", child)`, and the host sends
 `Event::Pointer { id, kind, delta }` to `update`; match on `id` and your
 `PointerKind` (Press/RightPress/Scroll/Enter/Leave), mutate state, return `true`.
-Open a popup by returning `Some(tree)` from `popup()`.
 
-## Capabilities (the manifest)
+## Capabilities — how network access actually works today
 
-A plugin ships a `ezbar-plugin.toml` next to the `.wasm`. Declare *only* what you
-need — the host enforces it (an ungranted host import isn't even in the linker):
+`ctx.http_get` is **capability-gated**: it only works if the *user* grants the
+host. **Today the grant lives in the user's `~/.config/ezbar/config.toml`**, keyed
+by your plugin id (the `.wasm` file stem):
 
 ```toml
-id = "weather"
-name = "Weather"
-version = "0.1.0"
-# api_version is injected at build time — never hand-write it
-
-[[capabilities]]
-kind = "network"          # outbound HTTP, scoped to one host
-host = "api.open-meteo.com"
-
-[[capabilities]]
-kind = "bar-state"        # read host data feeds (no extra cost — host samples these)
-feeds = ["cpu", "mem"]
+# the user adds this to grant your "weather.wasm" plugin network access:
+[modules.weather]
+network = "api.open-meteo.com"        # one host, or an array of hosts
+lat = "52.52"                          # any [modules.<id>] keys reach your load()
 ```
 
-Kinds (v1): `network { host }`, `read-file { path }`, `bar-state { feeds }`.
-There is **no `exec`** — a plugin that needs a subprocess is a `custom` script,
-not a sandboxed plugin. The user is prompted to grant on first load; changing the
-`.wasm` or the manifest re-prompts.
+Without that line, `ctx.http_get` returns `Err("capability denied: …")` (sandboxed
+by default). The grant is enforced where it matters: an ungranted host import is
+**absent from the wasm linker**, and the host checks the URL's host against the
+grant before dialing. There is **no `exec`** — a plugin that needs a subprocess is
+a `custom` script, not a sandboxed plugin.
+
+> **Planned (not wired yet):** a per-plugin `ezbar-plugin.toml` manifest that
+> *declares* what the plugin needs (`[[capabilities]] kind = "network"`) so the
+> bar can prompt the user to grant on first load and re-prompt on change. Until
+> that ships, declaration is informational and the **config grant above is the
+> real gate** — so document the `[modules.<id>].network` line your plugin needs in
+> your README.
 
 ## Rules
 
@@ -173,3 +207,64 @@ That's the whole setup: `crate-type=["cdylib"]`, depend on the SDK, write your
 generated-binding glue — `export_plugin!` wires your type to the component world
 behind the scenes (the SDK does the `wit-bindgen::generate!` and the `Guest`
 bridge).
+
+## Writing it in Go (TinyGo)
+
+Same plugin model, a Go SDK (`github.com/birdayz/ezbar/go/ezbar`) that mirrors the
+Rust one. The whole plugin is a `Plugin` impl + one `ezbar.Register(...)` call.
+
+1. **Scaffold** (writes `go/examples/<name>/main.go` + a README):
+   ```bash
+   go/new-plugin.sh <name>
+   ```
+
+2. **Toolchain** (one-time): TinyGo with a `wasip2` target (`tinygo targets | grep
+   wasip2`). TinyGo typechecks with the Go toolchain and currently supports **Go ≤
+   1.24** — if your system `go` is newer, front a 1.24 SDK on PATH for the build:
+   ```bash
+   go install golang.org/dl/go1.24.4@latest && go1.24.4 download
+   # then build with: GOROOT=$HOME/sdk/go1.24.4 PATH=$GOROOT/bin:$PATH …
+   ```
+
+3. **Build to a component.** The scaffold writes a `build.sh` that auto-fronts a
+   ≤1.24 Go SDK (step 2), runs `gofmt`/`go vet`, and builds — so just:
+   ```bash
+   go/examples/<name>/build.sh
+   ```
+   Under the hood it runs (from the plugin dir):
+   ```bash
+   tinygo build -target=wasip2 -o <name>.wasm --wit-package ../../wit --wit-world plugin-guest .
+   ```
+   `../../wit` is the shared guest world that unions the WASI imports TinyGo's
+   runtime needs with the ezbar plugin world — you never touch it. The generated
+   bindings under `go/internal/` are shared infra too; you only write `main.go`.
+
+4. **Preview** the same way (`cargo run -p ezbar-wasm --example preview -- … [--check]`).
+
+The plugin itself:
+
+```go
+package main
+
+import "github.com/birdayz/ezbar/go/ezbar"
+
+type Clock struct{ ezbar.Base; now string }   // embed Base for no-op defaults
+
+func (c *Clock) Update(ctx ezbar.Ctx, ev ezbar.Event) bool {
+    if ev.Kind == ezbar.EvTimer { c.now = "12:34"; ctx.SetTimeout(10_000); return true }
+    return false
+}
+func (c *Clock) View() ezbar.Render {
+    return ezbar.Row(ezbar.IconClock.View(14, ezbar.FgDim), ezbar.Text(c.now)).Spacing(5)
+}
+
+func init() { ezbar.Register(&Clock{}) }   // the only glue
+func main()  {}                            // required, stays empty
+```
+
+The API maps 1:1 to Rust: `ezbar.Text/Row/Column/Container/MouseArea/Spacer`,
+`ezbar.IconCloud.View(size, color)`, `ezbar.Graph{…}.View()`, `ezbar.Chart{…}`,
+theme colours as values (`ezbar.Fg/Accent/Warn/…`, `ezbar.RGBA(r,g,b,a)`), and
+`ctx.HTTPGet/Log/SetTimeout`. Only `View` is required — embed `ezbar.Base` for the
+rest. `go.mod` already depends on the SDK; add your own deps (e.g. `encoding/json`)
+as usual. No wit-bindgen, no glue — `ezbar.Register` wires the component exports.

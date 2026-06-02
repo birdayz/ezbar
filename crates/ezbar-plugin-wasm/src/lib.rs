@@ -66,6 +66,21 @@ pub enum Icon {
     Moon,
     Alert,
     Dot,
+    // weather conditions (WMO-coded; map via the weather plugin's wmo_icon)
+    CloudSun,
+    CloudMoon,
+    CloudFog,
+    CloudDrizzle,
+    CloudRain,
+    CloudRainWind,
+    CloudSnow,
+    CloudHail,
+    CloudLightning,
+    Droplets,
+    Wind,
+    Sunrise,
+    Sunset,
+    Snowflake,
 }
 
 impl Icon {
@@ -233,10 +248,17 @@ pub mod widget {
 }
 
 impl Render {
-    /// `text(..).color(..)` / `row(..).spacing(..)` fluent setters.
+    /// Fluent setters. **Each applies only to the node kinds where it makes
+    /// sense and is a no-op elsewhere** (e.g. `.padding()` on a `text` does
+    /// nothing) — so put the setter on the right builder.
+    ///
+    /// Sets the colour of a `text`/`icon`, or the line colour of a `graph`/`chart`.
     pub fn color(mut self, c: impl Into<Paint>) -> Self {
-        if let Render::Text { color, .. } = &mut self {
-            *color = c.into();
+        let c = c.into();
+        match &mut self {
+            Render::Text { color, .. } | Render::Icon { color, .. } => *color = c,
+            Render::Graph { line, .. } | Render::Chart { line, .. } => *line = c,
+            _ => {}
         }
         self
     }
@@ -497,6 +519,18 @@ macro_rules! export_plugin {
         fn __ezbar_plugin_new() -> ::std::boxed::Box<dyn $crate::Plugin> {
             $crate::__new::<$t>()
         }
+    };
+}
+
+/// One-import convenience: `use ezbar_plugin_wasm::prelude::*;` brings the
+/// `Plugin` trait, the `widget` builders, every component (`Icon`/`Graph`/
+/// `Chart`), the event/theme types, and the `export_plugin!` macro — so a plugin
+/// needs exactly one `use`.
+pub mod prelude {
+    pub use crate::widget::*;
+    pub use crate::{
+        export_plugin, Align, Chart, Ctx, Event, Feed, Graph, GraphKind, Icon, Paint, Plugin,
+        PointerKind, Render, Token,
     };
 }
 

@@ -5,6 +5,7 @@
 name = "ezbar-wasm"
 version = "0.1.0"
 edition = "2021"
+publish = false                  # internal host runtime, consumed by the bar via path
 description = "wasmtime host runtime that turns an ezbar WASM plugin into a Module."
 license = "MIT"
 
@@ -15,3 +16,12 @@ wasmtime-wasi = "45"
 anyhow = "1"
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# `examples/preview.rs` renders a `.wasm` plugin in the real themed harness window
+# (same loop the bar uses) — a dev-only render-preview, kept out of the bar build.
+[dev-dependencies]
+ezbar-harness = { path = "../ezbar-harness" }
+
+[[example]]
+name = "preview"
+path = "examples/preview.rs"

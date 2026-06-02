@@ -205,6 +205,20 @@ fn icon(i: Icon) -> p::types::IconId {
         Moon => W::Moon,
         Alert => W::Alert,
         Dot => W::Dot,
+        CloudSun => W::CloudSun,
+        CloudMoon => W::CloudMoon,
+        CloudFog => W::CloudFog,
+        CloudDrizzle => W::CloudDrizzle,
+        CloudRain => W::CloudRain,
+        CloudRainWind => W::CloudRainWind,
+        CloudSnow => W::CloudSnow,
+        CloudHail => W::CloudHail,
+        CloudLightning => W::CloudLightning,
+        Droplets => W::Droplets,
+        Wind => W::Wind,
+        Sunrise => W::Sunrise,
+        Sunset => W::Sunset,
+        Snowflake => W::Snowflake,
     }
 }
 

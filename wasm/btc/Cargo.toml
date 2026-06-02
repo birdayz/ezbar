@@ -1,0 +1,19 @@
+[package]
+name = "btc"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar WASM plugin: a Bitcoin (or any Coinbase pair) price ticker with sparkline + hover chart."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+serde_json = "1"
+
+# keep the .wasm small
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

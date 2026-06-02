@@ -1,0 +1,8 @@
+id = "btc"
+name = "Crypto Ticker"
+version = "0.1.0"
+# api_version is injected at build time — never hand-write it
+
+[[capabilities]]
+kind = "network"          # Coinbase public spot-price API
+host = "api.coinbase.com"

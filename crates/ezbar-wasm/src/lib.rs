@@ -9,6 +9,7 @@
 //! untouched.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,6 +47,19 @@ struct Host {
     wasi: WasiCtx,
     limits: StoreLimits,
     granted_network: Vec<String>,
+    // Set while the guest is parked in a blocking host call (e.g. http_get) so the
+    // epoch ticker pauses — the deadline bounds GUEST cpu, not time spent waiting
+    // on the network, which has its own timeout.
+    epoch_paused: Arc<AtomicBool>,
+}
+
+/// Resets the epoch-pause flag on drop, so every `http_get` return path (incl.
+/// the `?` early-exits) re-arms the ticker.
+struct PauseGuard(Arc<AtomicBool>);
+impl Drop for PauseGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 impl WasiView for Host {
@@ -75,8 +89,12 @@ impl ezbar::plugin::host::Host for Host {
         if !self.granted_network.iter().any(|g| g == h) {
             return Err(format!("capability denied: network host '{h}' not granted"));
         }
-        // We're on the plugin's off-GUI actor thread, so a blocking fetch is fine;
-        // its own timeout bounds it (epoch can't fire while the guest is parked here).
+        // We're on the plugin's off-GUI actor thread, so a blocking fetch is fine.
+        // Pause the epoch ticker for the duration: a slow network response must not
+        // burn the guest's per-call deadline and trap it on resume. The reqwest
+        // timeout bounds the wait independently.
+        self.epoch_paused.store(true, Ordering::Relaxed);
+        let _resume = PauseGuard(self.epoch_paused.clone());
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(8))
             .user_agent("ezbar-wasm")
@@ -293,6 +311,20 @@ fn icon(i: ezbar::plugin::types::IconId) -> icons::Icon {
         W::Moon => I::Moon,
         W::Alert => I::Alert,
         W::Dot => I::Dot,
+        W::CloudSun => I::CloudSun,
+        W::CloudMoon => I::CloudMoon,
+        W::CloudFog => I::CloudFog,
+        W::CloudDrizzle => I::CloudDrizzle,
+        W::CloudRain => I::CloudRain,
+        W::CloudRainWind => I::CloudRainWind,
+        W::CloudSnow => I::CloudSnow,
+        W::CloudHail => I::CloudHail,
+        W::CloudLightning => I::CloudLightning,
+        W::Droplets => I::Droplets,
+        W::Wind => I::Wind,
+        W::Sunrise => I::Sunrise,
+        W::Sunset => I::Sunset,
+        W::Snowflake => I::Snowflake,
     }
 }
 
@@ -338,12 +370,17 @@ fn run_actor(
     add_to_linker_sync(&mut linker)?;
     Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker, |h: &mut Host| h)?;
 
-    // epoch ticker for this plugin's engine
+    // epoch ticker for this plugin's engine — paused while the guest is parked in
+    // a blocking host call so network waits don't burn the per-call deadline.
+    let epoch_paused = Arc::new(AtomicBool::new(false));
     {
         let eng = engine.clone();
+        let paused = epoch_paused.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(EPOCH_TICK);
-            eng.increment_epoch();
+            if !paused.load(Ordering::Relaxed) {
+                eng.increment_epoch();
+            }
         });
     }
 
@@ -355,6 +392,7 @@ fn run_actor(
             wasi,
             limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
             granted_network: grants,
+            epoch_paused,
         },
     );
     store.limiter(|h| &mut h.limits);
@@ -442,6 +480,19 @@ impl WasmModule {
     }
 }
 
+impl WasmModule {
+    /// Headless snapshot of the latest lifted view/popup node counts. Returns
+    /// `(view_nodes, popup_nodes)` — both 0 until the actor has produced a frame
+    /// (or if the plugin trapped). Used by the `preview --check` smoke test.
+    pub fn debug_snapshot(&self) -> (usize, usize) {
+        let s = self.slot.lock().unwrap();
+        (
+            s.view.as_ref().map_or(0, |l| l.nodes.len()),
+            s.popup.as_ref().map_or(0, |l| l.nodes.len()),
+        )
+    }
+}
+
 impl Module for WasmModule {
     fn id(&self) -> &str {
         &self.id
@@ -462,21 +513,22 @@ impl Module for WasmModule {
     }
 
     fn popup_size(&self) -> Option<(u32, u32)> {
-        // size the popup to the largest chart in it (+ room for a title/padding),
-        // so a small chip's popup isn't lost in the default 480×400 surface.
+        // Content-size the popup — a chart, a text/list, or a mix — so it isn't
+        // lost in the default 480×400 surface. We have no real text metrics off
+        // the GUI thread, so `measure` is a rough layout estimate; pad for the
+        // surface chrome and clamp to sane bounds.
         let s = self.slot.lock().unwrap();
         let l = s.popup.as_ref()?;
-        let (mut w, mut h) = (0.0f32, 0.0f32);
-        for n in &l.nodes {
-            if let LNode::Chart { width, height, .. } = n {
-                w = w.max(*width);
-                h = h.max(*height);
-            }
-        }
-        if w <= 0.0 {
+        if l.nodes.is_empty() {
             return None;
         }
-        Some(((w + 48.0) as u32, (h + 56.0) as u32))
+        let (w, h) = measure(l, l.root);
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let w = (w + 32.0).clamp(96.0, 720.0);
+        let h = (h + 28.0).clamp(40.0, 560.0);
+        Some((w as u32, h as u32))
     }
 
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
@@ -535,6 +587,46 @@ fn paint_color(p: &Paint, ctx: &Ctx) -> Color {
             _ => ctx.bg(),
         },
         Paint::Rgba(r, g, b, a) => Color::from_rgba8(*r, *g, *b, *a as f32 / 255.0),
+    }
+}
+
+/// Rough content-size of a lifted subtree, used to size a popup surface. Off the
+/// GUI thread we have no real text metrics, so estimate: ~0.55em advance per
+/// char, 1.4em line height. Good enough to keep a popup snug, not pixel-exact.
+fn measure(l: &Lifted, idx: u32) -> (f32, f32) {
+    match &l.nodes[idx as usize] {
+        LNode::Text { content, size, .. } => {
+            let px = size.unwrap_or(14.0);
+            let cols = content.chars().count().max(1) as f32;
+            (cols * px * 0.55, px * 1.4)
+        }
+        LNode::Row {
+            children, spacing, ..
+        } => children
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(w, h), (i, &c)| {
+                let (cw, ch) = measure(l, c);
+                (w + cw + if i > 0 { *spacing } else { 0.0 }, h.max(ch))
+            }),
+        LNode::Column {
+            children, spacing, ..
+        } => children
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(w, h), (i, &c)| {
+                let (cw, ch) = measure(l, c);
+                (w.max(cw), h + ch + if i > 0 { *spacing } else { 0.0 })
+            }),
+        LNode::Container { child, padding } => {
+            let (cw, ch) = measure(l, *child);
+            (cw + padding * 2.0, ch + padding * 2.0)
+        }
+        LNode::MouseArea { child } => measure(l, *child),
+        LNode::Icon { size, .. } => (*size, *size),
+        LNode::Graph { .. } => (48.0, 16.0), // matches the chip sparkline size below
+        LNode::Chart { width, height, .. } => (*width, *height),
+        LNode::Spacer(px) => (*px, 0.0),
     }
 }
 

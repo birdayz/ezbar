@@ -1425,6 +1425,7 @@ name = "ezbar-wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ezbar-harness",
  "ezbar-plugin",
  "log",
  "reqwest",

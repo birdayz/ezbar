@@ -26,6 +26,9 @@ interface types {
         bot, github, spotify, kubernetes,
         clock, calendar, disk, net, ip, updates, keyboard,
         cloud, sun, moon, alert, dot,
+        // weather conditions (additive — appended only, never reordered)
+        cloud-sun, cloud-moon, cloud-fog, cloud-drizzle, cloud-rain, cloud-rain-wind,
+        cloud-snow, cloud-hail, cloud-lightning, droplets, wind, sunrise, sunset, snowflake,
     }
     enum graph-kind { cpu, memory, temperature, ping, generic }
 
