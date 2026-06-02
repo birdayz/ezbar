@@ -114,8 +114,9 @@ not a sandboxed plugin. The user is prompted to grant on first load; changing th
 
 ## Rules
 
-- **No `canvas`/`Shader`/arbitrary iced.** Reaching for it is a compile error on
-  `wasm32` — it's a compile-in module, not a plugin.
+- **No `canvas`/`Shader`/arbitrary iced.** There is no such API in the DSL (on any
+  target) — reaching for it simply won't compile. It's a compile-in module, not a
+  plugin.
 - **`view` is pure + synchronous.** Do I/O in `update`.
 - **Keep the tree small.** The host enforces a node/depth cap (≈2000 / 32); a
   giant tree is rejected during the lift.

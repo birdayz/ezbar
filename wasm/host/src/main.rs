@@ -62,7 +62,8 @@ impl ezbar::plugin::host::Host for Host {
         let host = url.split("://").nth(1).unwrap_or(&url);
         let host = host.split('/').next().unwrap_or(host);
         if self.granted_network.iter().any(|h| h == host) {
-            Err("(PoC host does not actually fetch)".into())
+            // granted: returns Ok (empty in the PoC — the real host async-fetches).
+            Ok(Vec::new())
         } else {
             Err(format!("capability denied: network host '{host}' not granted"))
         }
@@ -115,8 +116,11 @@ fn instantiate(
 }
 
 // ── the node/depth-capped lift: WIT tree -> text render ──────────────────────
-// Walks the flat arena iteratively, enforcing the count + depth cap DURING the
-// walk (not lift-then-count) — Rockwood's v2.1 nit.
+// The flat arena makes the *count* cap an O(1) pre-check (`nodes.len()` is the
+// exact node count). The in-walk depth cap + forward-reference check are
+// defense-in-depth: the host must NOT trust the guest's arena — a hand-rolled or
+// malicious guest can emit a cyclic/dangling arena that the SDK's `lower()`
+// never would.
 
 fn render(tree: &Tree) -> Result<String, String> {
     if tree.nodes.len() > MAX_NODES {
@@ -128,6 +132,17 @@ fn render(tree: &Tree) -> Result<String, String> {
     let mut out = String::new();
     walk(tree, tree.root, 0, &mut out, &mut 0)?;
     Ok(out)
+}
+
+/// A child index must point *backwards* in the arena — `lower()` emits post-order
+/// (children before parents), so a valid child is always `< parent`. This makes
+/// the arena a DAG and bounds the host recursion; a forward/self ref is rejected.
+fn child(parent: u32, c: u32) -> Result<u32, String> {
+    if c >= parent {
+        Err(format!("malformed arena: non-forward child ref {c} >= {parent}"))
+    } else {
+        Ok(c)
+    }
 }
 
 fn walk(tree: &Tree, idx: u32, depth: usize, out: &mut String, count: &mut usize) -> Result<(), String> {
@@ -151,22 +166,22 @@ fn walk(tree: &Tree, idx: u32, depth: usize, out: &mut String, count: &mut usize
         Node::Row(l) => {
             out.push_str(&format!("{pad}row spacing={}\n", l.spacing));
             for &c in &l.children {
-                walk(tree, c, depth + 1, out, count)?;
+                walk(tree, child(idx, c)?, depth + 1, out, count)?;
             }
         }
         Node::Column(l) => {
             out.push_str(&format!("{pad}column spacing={}\n", l.spacing));
             for &c in &l.children {
-                walk(tree, c, depth + 1, out, count)?;
+                walk(tree, child(idx, c)?, depth + 1, out, count)?;
             }
         }
         Node::Container(b) => {
             out.push_str(&format!("{pad}container pad={}\n", b.padding));
-            walk(tree, b.child, depth + 1, out, count)?;
+            walk(tree, child(idx, b.child)?, depth + 1, out, count)?;
         }
         Node::MouseArea(m) => {
             out.push_str(&format!("{pad}mouse-area id={:?}\n", m.id));
-            walk(tree, m.child, depth + 1, out, count)?;
+            walk(tree, child(idx, m.child)?, depth + 1, out, count)?;
         }
     }
     Ok(())
