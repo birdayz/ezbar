@@ -1065,6 +1065,17 @@ impl Bar {
             .into()
     }
 
+    /// If `group` is a single module that opted into whole-pill hover
+    /// ([`Module::hover_messages`]), return its `(instance, enter, leave)` so the
+    /// bar can wrap the styled pill in one `mouse_area`. `None` for multi-widget
+    /// groups (the target would be ambiguous) and modules that didn't opt in.
+    fn pill_hover(&self, group: &[Placed]) -> Option<(u64, ModMsg, ModMsg)> {
+        let [only] = group else { return None };
+        let entry = self.modules.iter().find(|e| e.name == only.key)?;
+        let (enter, leave) = entry.module.hover_messages()?;
+        Some((entry.id, enter, leave))
+    }
+
     fn bar_view(&self) -> Element<'_, Message> {
         // Placement drives which widgets render and in what order; an empty zone falls
         // back to the shipped default. The right zone is GROUPED (RFC 0005): each group
@@ -1138,13 +1149,26 @@ impl Bar {
                 if i > 0 {
                     right_pills.push(Space::new().width(Length::Fixed(gap)).into());
                 }
-                right_pills.push(
-                    container(self.build_widgets(g))
-                        .padding([2, 10])
-                        .center_y(Length::Fill)
-                        .style(pill_style)
+                let pill = container(self.build_widgets(g))
+                    .padding([2, 10])
+                    .center_y(Length::Fill)
+                    .style(pill_style);
+                // Whole-pill hover: when the group is a single opted-in module, the
+                // pill — padding ring and all — is its hover surface, not just its
+                // content. The mouse_area sits OUTSIDE the padding (RFC 0001 popups).
+                right_pills.push(match self.pill_hover(g) {
+                    Some((instance, enter, leave)) => mouse_area(pill)
+                        .on_enter(Message::ModuleMsg {
+                            instance,
+                            msg: enter,
+                        })
+                        .on_exit(Message::ModuleMsg {
+                            instance,
+                            msg: leave,
+                        })
                         .into(),
-                );
+                    None => pill.into(),
+                });
             }
             let right_cluster = row(right_pills).align_y(Vertical::Center);
             container(

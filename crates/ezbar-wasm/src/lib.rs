@@ -532,21 +532,21 @@ impl Module for WasmModule {
     }
 
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
+        // No content-sized hover mouse_area here: hover is whole-pill, driven by the
+        // host from `hover_messages` so the pill's padding ring is hoverable too.
         let s = self.slot.lock().unwrap();
-        let has_popup = s.popup.as_ref().is_some_and(|l| !l.nodes.is_empty());
-        let chip: Element<'_, ModMsg> = match &s.view {
+        match &s.view {
             Some(l) if !l.nodes.is_empty() => build(l, l.root, ctx, 0),
             _ => text("\u{2026}").color(ctx.fg_dim()).into(),
-        };
-        drop(s);
-        let area = mouse_area(chip);
-        if has_popup {
-            area.on_enter(ModMsg::new(Msg::Hover))
-                .on_exit(ModMsg::new(Msg::Leave))
-                .into()
-        } else {
-            area.into()
         }
+    }
+
+    fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
+        // Claim the whole pill as the hover surface — but only when there's a popup
+        // to open (no point hovering a chip with nothing behind it).
+        let s = self.slot.lock().unwrap();
+        let has_popup = s.popup.as_ref().is_some_and(|l| !l.nodes.is_empty());
+        has_popup.then(|| (ModMsg::new(Msg::Hover), ModMsg::new(Msg::Leave)))
     }
 
     fn popup(&self, ctx: &Ctx) -> Option<Element<'_, ModMsg>> {

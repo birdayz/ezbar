@@ -226,6 +226,17 @@ pub trait Module: Send {
         None
     }
 
+    /// Opt in to **whole-pill hover**: if this module wants its entire pill
+    /// (including the host's padding) to be the hover surface — not just its
+    /// content — return the `(enter, leave)` messages to deliver on pointer
+    /// enter/exit. The host wraps the styled pill in a single `mouse_area` for
+    /// these, so the padding ring is no longer a dead zone. Only honoured when the
+    /// pill holds this one module. Default `None` — a `mouse_area` inside `view`
+    /// handles its own (content-sized) hits as before.
+    fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
+        None
+    }
+
     /// Adopt a changed config live, or ask to be rebuilt (RFC 0002/0004 reconcile).
     /// Called by the host when an instance's resolved config changed but its `key`
     /// is the same. The default rebuilds the instance (dropping in-instance state);
