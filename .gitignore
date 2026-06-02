@@ -10,3 +10,6 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Rust build artifacts in any (nested) crate
+target/

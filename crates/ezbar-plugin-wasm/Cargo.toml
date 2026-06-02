@@ -1,0 +1,12 @@
+# ezbar WASM plugin SDK (guest side) — RFC 0006.
+# Excluded from the root workspace: plugins build for wasm32-wasip2, the host
+# does not depend on this crate. Pure Rust (no wit-bindgen here) so it also
+# compiles natively for unit tests; the per-plugin glue does the wit-bindgen.
+[package]
+name = "ezbar-plugin-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Author SDK for ezbar WASM plugins (the Plugin trait + widget DSL)."
+license = "MIT"
+
+[lib]

@@ -1,0 +1,19 @@
+[package]
+name = "weather"
+version = "0.1.0"
+edition = "2021"
+description = "Example ezbar WASM plugin (RFC 0006 PoC)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+wit-bindgen = "0.57"
+
+# keep the .wasm small (Zellij's recommended plugin flags)
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
