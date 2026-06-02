@@ -378,8 +378,8 @@ fn resolve_entry(e: &config::Entry, out: &mut Vec<Placed>) {
 /// `islands` style. A top-level `Entry::Group` is one group; a bare entry is its own
 /// singleton group; an empty zone uses the shipped default groups.
 fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
-    if config.right.is_empty() {
-        return DEFAULT_RIGHT_GROUPS
+    let mut groups: Vec<Vec<Placed>> = if config.right.is_empty() {
+        DEFAULT_RIGHT_GROUPS
             .iter()
             .map(|g| {
                 g.iter()
@@ -390,21 +390,35 @@ fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
                     })
                     .collect()
             })
+            .collect()
+    } else {
+        config
+            .right
+            .iter()
+            .map(|e| {
+                let mut g = Vec::new();
+                resolve_entry(e, &mut g); // a Group flattens to its members; a bare entry → 1
+                g
+            })
+            .collect()
+    };
+    // Each discovered WASM plugin (RFC 0006) gets its own trailing pill, unless the
+    // user already placed it in the right zone — so a dropped-in `.wasm` is a
+    // distinct, obvious chip rather than glued onto a neighbour.
+    let plugins = {
+        let placed: std::collections::HashSet<&str> = groups
+            .iter()
+            .flatten()
+            .map(|p| p.type_id.as_str())
             .collect();
-    }
-    config
-        .right
-        .iter()
-        .map(|e| {
-            let mut g = Vec::new();
-            resolve_entry(e, &mut g); // a Group flattens to its members; a bare entry → 1
-            g
-        })
-        .collect()
+        unplaced_wasm_plugins(&placed)
+    };
+    groups.extend(plugins.into_iter().map(|p| vec![p]));
+    groups
 }
 
-/// WASM plugins the user did not explicitly place, as items to auto-add to the
-/// center zone (RFC 0006) — so dropping a `.wasm` in the plugins dir just works.
+/// WASM plugins the user did not explicitly place (RFC 0006) — each becomes its
+/// own right-cluster pill so dropping a `.wasm` in the plugins dir just works.
 fn unplaced_wasm_plugins(placed: &std::collections::HashSet<&str>) -> Vec<Placed> {
     modules::wasm_plugin_ids()
         .into_iter()
@@ -422,13 +436,8 @@ fn all_placed(config: &Config) -> Vec<Placed> {
     let mut items = Vec::new();
     resolve_zone(&config.left, &["workspaces"], &mut items);
     resolve_zone(&config.center, &["window_title"], &mut items);
+    // resolve_right_groups already appends a group per discovered WASM plugin.
     items.extend(resolve_right_groups(config).into_iter().flatten());
-    let plugins = {
-        let placed: std::collections::HashSet<&str> =
-            items.iter().map(|p| p.type_id.as_str()).collect();
-        unplaced_wasm_plugins(&placed)
-    };
-    items.extend(plugins);
     items
 }
 
@@ -1037,19 +1046,6 @@ impl Bar {
                 }
             }
             _ => {}
-        }
-
-        // Auto-place discovered WASM plugins (RFC 0006) into the center zone, unless
-        // the user already placed them — keeps `bar_view` in step with `all_placed`.
-        {
-            let placed: std::collections::HashSet<&str> = left
-                .iter()
-                .chain(center.iter())
-                .chain(right_groups.iter().flatten())
-                .map(|p| p.type_id.as_str())
-                .collect();
-            let plugins = unplaced_wasm_plugins(&placed);
-            center.extend(plugins);
         }
 
         let ws_row = self.build_widgets(&left);
