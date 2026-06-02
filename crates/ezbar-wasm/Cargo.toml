@@ -14,3 +14,4 @@ wasmtime = "45"
 wasmtime-wasi = "45"
 anyhow = "1"
 log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

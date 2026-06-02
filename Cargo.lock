@@ -1427,6 +1427,7 @@ dependencies = [
  "anyhow",
  "ezbar-plugin",
  "log",
+ "reqwest",
  "wasmtime",
  "wasmtime-wasi",
 ]

@@ -20,8 +20,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
 use ezbar_plugin::iced::{alignment, Color, Element, Length, Subscription};
-use ezbar_plugin::ui::graph::{Graph, GraphKind};
-use ezbar_plugin::{icons, Ctx, ModMsg, Module, Response};
+use ezbar_plugin::ui::graph::{Graph, GraphKind, StockChart};
+use ezbar_plugin::{icons, Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 wasmtime::component::bindgen!({
     world: "plugin",
@@ -72,11 +72,21 @@ impl ezbar::plugin::host::Host for Host {
     fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
         let h = url.split("://").nth(1).unwrap_or(&url);
         let h = h.split('/').next().unwrap_or(h);
-        if self.granted_network.iter().any(|g| g == h) {
-            Ok(Vec::new()) // PoC: granted, but the sync host doesn't fetch yet
-        } else {
-            Err(format!("capability denied: network host '{h}' not granted"))
+        if !self.granted_network.iter().any(|g| g == h) {
+            return Err(format!("capability denied: network host '{h}' not granted"));
         }
+        // We're on the plugin's off-GUI actor thread, so a blocking fetch is fine;
+        // its own timeout bounds it (epoch can't fire while the guest is parked here).
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .user_agent("ezbar-wasm")
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client.get(&url).send().map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("http {}", resp.status()));
+        }
+        resp.bytes().map(|b| b.to_vec()).map_err(|e| e.to_string())
     }
     fn read_file(&mut self, _path: String) -> Result<Vec<u8>, String> {
         Err("capability denied: read-file not granted".into())
@@ -129,6 +139,11 @@ enum LNode {
         values: Vec<f64>,
         kind: GraphKind,
         line: Paint,
+    },
+    Chart {
+        values: Vec<f64>,
+        width: f32,
+        height: f32,
     },
     Spacer(f32),
 }
@@ -214,6 +229,11 @@ fn lift_node(n: &Node, idx: u32) -> Result<LNode, String> {
             kind: graph_kind(g.kind),
             line: paint(&g.line),
         },
+        N::Chart(c) => LNode::Chart {
+            values: c.values.clone(),
+            width: c.width,
+            height: c.height,
+        },
         N::Spacer(px) => LNode::Spacer(*px),
     })
 }
@@ -289,7 +309,12 @@ fn graph_kind(k: ezbar::plugin::types::GraphKind) -> GraphKind {
 
 // ── the off-GUI actor: owns the Store, drives the plugin, fills the slot ─────
 
-type Slot = Arc<Mutex<Option<Lifted>>>;
+#[derive(Default)]
+struct Slots {
+    view: Option<Lifted>,
+    popup: Option<Lifted>,
+}
+type Slot = Arc<Mutex<Slots>>;
 
 fn spawn_actor(path: PathBuf, config: Vec<(String, String)>, slot: Slot, grants: Vec<String>) {
     std::thread::spawn(move || {
@@ -349,16 +374,33 @@ fn run_actor(
         };
         if dirty {
             store.set_epoch_deadline(DEADLINE_TICKS);
-            match plugin.call_view(&mut store) {
+            let view = match plugin.call_view(&mut store) {
                 Ok(tree) => match lift(&tree) {
-                    Ok(l) => *slot.lock().unwrap() = Some(l),
-                    Err(e) => log::warn!("ezbar-wasm: view rejected: {e}"),
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        log::warn!("ezbar-wasm: view rejected: {e}");
+                        None
+                    }
                 },
                 Err(e) => {
                     log::warn!("ezbar-wasm: view trapped — disabling plugin: {e}");
                     return Ok(());
                 }
+            };
+            store.set_epoch_deadline(DEADLINE_TICKS);
+            let popup = match plugin.call_popup(&mut store) {
+                Ok(Some(tree)) => lift(&tree).ok(),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!("ezbar-wasm: popup trapped — disabling plugin: {e}");
+                    return Ok(());
+                }
+            };
+            let mut s = slot.lock().unwrap();
+            if view.is_some() {
+                s.view = view;
             }
+            s.popup = popup;
         }
         std::thread::sleep(POLL);
     }
@@ -368,6 +410,7 @@ fn run_actor(
 
 enum Msg {
     Tick,
+    Hover,
 }
 
 /// A loaded WASM plugin, presented to the bar as a [`Module`].
@@ -388,7 +431,7 @@ impl WasmModule {
         config: Vec<(String, String)>,
         grants: Vec<String>,
     ) -> Self {
-        let slot: Slot = Arc::new(Mutex::new(None));
+        let slot: Slot = Arc::new(Mutex::new(Slots::default()));
         spawn_actor(path, config, slot.clone(), grants);
         WasmModule {
             id: id.into(),
@@ -408,16 +451,35 @@ impl Module for WasmModule {
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
-        // a Tick just forces a re-render; `view` reads the latest lifted tree.
-        let _ = msg.get::<Msg>();
-        Response::none()
+        match msg.get::<Msg>() {
+            // hovering the chip opens the plugin's popup (display-only; the host
+            // closes it on mouse-leave).
+            Some(Msg::Hover) => Response::request(HostRequest::OpenPopup(PopupMode::Hover)),
+            _ => Response::none(), // Tick: just re-render; `view` reads the cache
+        }
     }
 
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
-        let lifted = self.slot.lock().unwrap().clone();
-        match lifted {
-            Some(l) if !l.nodes.is_empty() => build(&l, l.root, ctx, 0),
+        let s = self.slot.lock().unwrap();
+        let has_popup = s.popup.as_ref().is_some_and(|l| !l.nodes.is_empty());
+        let chip: Element<'_, ModMsg> = match &s.view {
+            Some(l) if !l.nodes.is_empty() => build(l, l.root, ctx, 0),
             _ => text("\u{2026}").color(ctx.fg_dim()).into(),
+        };
+        drop(s);
+        let area = mouse_area(chip);
+        if has_popup {
+            area.on_enter(ModMsg::new(Msg::Hover)).into()
+        } else {
+            area.into()
+        }
+    }
+
+    fn popup(&self, ctx: &Ctx) -> Option<Element<'_, ModMsg>> {
+        let s = self.slot.lock().unwrap();
+        match &s.popup {
+            Some(l) if !l.nodes.is_empty() => Some(build(l, l.root, ctx, 0)),
+            _ => None,
         }
     }
 }
@@ -519,6 +581,18 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
         })
         .width(Length::Fixed(48.0))
         .height(Length::Fixed(16.0))
+        .into(),
+        // the high-fidelity stock-popup renderer (smoothed gradient area chart)
+        LNode::Chart {
+            values,
+            width,
+            height,
+        } => canvas(StockChart {
+            values: values.clone(),
+            symbol: String::new(),
+        })
+        .width(Length::Fixed(*width))
+        .height(Length::Fixed(*height))
         .into(),
         LNode::Spacer(px) => container(text("")).width(Length::Fixed(*px)).into(),
     }

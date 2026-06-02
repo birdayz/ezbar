@@ -236,6 +236,7 @@ name = "weather"
 version = "0.1.0"
 dependencies = [
  "ezbar-plugin-wasm",
+ "serde_json",
  "wit-bindgen",
 ]
 

@@ -108,6 +108,26 @@ impl Graph {
     }
 }
 
+/// A high-fidelity smoothed gradient **area chart** — the same renderer the
+/// built-in `stock` popup uses. Sized `width`×`height`; ideal for a popup.
+pub struct Chart {
+    pub values: Vec<f64>,
+    pub line: Paint,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Chart {
+    pub fn view(self) -> Render {
+        Render::Chart {
+            values: self.values,
+            line: self.line,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
 /// Cross-axis alignment of a row/column.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Align {
@@ -154,6 +174,12 @@ pub enum Render {
         values: Vec<f64>,
         kind: GraphKind,
         line: Paint,
+    },
+    Chart {
+        values: Vec<f64>,
+        line: Paint,
+        width: f32,
+        height: f32,
     },
     Spacer(f32),
 }
@@ -278,12 +304,22 @@ pub enum Feed {
     Net,
 }
 
-/// What a plugin implements. The host drives the Elm loop; `view` is **pure and
-/// synchronous** (no host calls), `update` may use async host services (RFC
-/// 0006 §0). `update` returns `true` when the chip needs re-rendering.
+/// Host services available inside `update` — capability-gated (RFC 0006 §3,§5).
+/// The host performs the call; an ungranted one returns an error.
+pub trait Ctx {
+    /// HTTP GET `url` (gated by a `network { host }` capability). Returns the body.
+    /// Runs on the plugin's off-GUI thread, so a blocking fetch is fine.
+    fn http_get(&mut self, url: &str) -> Result<Vec<u8>, String>;
+    /// Append a line to the bar's log.
+    fn log(&mut self, msg: &str);
+}
+
+/// What a plugin implements. The host drives the Elm loop; `view`/`popup` are
+/// **pure** (no host calls — build the description), while `update` may use the
+/// gated host services on `ctx`. `update` returns `true` when the chip changed.
 pub trait Plugin: Default {
     fn load(&mut self, _config: Vec<(String, String)>) {}
-    fn update(&mut self, _ev: Event) -> bool {
+    fn update(&mut self, _ctx: &mut dyn Ctx, _ev: Event) -> bool {
         false
     }
     fn view(&self) -> Render;
@@ -335,6 +371,12 @@ pub enum WireNode {
         values: Vec<f64>,
         kind: GraphKind,
         line: Paint,
+    },
+    Chart {
+        values: Vec<f64>,
+        line: Paint,
+        width: f32,
+        height: f32,
     },
     Spacer(f32),
 }
@@ -405,6 +447,17 @@ fn push(r: &Render, out: &mut Vec<WireNode>) -> u32 {
             values: values.clone(),
             kind: *kind,
             line: *line,
+        },
+        Render::Chart {
+            values,
+            line,
+            width,
+            height,
+        } => WireNode::Chart {
+            values: values.clone(),
+            line: *line,
+            width: *width,
+            height: *height,
         },
         Render::Spacer(px) => WireNode::Spacer(*px),
     };

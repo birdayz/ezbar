@@ -57,6 +57,19 @@ pub fn wasm_plugin_ids() -> Vec<String> {
     ids
 }
 
+/// Granted network hosts for a plugin, from `[modules.<id>].network` (a string
+/// or array of host names) — the capability the WASM tier enforces (RFC 0006 §5).
+fn network_grants(cfg: &toml::Value) -> Vec<String> {
+    match cfg.get("network") {
+        Some(toml::Value::String(s)) => vec![s.clone()],
+        Some(toml::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn flatten_cfg(cfg: &toml::Value) -> Vec<(String, String)> {
     cfg.as_table()
         .map(|t| {
@@ -145,7 +158,7 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
                 other.to_string(),
                 path,
                 flatten_cfg(cfg),
-                Vec::new(), // v1: no network capability granted yet
+                network_grants(cfg), // granted by `[modules.<id>].network`
             ));
             m
         }),

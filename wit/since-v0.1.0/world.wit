@@ -43,6 +43,8 @@ interface ui {
     record text-node { content: string, color: paint, size: option<f32> }
     record icon-node { id: icon-id, color: paint, size: f32 }
     record graph-node { values: list<f64>, kind: graph-kind, line: paint }
+    // a high-fidelity smoothed gradient area chart (the stock-popup renderer)
+    record chart-node { values: list<f64>, line: paint, width: f32, height: f32 }
     // child indices into the flat `nodes` arena of a `tree` (avoids recursive
     // WIT variants and makes the host's incremental depth/count cap trivial).
     record layout-node { children: list<u32>, spacing: f32, align: align }
@@ -57,6 +59,7 @@ interface ui {
         mouse-area(hit-node),
         icon(icon-node),
         graph(graph-node),
+        chart(chart-node),
         spacer(f32),
     }
     // A render is a flat arena of nodes; `root` indexes the top node. The host

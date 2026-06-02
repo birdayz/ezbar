@@ -6,7 +6,7 @@
 //! macro; spelled out here so the PoC is legible.)
 
 use ezbar_plugin_wasm as sdk;
-use sdk::{lower, widget::*, Icon, Plugin, Render, Token, WireNode};
+use sdk::{lower, widget::*, Chart, Graph, GraphKind, Icon, Plugin, Render, Token, WireNode};
 use std::cell::RefCell;
 
 wit_bindgen::generate!({
@@ -19,60 +19,153 @@ mod wit {
     pub use crate::ezbar::plugin::events::{Event, FeedKind, PointerKind};
     pub use crate::ezbar::plugin::types::{Align, IconId, Paint, Rgba8, ThemeToken};
     pub use crate::ezbar::plugin::ui::{
-        BoxNode, GraphKind, GraphNode, HitNode, IconNode, LayoutNode, Node, TextNode, Tree,
+        BoxNode, ChartNode, GraphKind, GraphNode, HitNode, IconNode, LayoutNode, Node, TextNode,
+        Tree,
     };
 }
 
 // ── the actual plugin (pure author code) ────────────────────────────────────
 
-#[derive(Default)]
 struct Weather {
-    temp_c: Option<f32>,
-    // PoC demo hooks for the host's safety tests (`demo = spin|huge` in config):
-    spin: bool,  // view() spins forever  -> host epoch-interruption trap
-    huge: bool,  // view() returns a giant tree -> host node-cap rejection
-    fetch: bool, // update() calls the network host import -> capability gate
+    temp: Option<f64>,    // current temperature (°C) from the API
+    series: Vec<f64>,     // hourly forecast — drawn as the sparkline / popup chart
+    lat: String,
+    lon: String,
+    spin: bool, // demo hooks for the host's safety tests (`demo = spin|huge`)
+    huge: bool,
+}
+
+impl Default for Weather {
+    fn default() -> Self {
+        Weather {
+            temp: None,
+            series: Vec::new(),
+            lat: "52.52".into(), // Berlin, overridable via [modules.weather].lat/lon
+            lon: "13.41".into(),
+            spin: false,
+            huge: false,
+        }
+    }
 }
 
 impl Plugin for Weather {
     fn load(&mut self, config: Vec<(String, String)>) {
         for (k, v) in &config {
-            if k == "demo" {
-                self.spin = v == "spin";
-                self.huge = v == "huge";
-                self.fetch = v == "fetch";
+            match k.as_str() {
+                "lat" => self.lat = v.clone(),
+                "lon" => self.lon = v.clone(),
+                "demo" => {
+                    self.spin = v == "spin";
+                    self.huge = v == "huge";
+                }
+                _ => {}
             }
+        }
+    }
+
+    fn update(&mut self, ctx: &mut dyn sdk::Ctx, ev: sdk::Event) -> bool {
+        match ev {
+            sdk::Event::Timer => {
+                // REAL data from the internet, from inside the sandbox — the host
+                // performs the (capability-gated) fetch on the plugin's thread.
+                let url = format!(
+                    "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+                     &current=temperature_2m&hourly=temperature_2m&forecast_days=1",
+                    self.lat, self.lon
+                );
+                match ctx.http_get(&url) {
+                    Ok(bytes) => {
+                        self.parse(&bytes);
+                        true
+                    }
+                    Err(e) => {
+                        ctx.log(&format!("weather: {e}"));
+                        false
+                    }
+                }
+            }
+            _ => false,
         }
     }
 
     fn view(&self) -> Render {
         if self.spin {
-            // a runaway plugin: the host's epoch deadline must trap this.
             loop {
                 std::hint::spin_loop();
             }
         }
         if self.huge {
-            // a large tree (fits memory, but over the host's node cap): the host
-            // must reject it during the lift — StoreLimits alone wouldn't.
             return column((0..5_000).map(|i| text(format!("{i}"))));
         }
         let label = self
-            .temp_c
-            .map(|t| format!("{t:.0}\u{b0}C"))
-            .unwrap_or_else(|| "\u{2014}".into());
-        row([Icon::Cloud.view(14.0, Token::Fg), text(label).color(Token::Fg)]).spacing(5.0)
+            .temp
+            .map(|t| format!("{t:.1}\u{b0}C"))
+            .unwrap_or_else(|| "\u{2026}".into());
+        let color = match self.temp {
+            Some(t) if t >= 25.0 => Token::Urgent,
+            Some(t) if t >= 15.0 => Token::Warn,
+            Some(_) => Token::Accent,
+            None => Token::FgDim,
+        };
+        let mut items = vec![Icon::Cloud.view(14.0, Token::Fg), text(label).color(color)];
+        if self.series.len() >= 2 {
+            // a GPU sparkline of the forecast — the thing a shell script can't do.
+            items.push(
+                Graph {
+                    values: self.series.clone(),
+                    kind: GraphKind::Temperature,
+                    line: Token::Accent.into(),
+                }
+                .view(),
+            );
+        }
+        row(items).spacing(6.0)
     }
 
-    fn update(&mut self, ev: sdk::Event) -> bool {
-        match ev {
-            // a real plugin would `ctx.http(...)` here; the PoC just ticks.
-            sdk::Event::Timer => {
-                self.temp_c = Some(21.0);
-                true
-            }
-            _ => false,
+    fn popup(&self) -> Option<Render> {
+        if self.series.len() < 2 {
+            return None;
         }
+        // on hover: the full-fidelity smoothed gradient area chart (stock-popup grade)
+        Some(
+            container(
+                column([
+                    text(format!("Weather \u{2014} next {}h", self.series.len()))
+                        .color(Token::Fg),
+                    Chart {
+                        values: self.series.clone(),
+                        line: Token::Accent.into(),
+                        width: 280.0,
+                        height: 100.0,
+                    }
+                    .view(),
+                ])
+                .spacing(6.0),
+            )
+            .padding(10.0),
+        )
+    }
+}
+
+impl Weather {
+    fn parse(&mut self, bytes: &[u8]) {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+            self.temp = v["current"]["temperature_2m"].as_f64();
+            if let Some(a) = v["hourly"]["temperature_2m"].as_array() {
+                self.series = a.iter().filter_map(|x| x.as_f64()).collect();
+            }
+        }
+    }
+}
+
+/// Bridges the SDK `Ctx` to the generated host imports (capability-gated).
+struct HostCtx;
+impl sdk::Ctx for HostCtx {
+    fn http_get(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        crate::ezbar::plugin::host::http_get(url)
+    }
+    fn log(&mut self, msg: &str) {
+        crate::ezbar::plugin::host::log(msg);
     }
 }
 
@@ -89,18 +182,7 @@ impl Guest for Component {
         STATE.with_borrow_mut(|w| w.load(config));
     }
     fn update(ev: wit::Event) -> bool {
-        STATE.with_borrow_mut(|w| {
-            let dirty = w.update(from_wit_event(ev));
-            if w.fetch {
-                // call the gated network host import; the host enforces the
-                // `network { host }` capability (RFC 0006 §5).
-                match crate::ezbar::plugin::host::http_get("https://api.weather.example/now") {
-                    Ok(_) => {}
-                    Err(e) => crate::ezbar::plugin::host::log(&format!("fetch denied: {e}")),
-                }
-            }
-            dirty
-        })
+        STATE.with_borrow_mut(|w| w.update(&mut HostCtx, from_wit_event(ev)))
     }
     fn view() -> wit::Tree {
         STATE.with_borrow(|w| to_wit_tree(&w.view()))
@@ -174,6 +256,17 @@ fn to_wit_node(n: &WireNode) -> wit::Node {
             values: values.clone(),
             kind: graph_kind(*kind),
             line: paint(*line),
+        }),
+        WireNode::Chart {
+            values,
+            line,
+            width,
+            height,
+        } => wit::Node::Chart(wit::ChartNode {
+            values: values.clone(),
+            line: paint(*line),
+            width: *width,
+            height: *height,
         }),
         WireNode::Spacer(px) => wit::Node::Spacer(*px),
     }
