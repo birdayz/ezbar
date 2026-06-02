@@ -21,40 +21,64 @@ module (`.claude/skills/ezbar-plugin-author`), not a wasm plugin.
 
 1. **Copy the example** — it's the template:
    ```bash
-   cp -r wasm/weather wasm/<your-plugin>
+   cp -r wasm/weather wasm/<your-plugin>   # then edit name in Cargo.toml
    ```
-   It has the `Plugin` impl, the wit-bindgen glue, and the `Cargo.toml`.
+   The whole file is `impl Plugin for Weather { … }` + `export_plugin!(Weather);`.
+   There is **no glue** to copy or understand — the SDK owns wit-bindgen and the
+   generated bindings.
 
-2. **Build it to a component** and run it in the host harness:
+2. **Build it to a component:**
    ```bash
    cd wasm/<your-plugin> && cargo build --target wasm32-wasip2 --release
-   cd ../host && cargo run -- ../<your-plugin>/target/wasm32-wasip2/release/<your-plugin>.wasm
    ```
-   The harness exercises the safety bounds (epoch trap, node cap, capability
-   gate) and prints the rendered chip as a tree — your dev loop before the bar.
+   The `.wasm` lands in `target/wasm32-wasip2/release/`. Drop it into
+   `~/.config/ezbar/plugins/` and the bar loads it as a pill.
 
-3. **Edit the `Plugin` impl** (the only part that's "your code"). Leave the glue
-   below it alone (it's mechanical; it becomes an `export_plugin!` macro later).
+3. **Write your `Plugin` impl.** That plus the one `export_plugin!(YourType);`
+   line is the entire plugin — see below.
 
-## The Plugin trait (`ezbar_plugin_wasm`)
+## The whole plugin: a `Plugin` impl + one macro
 
 ```rust
-pub trait Plugin: Default {
-    fn load(&mut self, config: Vec<(String, String)>) {}  // read [modules.<id>] config
-    fn update(&mut self, ev: Event) -> bool { false }     // true => re-render (dirty bit)
-    fn view(&self) -> Render;                             // PURE + sync: build the chip
-    fn popup(&self) -> Option<Render> { None }            // optional detail surface
-    fn save_state(&self) -> Vec<u8> { Vec::new() }        // kept across a CLEAN reload only
+use ezbar_plugin_wasm::{export_plugin, widget::*, Ctx, Event, Icon, Plugin, Render, Token};
+
+#[derive(Default)]
+struct Clock { now: String }
+
+impl Plugin for Clock {
+    fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
+        if let Event::Timer = ev { self.now = "12:34".into(); true } else { false }
+    }
+    fn view(&self) -> Render {
+        row([Icon::Clock.view(14.0, Token::Fg), text(self.now.clone())]).spacing(5.0)
+    }
+}
+
+export_plugin!(Clock);   // ← the ONLY boilerplate
+```
+
+The trait (`ezbar_plugin_wasm`), all defaulted except `view`:
+
+```rust
+pub trait Plugin {                                       // + a `Default` impl
+    fn load(&mut self, config: Vec<(String, String)>) {} // read [modules.<id>] config
+    fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool { false } // true => re-render
+    fn view(&self) -> Render;                            // PURE + sync: build the chip
+    fn popup(&self) -> Option<Render> { None }           // hover detail surface (auto open/close)
+    fn save_state(&self) -> Vec<u8> { Vec::new() }       // kept across a CLEAN reload only
     fn restore(&mut self, state: Vec<u8>) {}
 }
 ```
 
-- **`view` is pure and synchronous** — no I/O, no host calls, no `await`. Build
-  the description and return. The host calls it only when `update` returned
-  `true` (or theme/output changed), so do your work in `update`.
-- **`update` may use async host services** (HTTP, a data feed) — but in the PoC
-  glue these are stubbed; today, drive the chip from `Event::Timer` /
-  `Event::Feed`. Return `true` whenever the chip should repaint.
+- **`view`/`popup` are pure + synchronous** — no I/O, no host calls. Build the
+  description and return. The host calls `view` only when `update` returned
+  `true`, so do your work in `update`.
+- **`update` gets a `Ctx`** with the gated host services: `ctx.http_get(url)`
+  (real HTTP — see *Capabilities*), `ctx.log(msg)`. It runs off the GUI thread,
+  so a blocking fetch is fine. Drive ticks via `Event::Timer`.
+- **Hover popups are free:** implement `popup()` and the runtime opens it on
+  hover, closes it on leave, and sizes the surface to your content. Nothing else
+  to wire.
 
 ## The widget DSL
 
@@ -127,11 +151,25 @@ not a sandboxed plugin. The user is prompted to grant on first load; changing th
 - **Build flags:** keep the `.wasm` small — `opt-level="s"`, `lto=true`,
   `strip=true`, `codegen-units=1` (already in the example's `Cargo.toml`).
 
-## What the glue does (don't touch it)
+## Cargo.toml
 
-Below the `Plugin` impl, the example has a `Component` that implements the
-generated `Guest`, holds the plugin in a `thread_local`, and maps the SDK
-`Render`/`Event` to the WIT types via `lower()`. It's mechanical and identical
-across plugins — in the shipping SDK it collapses to `export_plugin!(MyPlugin)`.
-Until then, copy it verbatim from `wasm/weather/src/lib.rs` and only edit the
-`Plugin` impl.
+```toml
+[lib]
+crate-type = ["cdylib"]            # required — a plugin is a component
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+# + whatever your logic needs (e.g. serde_json). NOT wit-bindgen — the SDK owns it.
+
+[profile.release]                  # keep the .wasm small
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+```
+
+That's the whole setup: `crate-type=["cdylib"]`, depend on the SDK, write your
+`Plugin` impl, `export_plugin!(YourType);`. No `wit/` dir, no `wit_bindgen`, no
+generated-binding glue — `export_plugin!` wires your type to the component world
+behind the scenes (the SDK does the `wit-bindgen::generate!` and the `Guest`
+bridge).
