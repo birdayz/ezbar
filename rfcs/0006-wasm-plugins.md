@@ -1,6 +1,6 @@
 # RFC 0006: WASM plugins
 
-- **Status:** Draft (v2 — revised after a wasm-embedding review and a systems review)
+- **Status:** **Accepted** — ACK'd by a wasm-embedding review (Rockwood) and a systems review (Torvalds); v2.1 nits folded below
 - **Created:** 2026-06-02
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
 - **Depends on:** RFC 0001 (the `Module` trait + its dlopen/JSON alternatives), RFC 0004 (reactive config pipeline)
@@ -42,6 +42,30 @@ This RFC was NAK'd/changes-required on first pass. v2 resolves every blocking it
 - Honesty fixes: wasmi is **not** a drop-in fallback for the safety story; the
   module cache uses `Module::deserialize` (`unsafe`, a trust boundary); the
   pooling allocator is **not** a v1 default. (Rockwood nits)
+
+### v2.1 — review nits, folded as binding design commitments
+
+Both reviewers ACK'd v2 and listed implementation-phase nits. These are now design:
+
+- **Node/depth cap is enforced *incrementally during* the lift** (not lift-then-
+  count — the count must not itself be the DoS), **covers the popup tree**, and
+  is counted on the **post-adaptation** internal tree (an old→new `From` lift can
+  fan out nodes). (Rockwood)
+- **One hardening invariant:** hash the `.wasm` first; the source-hash **gates the
+  module-cache lookup**; the `ezbar:api-version` custom section is parsed with
+  **wasmtime's bounded section reader** *after* hashing — never a hand-rolled
+  leb128 decode on attacker bytes before validation. (Rockwood)
+- **`ctx.feed` coalescing is one host timer fanning out to N task channels**, not
+  a per-task `set_timeout` per plugin. (Rockwood)
+- **Resource budgets are fixed constants in v1**, not `[plugins]` knobs — this
+  resolves Open Question #2. Don't ship five tunables for zero users. (Torvalds)
+- **`hash(wasm ‖ manifest)` is domain-separated / length-prefixed**, not naive
+  byte concatenation (hash-confusion footgun). (Torvalds)
+- **One source of truth for the api-version** — the `plugin!` macro and the
+  `ezbar:api-version` custom section derive from the same SDK-crate constant.
+  (Torvalds)
+- **Channel-staging + `wasm-PENDING_CHANGES.md` stay trivial / deferred** until
+  there's a second WIT version to stage (process-ahead-of-demand). (Torvalds)
 
 ## Summary
 
@@ -420,8 +444,9 @@ polls Coinbase and turns red on a 5% drop" should be one-shot.
    (hundreds of rows) on a latency-sensitive path. Benchmark it with the node
    cap in place; the CM canonical ABI is the right encoding (don't reach for a
    flatbuffer for an unmeasured micro-opt).
-2. **Default resource budgets** — epoch deadlines (ticks), per-store and
-   aggregate memory caps: fixed, or `[plugins]` knobs?
+2. ~~Default resource budgets — fixed or `[plugins]` knobs?~~ **Resolved (v2.1):
+   fixed constants for v1** (epoch ticks, per-store + aggregate memory, node/depth
+   cap). Expose as knobs only if a real plugin needs it.
 3. **Feed set & floor** — which host feeds to expose and the minimum poll period.
 4. **Per-output plugin placement** — pairs with RFC 0004's per-output surfaces.
 5. **Versioning window size N** and the retirement policy at the edge.
