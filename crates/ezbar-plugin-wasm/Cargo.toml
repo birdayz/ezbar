@@ -1,0 +1,19 @@
+# ezbar WASM plugin SDK (guest side) — RFC 0006.
+# Excluded from the root workspace: plugins build for wasm32-wasip2, the host
+# does not depend on this crate. The `Plugin` trait + widget DSL are pure Rust
+# (compile natively for unit tests); the component glue (wit-bindgen + the
+# generated `Guest`) is wasm32-only so `export_plugin!` is the author's *only*
+# boilerplate — the Zed `register_extension!` architecture.
+[package]
+name = "ezbar-plugin-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Author SDK for ezbar WASM plugins (Plugin trait + widget DSL + export_plugin!)."
+license = "MIT"
+
+[lib]
+
+# wit-bindgen + the generated component glue are only built for the wasm target;
+# native builds (unit tests) stay lean and toolchain-free.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "0.57"

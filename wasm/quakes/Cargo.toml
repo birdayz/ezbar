@@ -1,0 +1,17 @@
+[package]
+name = "quakes"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]            # a plugin is a wasm component
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+serde_json = "1"                   # parse the USGS GeoJSON feed
+
+[profile.release]                  # keep the .wasm small
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

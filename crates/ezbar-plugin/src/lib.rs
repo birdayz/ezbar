@@ -220,6 +220,12 @@ pub trait Module: Send {
         None
     }
 
+    /// Desired popup size in logical px. `None` uses the host's default. Override
+    /// when the popup content is much smaller/larger than the default surface.
+    fn popup_size(&self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// Adopt a changed config live, or ask to be rebuilt (RFC 0002/0004 reconcile).
     /// Called by the host when an instance's resolved config changed but its `key`
     /// is the same. The default rebuilds the instance (dropping in-instance state);

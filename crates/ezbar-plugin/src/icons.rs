@@ -43,6 +43,14 @@ icon_set! {
     Keyboard => "keyboard", Clock => "clock", Calendar => "calendar",
     // ── brands (Simple Icons) ──
     Github => "github", Spotify => "spotify", Kubernetes => "kubernetes",
+    // ── weather / misc (used by plugins) ──
+    Cloud => "cloud", Sun => "sun", Moon => "moon", Alert => "alert", Dot => "dot",
+    // ── weather conditions (WMO-coded, used by the weather plugin) ──
+    CloudSun => "cloud-sun", CloudMoon => "cloud-moon", CloudFog => "cloud-fog",
+    CloudDrizzle => "cloud-drizzle", CloudRain => "cloud-rain", CloudRainWind => "cloud-rain-wind",
+    CloudSnow => "cloud-snow", CloudHail => "cloud-hail", CloudLightning => "cloud-lightning",
+    Droplets => "droplets", Wind => "wind", Sunrise => "sunrise", Sunset => "sunset",
+    Snowflake => "snowflake",
 }
 
 impl Icon {

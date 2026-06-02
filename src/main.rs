@@ -133,6 +133,11 @@ fn print_help() {
 fn run_bar() -> iced_layershell::Result {
     // Default to a Nerd Font so the icon glyphs render; overridable via [bar].font.
     let cfg = config::load();
+    // Discover WASM plugins (RFC 0006) before any module is built so their ids
+    // are placeable like built-ins.
+    if let Some(dir) = config::plugins_dir() {
+        modules::register_wasm_plugins(&dir);
+    }
     let name = cfg
         .bar
         .font
@@ -373,8 +378,8 @@ fn resolve_entry(e: &config::Entry, out: &mut Vec<Placed>) {
 /// `islands` style. A top-level `Entry::Group` is one group; a bare entry is its own
 /// singleton group; an empty zone uses the shipped default groups.
 fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
-    if config.right.is_empty() {
-        return DEFAULT_RIGHT_GROUPS
+    let mut groups: Vec<Vec<Placed>> = if config.right.is_empty() {
+        DEFAULT_RIGHT_GROUPS
             .iter()
             .map(|g| {
                 g.iter()
@@ -385,15 +390,48 @@ fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
                     })
                     .collect()
             })
+            .collect()
+    } else {
+        config
+            .right
+            .iter()
+            .map(|e| {
+                let mut g = Vec::new();
+                resolve_entry(e, &mut g); // a Group flattens to its members; a bare entry → 1
+                g
+            })
+            .collect()
+    };
+    // Each discovered WASM plugin (RFC 0006) gets its own trailing pill, unless the
+    // user already placed it in the right zone — so a dropped-in `.wasm` is a
+    // distinct, obvious chip rather than glued onto a neighbour.
+    let plugins = {
+        let placed: std::collections::HashSet<&str> = groups
+            .iter()
+            .flatten()
+            .map(|p| p.type_id.as_str())
             .collect();
-    }
-    config
-        .right
-        .iter()
-        .map(|e| {
-            let mut g = Vec::new();
-            resolve_entry(e, &mut g); // a Group flattens to its members; a bare entry → 1
-            g
+        unplaced_wasm_plugins(&placed)
+    };
+    // Insert plugin pills just BEFORE the final group (the clock end-cap by
+    // default), so the trailing ▾ switcher stays on the end-cap and a plugin's
+    // pill is its own distinct island — not glued next to the switcher.
+    let end_cap = groups.pop();
+    groups.extend(plugins.into_iter().map(|p| vec![p]));
+    groups.extend(end_cap);
+    groups
+}
+
+/// WASM plugins the user did not explicitly place (RFC 0006) — each becomes its
+/// own right-cluster pill so dropping a `.wasm` in the plugins dir just works.
+fn unplaced_wasm_plugins(placed: &std::collections::HashSet<&str>) -> Vec<Placed> {
+    modules::wasm_plugin_ids()
+        .into_iter()
+        .filter(|id| !placed.contains(id.as_str()))
+        .map(|id| Placed {
+            key: id.clone(),
+            type_id: id,
+            config: empty_cfg(),
         })
         .collect()
 }
@@ -403,6 +441,7 @@ fn all_placed(config: &Config) -> Vec<Placed> {
     let mut items = Vec::new();
     resolve_zone(&config.left, &["workspaces"], &mut items);
     resolve_zone(&config.center, &["window_title"], &mut items);
+    // resolve_right_groups already appends a group per discovered WASM plugin.
     items.extend(resolve_right_groups(config).into_iter().flatten());
     items
 }
@@ -706,13 +745,16 @@ impl Bar {
                 let close_existing = self.close_any_popup();
                 let id = window::Id::unique();
                 self.module_popup = Some((id, instance, mode));
-                let left = self.popup_left_margin(MODULE_POPUP_SIZE.0);
+                // a module may request a content-sized popup (e.g. a small wasm chart)
+                let size = self
+                    .modules
+                    .iter()
+                    .find(|e| e.id == instance)
+                    .and_then(|e| e.module.popup_size())
+                    .unwrap_or(MODULE_POPUP_SIZE);
+                let left = self.popup_left_margin(size.0);
                 let open = Task::done(Message::NewLayerShell {
-                    settings: self.popup_settings(
-                        MODULE_POPUP_SIZE,
-                        left,
-                        matches!(mode, PopupMode::Hover),
-                    ),
+                    settings: self.popup_settings(size, left, matches!(mode, PopupMode::Hover)),
                     id,
                 });
                 Task::batch([close_existing, open])

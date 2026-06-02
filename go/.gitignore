@@ -1,0 +1,2 @@
+# TinyGo build artifacts (a plugin compiles to a single .wasm component)
+*.wasm

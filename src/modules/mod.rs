@@ -22,35 +22,98 @@ pub mod volume;
 pub mod window_title;
 pub mod workspaces;
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
 use ezbar_plugin::Module;
 
-/// Whether `id` names a built-in module (vs host chrome such as `switcher`).
-/// Kept in sync with [`build`] — the single source of truth for "is this a module?".
+/// Discovered WASM plugins, by placement id (RFC 0006). Populated once at startup.
+static PLUGINS: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+
+/// Discover WASM plugins in `dir` and register them so their ids become placeable
+/// like any built-in module. Call once at startup.
+pub fn register_wasm_plugins(dir: &Path) {
+    let map: HashMap<String, PathBuf> = ezbar_wasm::discover(dir).into_iter().collect();
+    if !map.is_empty() {
+        let mut ids: Vec<_> = map.keys().cloned().collect();
+        ids.sort();
+        log::info!("ezbar: {} wasm plugin(s): {ids:?}", map.len());
+    }
+    let _ = PLUGINS.set(map);
+}
+
+fn wasm_plugin_path(id: &str) -> Option<PathBuf> {
+    PLUGINS.get().and_then(|m| m.get(id)).cloned()
+}
+
+/// Ids of all registered wasm plugins, sorted — for default placement injection.
+pub fn wasm_plugin_ids() -> Vec<String> {
+    let mut ids: Vec<String> = PLUGINS
+        .get()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// Granted network hosts for a plugin, from `[modules.<id>].network` (a string
+/// or array of host names) — the capability the WASM tier enforces (RFC 0006 §5).
+fn network_grants(cfg: &toml::Value) -> Vec<String> {
+    match cfg.get("network") {
+        Some(toml::Value::String(s)) => vec![s.clone()],
+        Some(toml::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn flatten_cfg(cfg: &toml::Value) -> Vec<(String, String)> {
+    cfg.as_table()
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| {
+                    let s = v
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string());
+                    (k.clone(), s)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `id` names a built-in module or a registered wasm plugin (vs host
+/// chrome such as `switcher`). Kept in sync with [`build`].
 pub fn is_module(id: &str) -> bool {
-    matches!(
-        id,
-        "cpu"
-            | "github"
-            | "claude"
-            | "custom"
-            | "disk"
-            | "net"
-            | "ip"
-            | "updates"
-            | "keyboard"
-            | "workspaces"
-            | "memory"
-            | "temperature"
-            | "ping"
-            | "window_title"
-            | "clock"
-            | "volume"
-            | "battery"
-            | "calendar"
-            | "kubectl"
-            | "stock"
-            | "spotify"
-    )
+    wasm_plugin_path(id).is_some()
+        || matches!(
+            id,
+            "cpu"
+                | "github"
+                | "claude"
+                | "custom"
+                | "disk"
+                | "net"
+                | "ip"
+                | "updates"
+                | "keyboard"
+                | "workspaces"
+                | "memory"
+                | "temperature"
+                | "ping"
+                | "window_title"
+                | "clock"
+                | "volume"
+                | "battery"
+                | "calendar"
+                | "kubectl"
+                | "stock"
+                | "spotify"
+        )
 }
 
 /// Read `[modules.<id>.graph].line_color` from a module's config table.
@@ -88,6 +151,16 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         "kubectl" => Some(Box::new(kubectl::Kubectl::new(instance))),
         "stock" => Some(Box::new(stock::Stock::new(instance))),
         "spotify" => Some(Box::new(spotify::Spotify::new(instance))),
-        _ => None,
+        // a registered WASM plugin (RFC 0006): load the `.wasm` as a Module.
+        other => wasm_plugin_path(other).map(|path| {
+            let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
+                instance,
+                other.to_string(),
+                path,
+                flatten_cfg(cfg),
+                network_grants(cfg), // granted by `[modules.<id>].network`
+            ));
+            m
+        }),
     }
 }

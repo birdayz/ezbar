@@ -12,7 +12,10 @@ keywords = ["sway", "wayland", "statusbar", "wlroots", "iced"]
 categories = ["gui"]
 
 [workspace]
-members = ["crates/ezbar-plugin", "crates/ezbar-harness"]
+members = ["crates/ezbar-plugin", "crates/ezbar-harness", "crates/ezbar-wasm"]
+# WASM plugin SDK + example plugins build for wasm32-wasip2 (RFC 0006), and the
+# host's wasmtime stack is heavy — keep them out of the default `cargo build`.
+exclude = ["crates/ezbar-plugin-wasm", "wasm"]
 
 [workspace.package]
 version = "0.1.5"
@@ -23,6 +26,7 @@ authors = ["Johannes Brüderl <johannes.bruederl@gmail.com>"]
 
 [dependencies]
 ezbar-plugin = { path = "crates/ezbar-plugin" }
+ezbar-wasm = { path = "crates/ezbar-wasm" }
 iced = { version = "0.14", features = ["canvas", "svg", "tokio", "advanced"] }
 iced_layershell = "0.18"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
