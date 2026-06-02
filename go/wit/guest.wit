@@ -1,0 +1,11 @@
+// Guest-only world for the Go/TinyGo build (NOT the frozen interface): it unions
+// the WASI imports the Go runtime needs with our `ezbar:plugin` world, so
+// `wasm-tools component new` can encode a component that imports both WASI and
+// our host interface while exporting the plugin funcs. The host satisfies the
+// WASI imports via wasmtime-wasi (add_to_linker_sync) at instantiation.
+package ezbar:guest;
+
+world plugin-guest {
+    include wasi:cli/imports@0.2.0;
+    include ezbar:plugin/plugin@0.1.0;
+}
