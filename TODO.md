@@ -11,11 +11,12 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 
 ## Config & theming (RFC 0002)
 
-- [ ] **HIGH** — **Graph knobs not config-exposed.** The GPU sparkline is the stated
-  identity, but `[modules.<id>.graph]` (samples · height · `line_color` · `line_width`
-  · `fill = {gradient, alpha}` · `smooth`) is unimplemented — the modules hardcode
-  `GraphKind`. RFC headline + the r/unixporn reviewer both flagged this. (`modules/{cpu,
-  memory,temperature,ping}.rs`, `ezbar_plugin::ui::graph`, `config.rs`)
+- [ ] **MED** — **Graph knobs mostly not config-exposed.** `[modules.<id>.graph]`:
+  `line_color` is **done** (per-widget `threshold`/token/hex via `Ctx::graph_paint`,
+  default green→red) — but `samples` · `height` · `line_width` · `fill = {gradient, alpha}`
+  · `smooth` are still hardcoded (48/16/`GraphKind`). RFC headline + the r/unixporn reviewer
+  flagged the set. (`modules/{cpu,memory,temperature,ping}.rs`, `ezbar_plugin::ui::graph`,
+  `config.rs`)
 - [ ] **HIGH** — **`[theme.workspaces]` per-state colours are parsed but unused.** The
   chip reads `ctx.accent/fg/dim/urgent`; `focused/occupied/empty/urgent/colors/special`
   in `WorkspaceTheme` do nothing → config that lies. Either wire them through or drop

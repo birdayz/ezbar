@@ -28,8 +28,8 @@ impl Default for SpotifyData {
             track: String::new(),
             artist: String::new(),
             album: String::new(),
-            track_string: " --".to_string(),
-            icon: "".to_string(),
+            track_string: "--".to_string(),
+            icon: "".to_string(),
             scroll_text: "--".to_string(),
             is_playing: false,
             needs_auth: false,
@@ -40,7 +40,7 @@ impl Default for SpotifyData {
 fn simple(track_string: &str) -> SpotifyData {
     SpotifyData {
         track_string: track_string.to_string(),
-        scroll_text: track_string.trim_start_matches(" ").to_string(),
+        scroll_text: track_string.to_string(),
         ..Default::default()
     }
 }
@@ -176,7 +176,7 @@ async fn get_current_track(token: &str) -> Result<SpotifyData, SpErr> {
         .await
         .map_err(|_| SpErr::Network)?;
     match resp.status().as_u16() {
-        204 => Ok(simple(" Nothing playing")),
+        204 => Ok(simple("Nothing playing")),
         401 => Err(SpErr::Unauthorized),
         200 => {
             let v: Value = resp.json().await.map_err(|_| SpErr::Other)?;
@@ -190,14 +190,13 @@ async fn get_current_track(token: &str) -> Result<SpotifyData, SpErr> {
                 .unwrap_or("")
                 .to_string();
             let is_playing = v["is_playing"].as_bool().unwrap_or(false);
-            let icon = if is_playing { "" } else { "" };
             let scroll_text = format!("{} - {}", name, artist);
             Ok(SpotifyData {
                 track: name,
                 artist,
                 album,
-                track_string: format!("{} {}", icon, scroll_text),
-                icon: icon.to_string(),
+                track_string: scroll_text.clone(),
+                icon: String::new(),
                 scroll_text,
                 is_playing,
                 needs_auth: false,
@@ -212,7 +211,7 @@ pub async fn poll() -> SpotifyData {
     let token = match load_access_token().await {
         Auth::Token(t) => t,
         Auth::Needed => {
-            let mut d = simple(" Click to authorize");
+            let mut d = simple("Click to authorize");
             d.needs_auth = true;
             return d;
         }
@@ -220,9 +219,9 @@ pub async fn poll() -> SpotifyData {
     };
     match get_current_track(&token).await {
         Ok(d) => d,
-        Err(SpErr::Unauthorized) => simple(" Token expired - click to reauth"),
-        Err(SpErr::Network) => simple(" Network error"),
-        Err(SpErr::Other) => simple(" Error loading"),
+        Err(SpErr::Unauthorized) => simple("Token expired - click to reauth"),
+        Err(SpErr::Network) => simple("Network error"),
+        Err(SpErr::Other) => simple("Error loading"),
     }
 }
 
@@ -303,7 +302,7 @@ fn wait_for_code(listener: &TcpListener) -> Result<String, String> {
         .filter(|s| !s.is_empty())
         .ok_or("no authorization code received")?;
 
-    let body = "<html><head><title>Spotify Authorization</title></head><body style=\"font-family: Arial, sans-serif; text-align: center; margin-top: 100px;\"><h1> Authorization Successful!</h1><p>You can close this window now.</p></body></html>";
+    let body = "<html><head><title>Spotify Authorization</title></head><body style=\"font-family: Arial, sans-serif; text-align: center; margin-top: 100px;\"><h1>Authorization Successful!</h1><p>You can close this window now.</p></body></html>";
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),

@@ -87,7 +87,7 @@ re-skins instantly, no restart:
 ```toml
 [theme]
 style   = "islands"   # islands (default, floating square panels) | solid (one slab)
-primary = "#cba6f7"   # the accent — workspace chip, graphs, highlights
+primary = "#cba6f7"   # the accent — workspace chip, pill borders, highlights (graphs are per-widget, see below)
 background = { base = "#1e1e2e", weak = "#313244", strong = "#45475a" }
 text = "#cdd6f4"; ok = "#a6e3a1"; warn = "#f9e2af"; urgent = "#f38ba8"
 ```
@@ -106,6 +106,36 @@ Presets are theme-only TOML bundles with a `[palette]` variable layer (`primary 
 "$mauve"`), selected via a state file that never edits your `config.toml`. Workspace
 chips come in four square styles (`boxed` · `filled` · `outlined` · `underbar`).
 Full design: [RFC 0002](rfcs/0002-config.md).
+
+### Graph colors (per-widget)
+
+The inline sparklines (`cpu` · `temperature` · `memory` · `ping`) are **functional by
+default**: they run green→red by load, so a pinned core *looks* hot. That colour carries
+meaning, so it isn't a global theme token — it's a per-widget knob under
+`[modules.<id>.graph]`, not `[theme]`:
+
+| `line_color`                                            | line                              |
+|---------------------------------------------------------|-----------------------------------|
+| `"threshold"` *(default, or omitted)*                   | green→yellow→orange→red by load   |
+| `"accent"` `"ok"` `"warn"` `"urgent"` `"fg"` `"fg_dim"` | that theme token, flat            |
+| `"#rrggbb"` / `"#rrggbbaa"`                              | that literal colour, flat         |
+
+```toml
+# cpu keeps the functional default — leave it out entirely for this
+[modules.cpu.graph]
+line_color = "threshold"   # green when idle, red when pinned
+
+[modules.temperature.graph]
+line_color = "accent"      # flat lilac, matches the bar accent
+
+[modules.memory.graph]
+line_color = "#89b4fa"     # a fixed blue
+```
+
+Want every graph flat-accent (the r/unixporn ricer look)? Set `line_color = "accent"` on
+each — it's deliberately opt-in per widget, so going aesthetic never silently drops the
+load signal on a monitor you forgot about. A typo falls back to `threshold`, so a bad
+value can't blank a graph.
 
 ## Interactions
 

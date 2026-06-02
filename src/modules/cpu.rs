@@ -7,6 +7,7 @@ use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
 use ezbar_plugin::iced::widget::{canvas, mouse_area, row, text};
 use ezbar_plugin::iced::{Element, Length, Subscription};
+use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::history::History;
@@ -23,15 +24,17 @@ pub struct Cpu {
     text: String,
     hist: History,
     show_graph: bool,
+    graph_line: Option<String>,
 }
 
 impl Cpu {
-    pub fn new(instance: u64) -> Self {
+    pub fn new(instance: u64, cfg: &toml::Value) -> Self {
         Cpu {
             instance,
             text: " --".to_string(),
             hist: History::new(30),
             show_graph: true,
+            graph_line: crate::modules::graph_line_color(cfg),
         }
     }
 }
@@ -57,15 +60,24 @@ impl Module for Cpu {
         Response::none()
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
-        let lbl = mouse_area(text(self.text.clone())).on_press(ModMsg::new(Msg::Toggle));
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
+        let lbl = mouse_area(
+            row(vec![
+                Icon::Cpu.view(ctx.theme.text_size, ctx.fg()),
+                text(self.text.clone()).into(),
+            ])
+            .spacing(5)
+            .align_y(Vertical::Center),
+        )
+        .on_press(ModMsg::new(Msg::Toggle));
         if self.show_graph {
             let g = canvas(Graph {
                 values: self.hist.ordered(),
                 kind: GraphKind::Cpu,
+                line_color: ctx.graph_paint(self.graph_line.as_deref()),
             })
-            .width(Length::Fixed(80.0))
-            .height(Length::Fixed(20.0));
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(16.0));
             row(vec![lbl.into(), g.into()])
                 .spacing(4)
                 .align_y(Vertical::Center)

@@ -33,9 +33,9 @@ pub fn config() -> (String, String) {
 fn format_stock(symbol: &str, price: f64, change: f64, change_percent: f64) -> StockData {
     let is_positive = change >= 0.0;
     let (trend_emoji, sign) = if is_positive {
-        ("", "+")
+        ("󰔵", "+")
     } else {
-        ("📉", "")
+        ("󰔳", "")
     };
     let price_string = format!("${:.2}", price);
     let change_string = format!("{}{:.2} ({:.2}%)", sign, change, change_percent);
@@ -81,7 +81,7 @@ pub async fn fetch(symbol: &str, api_key: &str) -> Result<StockData, String> {
     }
     Ok(StockData {
         symbol: symbol.to_string(),
-        display_text: format!(" {}: Error fetching data", symbol),
+        display_text: format!("󰔵 {}: Error fetching data", symbol),
         price_string: "---".to_string(),
         change_string: "---".to_string(),
         ..Default::default()
@@ -212,19 +212,19 @@ mod tests {
     fn format_positive() {
         let d = format_stock("NQ=F", 100.0, 5.0, 5.26);
         assert!(d.is_positive && !d.is_negative);
-        assert_eq!(d.trend_emoji, "");
+        assert_eq!(d.trend_emoji, "󰔵");
         assert_eq!(d.price_string, "$100.00");
         assert_eq!(d.change_string, "+5.00 (5.26%)");
-        assert_eq!(d.display_text, " NQ=F: $100.00 +5.00 (5.26%)");
+        assert_eq!(d.display_text, "󰔵 NQ=F: $100.00 +5.00 (5.26%)");
     }
 
     #[test]
     fn format_negative() {
         let d = format_stock("AAPL", 50.0, -2.5, -4.76);
         assert!(!d.is_positive && d.is_negative);
-        assert_eq!(d.trend_emoji, "📉");
+        assert_eq!(d.trend_emoji, "󰔳");
         assert_eq!(d.change_string, "-2.50 (-4.76%)");
-        assert_eq!(d.display_text, "📉 AAPL: $50.00 -2.50 (-4.76%)");
+        assert_eq!(d.display_text, "󰔳 AAPL: $50.00 -2.50 (-4.76%)");
     }
 
     #[test]

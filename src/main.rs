@@ -21,21 +21,15 @@ use std::collections::HashMap;
 mod install;
 mod ipc;
 
-/// Default right-zone placement (today's bar) when `right` is unconfigured.
-const DEFAULT_RIGHT: &[&str] = &[
-    "cpu",
-    "github",
-    "claude",
-    "calendar",
-    "kubectl",
-    "temperature",
-    "memory",
-    "ping",
-    "spotify",
-    "stock",
-    "volume",
-    "battery",
-    "clock",
+/// Default right-zone placement when `right` is unconfigured — grouped into a few
+/// semantic clusters that render as separate sub-islands (RFC 0005). The gaps between
+/// groups are the separators; the order is `clock` last so time anchors the far edge.
+const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
+    &["cpu", "memory", "temperature"],   // machine vitals
+    &["ping", "github", "claude"],       // connectivity + dev
+    &["calendar", "kubectl", "spotify"], // work + media
+    &["stock", "volume", "battery"],     // status
+    &["clock"],                          // time — a dedicated end-cap (switcher trails)
 ];
 
 struct ModuleEntry {
@@ -375,12 +369,41 @@ fn resolve_entry(e: &config::Entry, out: &mut Vec<Placed>) {
     }
 }
 
+/// Resolve the right zone into **groups** (RFC 0005) — each becomes a sub-island in
+/// `islands` style. A top-level `Entry::Group` is one group; a bare entry is its own
+/// singleton group; an empty zone uses the shipped default groups.
+fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
+    if config.right.is_empty() {
+        return DEFAULT_RIGHT_GROUPS
+            .iter()
+            .map(|g| {
+                g.iter()
+                    .map(|id| Placed {
+                        key: id.to_string(),
+                        type_id: id.to_string(),
+                        config: empty_cfg(),
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+    config
+        .right
+        .iter()
+        .map(|e| {
+            let mut g = Vec::new();
+            resolve_entry(e, &mut g); // a Group flattens to its members; a bare entry → 1
+            g
+        })
+        .collect()
+}
+
 /// All placed items across the three zones, in order (zones fall back to defaults).
 fn all_placed(config: &Config) -> Vec<Placed> {
     let mut items = Vec::new();
     resolve_zone(&config.left, &["workspaces"], &mut items);
     resolve_zone(&config.center, &["window_title"], &mut items);
-    resolve_zone(&config.right, DEFAULT_RIGHT, &mut items);
+    items.extend(resolve_right_groups(config).into_iter().flatten());
     items
 }
 
@@ -914,25 +937,34 @@ impl Bar {
         }
     }
 
-    /// Build one zone from ordered `Placed` items: a module instance renders by `key`,
-    /// host chrome renders by `type_id`. A configured separator goes between items (never
-    /// before the `▾` switcher).
-    fn build_zone(&self, items: &[Placed]) -> Element<'_, Message> {
-        let islands = matches!(self.config.theme.style, Style::Islands);
+    /// The optional per-widget separator *mark* (RFC 0005), or `None` for pure spacing
+    /// (the islands default — grouping carries the structure). Built fresh each call.
+    fn sep_mark(&self) -> Option<Element<'static, Message>> {
         let s = &self.config.theme.separator;
-        // Islands are clean panels: the pill padding + spacing separates modules, so
-        // no glyph rule between them. Solid is a single slab, so it *needs* a divider —
-        // the configured glyph, or a "|" fallback. (Drawing "|" inside islands is what
-        // made the bar read like a CSV row.)
-        let sep_glyph = if islands {
-            None
-        } else {
-            Some(s.glyph.clone().unwrap_or_else(|| "|".to_string()))
-        };
-        let sep_color = s.color.iced();
+        let color = s.color.iced();
+        Some(match s.style {
+            config::SepStyle::None => return None,
+            config::SepStyle::Dot => text("\u{00b7}").color(color).into(), // ·
+            config::SepStyle::Glyph => text(s.glyph.clone().unwrap_or_else(|| "|".to_string()))
+                .color(color)
+                .into(),
+            config::SepStyle::Line => container(Space::new())
+                .width(Length::Fixed(s.width.max(1.0)))
+                .height(Length::Fixed(16.0))
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(color)),
+                    ..Default::default()
+                })
+                .into(),
+        })
+    }
+
+    /// Build a run of widgets (one group / zone): a module renders by `key`, host
+    /// chrome by `type_id`, with `[theme].spacing` between them and the configured
+    /// separator mark interposed (never before the `▾` switcher).
+    fn build_widgets(&self, items: &[Placed]) -> Element<'_, Message> {
         let mut out: Vec<Element<Message>> = Vec::new();
         for p in items {
-            // A built module instance is keyed by `key`; otherwise try host chrome.
             let el = if self.modules.iter().any(|e| e.name == p.key) {
                 self.render_module(&p.key)
             } else {
@@ -940,59 +972,75 @@ impl Bar {
             };
             if let Some(el) = el {
                 if !out.is_empty() && p.type_id != "switcher" {
-                    if let Some(g) = &sep_glyph {
-                        out.push(text(g.clone()).color(sep_color).into());
+                    if let Some(mark) = self.sep_mark() {
+                        out.push(mark);
                     }
                 }
                 out.push(el);
             }
         }
-        let spacing = if islands { 11.0 } else { 6.0 };
-        row(out).spacing(spacing).align_y(Vertical::Center).into()
+        row(out)
+            .spacing(self.config.theme.spacing)
+            .align_y(Vertical::Center)
+            .into()
     }
 
     fn bar_view(&self) -> Element<'_, Message> {
-        // Config placement (RFC 0002) drives which widgets render and in what order;
-        // an empty zone falls back to the shipped default (today's bar).
+        // Placement drives which widgets render and in what order; an empty zone falls
+        // back to the shipped default. The right zone is GROUPED (RFC 0005): each group
+        // becomes a sub-island (islands) or a divider-joined run (solid).
         let mut left = Vec::new();
         let mut center = Vec::new();
-        let mut right = Vec::new();
         resolve_zone(&self.config.left, &["workspaces"], &mut left);
         resolve_zone(&self.config.center, &["window_title"], &mut center);
-        resolve_zone(&self.config.right, DEFAULT_RIGHT, &mut right);
+        let mut right_groups = resolve_right_groups(&self.config);
 
-        // Place the ▾ switcher per [bar].switcher (unless the user listed it).
+        // Place the ▾ switcher per [bar].switcher (unless the user listed it): before
+        // the left zone, or trailing the last right group.
         let switcher = || Placed {
             key: "switcher".into(),
             type_id: "switcher".into(),
             config: empty_cfg(),
         };
-        let has_switcher = |v: &[Placed]| v.iter().any(|p| p.type_id == "switcher");
+        let is_switcher = |p: &Placed| p.type_id == "switcher";
         match self.config.bar.switcher {
-            SwitcherPos::Left if !has_switcher(&left) => left.insert(0, switcher()),
-            SwitcherPos::Right if !has_switcher(&right) => right.push(switcher()),
+            SwitcherPos::Left if !left.iter().any(is_switcher) => left.insert(0, switcher()),
+            SwitcherPos::Right if !right_groups.iter().flatten().any(is_switcher) => {
+                match right_groups.last_mut() {
+                    Some(g) => g.push(switcher()),
+                    None => right_groups.push(vec![switcher()]),
+                }
+            }
             _ => {}
         }
 
-        let ws_row = self.build_zone(&left);
-        let title_el = self.build_zone(&center);
-        let right_inner = self.build_zone(&right);
+        let ws_row = self.build_widgets(&left);
+        let title_el = self.build_widgets(&center);
+        let gap = self.config.theme.group_gap;
 
         if matches!(self.config.theme.style, Style::Islands) {
-            // Floating SQUARE islands over a transparent surface — our take on
-            // the islands look (ashell's are rounded; ours stay square/flat).
+            // Floating SQUARE islands; each group is its own sub-island and the GAPS
+            // between them are the separators (RFC 0005).
             let t = &self.config.theme;
             let base = t.background.base().0;
             let pillbg = Color::from_rgba(base[0], base[1], base[2], t.opacity);
             let r = t.radius.group();
             let bw = t.border.width.max(1.0);
             let bc = t.border.color.iced();
+            // A soft drop shadow lifts each pill off the wallpaper — framing it on a
+            // bright sky as well as a dark patch, where a lilac border alone washes
+            // out. This is the "floating islands" read (RFC 0005).
             let pill_style = move |_: &iced::Theme| container::Style {
                 background: Some(Background::Color(pillbg)),
                 border: Border {
                     color: bc,
                     width: bw,
                     radius: r.into(),
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+                    offset: iced::Vector::new(0.0, 2.0),
+                    blur_radius: 8.0,
                 },
                 ..Default::default()
             };
@@ -1004,17 +1052,28 @@ impl Bar {
                 .padding([2, 12])
                 .center_y(Length::Fill)
                 .style(pill_style);
-            let right_pill = container(right_inner)
-                .padding([2, 10])
-                .center_y(Length::Fill)
-                .style(pill_style);
+            // right cluster: one sub-island per group, `group_gap` between.
+            let mut right_pills: Vec<Element<Message>> = Vec::new();
+            for (i, g) in right_groups.iter().enumerate() {
+                if i > 0 {
+                    right_pills.push(Space::new().width(Length::Fixed(gap)).into());
+                }
+                right_pills.push(
+                    container(self.build_widgets(g))
+                        .padding([2, 10])
+                        .center_y(Length::Fill)
+                        .style(pill_style)
+                        .into(),
+                );
+            }
+            let right_cluster = row(right_pills).align_y(Vertical::Center);
             container(
                 row![
                     ws_pill,
                     Space::new().width(Length::Fill),
                     title_pill,
                     Space::new().width(Length::Fill),
-                    right_pill,
+                    right_cluster,
                 ]
                 .align_y(Vertical::Center),
             )
@@ -1023,23 +1082,50 @@ impl Bar {
             .padding([4, 10])
             .into()
         } else {
-            // Left and right zones size to their CONTENT; the centre takes the slack
-            // and keeps the title centred in it. Forcing equal thirds (FillPortion)
-            // crushed a wide right cluster into 1/3 of the output and clipped the
-            // clock off the edge on a narrow (e.g. 1920) monitor.
-            let left = container(ws_row)
+            // Solid slab: one run, groups joined by a divider in a `group_gap` (the
+            // separator mark, or a hairline when no explicit style), widgets within a
+            // group by `spacing`. Side zones size to content; centre takes the slack
+            // (forcing equal thirds clipped a wide cluster on a narrow output).
+            let sep_color = self.config.theme.separator.color.iced();
+            let mut run: Vec<Element<Message>> = Vec::new();
+            for (i, g) in right_groups.iter().enumerate() {
+                if i > 0 {
+                    let mark = self.sep_mark().unwrap_or_else(|| {
+                        container(Space::new())
+                            .width(Length::Fixed(1.0))
+                            .height(Length::Fixed(16.0))
+                            .style(move |_| container::Style {
+                                background: Some(Background::Color(sep_color)),
+                                ..Default::default()
+                            })
+                            .into()
+                    });
+                    run.push(
+                        row![
+                            Space::new().width(Length::Fixed(gap / 2.0)),
+                            mark,
+                            Space::new().width(Length::Fixed(gap / 2.0)),
+                        ]
+                        .align_y(Vertical::Center)
+                        .into(),
+                    );
+                }
+                run.push(self.build_widgets(g));
+            }
+            let right_inner: Element<Message> = row(run).align_y(Vertical::Center).into();
+            let left_c = container(ws_row)
                 .align_x(Horizontal::Left)
                 .center_y(Length::Fill)
                 .padding([0, 8]);
-            let center = container(title_el)
+            let center_c = container(title_el)
                 .width(Length::Fill)
                 .align_x(Horizontal::Center)
                 .center_y(Length::Fill);
-            let right_row = container(right_inner)
+            let right_c = container(right_inner)
                 .align_x(Horizontal::Right)
                 .center_y(Length::Fill)
                 .padding([0, 8]);
-            container(row![left, center, right_row].align_y(Vertical::Center))
+            container(row![left_c, center_c, right_c].align_y(Vertical::Center))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .padding([0, 8])

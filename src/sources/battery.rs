@@ -10,23 +10,15 @@ pub fn has_battery() -> bool {
 pub fn get_battery_status() -> String {
     let capacity = match fs::read_to_string("/sys/class/power_supply/BAT0/capacity") {
         Ok(s) => s.trim().to_string(),
-        Err(_) => return " --".to_string(),
+        Err(_) => return "--".to_string(),
     };
     let status = match fs::read_to_string("/sys/class/power_supply/BAT0/status") {
         Ok(s) => s.trim().to_string(),
-        Err(_) => return " --".to_string(),
+        Err(_) => return "--".to_string(),
     };
 
     let time_str = get_time_remaining(&status);
-    format!("{} {}% [{}]", battery_icon(&status), capacity, time_str)
-}
-
-fn battery_icon(status: &str) -> &'static str {
-    match status {
-        "Charging" => "",
-        "Not charging" | "Full" => "",
-        _ => "",
-    }
+    format!("{}% [{}]", capacity, time_str)
 }
 
 fn read_f64(path: &str) -> Option<f64> {
@@ -85,14 +77,5 @@ mod tests {
         assert_eq!(format_time_remaining(1.0), "1h0m");
         assert_eq!(format_time_remaining(0.0), "0m");
         assert_eq!(format_time_remaining(-1.0), "--");
-    }
-
-    #[test]
-    fn icons() {
-        assert_eq!(battery_icon("Charging"), "");
-        assert_eq!(battery_icon("Discharging"), "");
-        assert_eq!(battery_icon("Full"), "");
-        assert_eq!(battery_icon("Not charging"), "");
-        assert_eq!(battery_icon("weird"), "");
     }
 }

@@ -8,7 +8,7 @@ authors.workspace = true
 description = "Stable plugin API (the Module trait) for the ezbar status bar."
 
 [dependencies]
-iced = { version = "0.14", features = ["canvas", "tokio", "advanced"] }
+iced = { version = "0.14", features = ["canvas", "svg", "tokio", "advanced"] }
 # Re-exported as `ezbar_plugin::task::{spawn_blocking, sleep}` so modules need no
 # direct tokio dependency. Runs on the host's executor (same tokio as iced).
 tokio = { version = "1", features = ["rt", "time"] }

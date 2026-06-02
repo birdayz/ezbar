@@ -5,7 +5,7 @@
 style = "islands"                 # floating square panels
 opacity = 0.97
 radius = 4                        # a hair of corner; still square, not a pill
-border = { width = 1, color = "#cba6f780" }  # a lilac hairline edge (flieder @ 50%) — islands wear the signature colour
+border = { width = 1, color = "#cba6f7e6" }  # a lilac edge (flieder @ 90%) — frames each pill crisply over any wallpaper
 background = { base = "$base", weak = "$surface", strong = "$over" }
 text = "$text"
 dim = "$muted"

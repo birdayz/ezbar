@@ -2,9 +2,11 @@
 
 use std::time::Duration;
 
+use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::text;
+use ezbar_plugin::iced::widget::{row, text};
 use ezbar_plugin::iced::{Element, Subscription};
+use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::sources::battery;
@@ -50,8 +52,14 @@ impl Module for Battery {
         Response::none()
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
-        text(self.text.clone()).into()
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
+        row(vec![
+            Icon::Battery.view(ctx.theme.text_size, ctx.fg()),
+            text(self.text.clone()).into(),
+        ])
+        .spacing(5)
+        .align_y(Vertical::Center)
+        .into()
     }
 }
 

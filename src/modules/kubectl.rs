@@ -3,9 +3,11 @@
 
 use std::time::Duration;
 
+use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{column, mouse_area, scrollable, text};
+use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text};
 use ezbar_plugin::iced::{Color, Element, Subscription, Task};
+use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 use crate::sources::kubectl::{self, KubectlData};
@@ -90,7 +92,7 @@ impl Module for Kubectl {
         }
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let color = if self.data.is_production {
             Color::from_rgb(1.0, 0.2, 0.2)
         } else {
@@ -101,10 +103,19 @@ impl Module for Kubectl {
         // right-hand modules off a narrow output. Keep the domain head + cluster
         // tail (both are the recognisable parts); the full name stays in the
         // right-click picker.
-        mouse_area(text(truncate_mid(&self.data.string, 26)).color(color))
-            .on_press(ModMsg::new(Msg::Clear))
-            .on_right_press(ModMsg::new(Msg::Toggle))
-            .into()
+        mouse_area(
+            row(vec![
+                Icon::Kubernetes.view(ctx.theme.text_size, color),
+                text(truncate_mid(&self.data.string, 26))
+                    .color(color)
+                    .into(),
+            ])
+            .spacing(5)
+            .align_y(Vertical::Center),
+        )
+        .on_press(ModMsg::new(Msg::Clear))
+        .on_right_press(ModMsg::new(Msg::Toggle))
+        .into()
     }
 
     fn popup(&self, _ctx: &Ctx) -> Option<Element<'_, ModMsg>> {

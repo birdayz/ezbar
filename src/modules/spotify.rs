@@ -3,9 +3,11 @@
 
 use std::time::Duration;
 
+use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{mouse_area, text};
+use ezbar_plugin::iced::widget::{mouse_area, row, text};
 use ezbar_plugin::iced::{Element, Subscription, Task};
+use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::sources::spotify::{self, SpotifyData};
@@ -85,17 +87,24 @@ impl Module for Spotify {
         }
     }
 
-    fn view(&self, _ctx: &Ctx) -> Element<'_, ModMsg> {
-        mouse_area(text(marquee(&self.data.track_string, self.offset, 40)))
-            .on_press(ModMsg::new(Msg::Click))
-            .on_scroll(|delta| {
-                let y = match delta {
-                    ezbar_plugin::iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                    ezbar_plugin::iced::mouse::ScrollDelta::Pixels { y, .. } => y,
-                };
-                ModMsg::new(Msg::Scroll(y > 0.0))
-            })
-            .into()
+    fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
+        mouse_area(
+            row(vec![
+                Icon::Spotify.view(ctx.theme.text_size, ctx.fg()),
+                text(marquee(&self.data.track_string, self.offset, 40)).into(),
+            ])
+            .spacing(5)
+            .align_y(Vertical::Center),
+        )
+        .on_press(ModMsg::new(Msg::Click))
+        .on_scroll(|delta| {
+            let y = match delta {
+                ezbar_plugin::iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                ezbar_plugin::iced::mouse::ScrollDelta::Pixels { y, .. } => y,
+            };
+            ModMsg::new(Msg::Scroll(y > 0.0))
+        })
+        .into()
     }
 }
 

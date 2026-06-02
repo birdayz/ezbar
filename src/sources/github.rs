@@ -238,7 +238,7 @@ impl GitHub {
         let data = GitHubData {
             notifications: filtered,
             count,
-            display_text: format!("GH {count}"),
+            display_text: count.to_string(),
         };
         Ok(FetchResult::Data(data))
     }
