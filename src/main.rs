@@ -740,13 +740,16 @@ impl Bar {
                 let close_existing = self.close_any_popup();
                 let id = window::Id::unique();
                 self.module_popup = Some((id, instance, mode));
-                let left = self.popup_left_margin(MODULE_POPUP_SIZE.0);
+                // a module may request a content-sized popup (e.g. a small wasm chart)
+                let size = self
+                    .modules
+                    .iter()
+                    .find(|e| e.id == instance)
+                    .and_then(|e| e.module.popup_size())
+                    .unwrap_or(MODULE_POPUP_SIZE);
+                let left = self.popup_left_margin(size.0);
                 let open = Task::done(Message::NewLayerShell {
-                    settings: self.popup_settings(
-                        MODULE_POPUP_SIZE,
-                        left,
-                        matches!(mode, PopupMode::Hover),
-                    ),
+                    settings: self.popup_settings(size, left, matches!(mode, PopupMode::Hover)),
                     id,
                 });
                 Task::batch([close_existing, open])

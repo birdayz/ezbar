@@ -411,6 +411,7 @@ fn run_actor(
 enum Msg {
     Tick,
     Hover,
+    Leave,
 }
 
 /// A loaded WASM plugin, presented to the bar as a [`Module`].
@@ -452,11 +453,30 @@ impl Module for WasmModule {
 
     fn update(&mut self, msg: ModMsg) -> Response {
         match msg.get::<Msg>() {
-            // hovering the chip opens the plugin's popup (display-only; the host
-            // closes it on mouse-leave).
+            // hovering the chip opens the plugin's popup; leaving closes it
+            // (the host doesn't auto-close — the module drives both, like calendar).
             Some(Msg::Hover) => Response::request(HostRequest::OpenPopup(PopupMode::Hover)),
+            Some(Msg::Leave) => Response::request(HostRequest::ClosePopup),
             _ => Response::none(), // Tick: just re-render; `view` reads the cache
         }
+    }
+
+    fn popup_size(&self) -> Option<(u32, u32)> {
+        // size the popup to the largest chart in it (+ room for a title/padding),
+        // so a small chip's popup isn't lost in the default 480×400 surface.
+        let s = self.slot.lock().unwrap();
+        let l = s.popup.as_ref()?;
+        let (mut w, mut h) = (0.0f32, 0.0f32);
+        for n in &l.nodes {
+            if let LNode::Chart { width, height, .. } = n {
+                w = w.max(*width);
+                h = h.max(*height);
+            }
+        }
+        if w <= 0.0 {
+            return None;
+        }
+        Some(((w + 48.0) as u32, (h + 56.0) as u32))
     }
 
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
@@ -469,7 +489,9 @@ impl Module for WasmModule {
         drop(s);
         let area = mouse_area(chip);
         if has_popup {
-            area.on_enter(ModMsg::new(Msg::Hover)).into()
+            area.on_enter(ModMsg::new(Msg::Hover))
+                .on_exit(ModMsg::new(Msg::Leave))
+                .into()
         } else {
             area.into()
         }
