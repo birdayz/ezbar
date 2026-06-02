@@ -317,7 +317,9 @@ pub trait Ctx {
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are
 /// **pure** (no host calls — build the description), while `update` may use the
 /// gated host services on `ctx`. `update` returns `true` when the chip changed.
-pub trait Plugin: Default {
+///
+/// Pair your `impl Plugin` with [`export_plugin!`] — that's the only glue.
+pub trait Plugin {
     fn load(&mut self, _config: Vec<(String, String)>) {}
     fn update(&mut self, _ctx: &mut dyn Ctx, _ev: Event) -> bool {
         false
@@ -465,6 +467,39 @@ fn push(r: &Render, out: &mut Vec<WireNode>) -> u32 {
     (out.len() - 1) as u32
 }
 
+// ── component export (wasm32 only) ───────────────────────────────────────────
+
+/// The generated `Guest` + all the wit-bindgen glue live here, compiled only for
+/// the wasm target. Authors never touch it.
+#[cfg(target_arch = "wasm32")]
+mod glue;
+
+/// Construct a plugin as a trait object. Used by [`export_plugin!`]; hidden.
+#[doc(hidden)]
+pub fn __new<P: Plugin + Default + 'static>() -> Box<dyn Plugin> {
+    Box::new(P::default())
+}
+
+/// Export a [`Plugin`] type as an ezbar WASM component — the **only** glue an
+/// author writes (with `crate-type = ["cdylib"]` and a `Default` impl):
+///
+/// ```ignore
+/// #[derive(Default)]
+/// struct MyWidget { /* … */ }
+/// impl ezbar_plugin_wasm::Plugin for MyWidget { /* view/update/popup */ }
+/// ezbar_plugin_wasm::export_plugin!(MyWidget);
+/// ```
+#[macro_export]
+macro_rules! export_plugin {
+    ($t:ty) => {
+        #[cfg(target_arch = "wasm32")]
+        #[no_mangle]
+        fn __ezbar_plugin_new() -> ::std::boxed::Box<dyn $crate::Plugin> {
+            $crate::__new::<$t>()
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +513,9 @@ mod tests {
         assert_eq!(nodes.len(), 3);
         assert_eq!(root, 2);
         match &nodes[2] {
-            WireNode::Row { children, spacing, .. } => {
+            WireNode::Row {
+                children, spacing, ..
+            } => {
                 assert_eq!(children, &[0, 1]);
                 assert_eq!(*spacing, 5.0);
             }

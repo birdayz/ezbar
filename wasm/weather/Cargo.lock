@@ -23,6 +23,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "ezbar-plugin-wasm"
 version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
 
 [[package]]
 name = "foldhash"
@@ -237,7 +240,6 @@ version = "0.1.0"
 dependencies = [
  "ezbar-plugin-wasm",
  "serde_json",
- "wit-bindgen",
 ]
 
 [[package]]
