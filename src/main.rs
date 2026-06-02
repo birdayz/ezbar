@@ -413,7 +413,12 @@ fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
             .collect();
         unplaced_wasm_plugins(&placed)
     };
+    // Insert plugin pills just BEFORE the final group (the clock end-cap by
+    // default), so the trailing ▾ switcher stays on the end-cap and a plugin's
+    // pill is its own distinct island — not glued next to the switcher.
+    let end_cap = groups.pop();
     groups.extend(plugins.into_iter().map(|p| vec![p]));
+    groups.extend(end_cap);
     groups
 }
 
