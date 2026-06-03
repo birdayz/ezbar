@@ -5,6 +5,11 @@
 //! chip, and a clean forecast panel on hover — an hourly strip and a 4-day
 //! outlook, all from the host icon set. No stock-style chart anywhere.
 //!
+//! Sources: open-meteo (primary) with a wttr.in fallback for when its daily quota
+//! is spent — so grant BOTH hosts:
+//!   [modules.weather]
+//!   network = ["api.open-meteo.com", "wttr.in"]
+//!
 //! Note how little there is: a `Plugin` impl + `export_plugin!`. No wit-bindgen,
 //! no generated-type glue — the SDK owns all of that.
 
@@ -38,12 +43,15 @@ struct Weather {
     is_day: bool,
     wind: f64,
     humidity: f64,
-    precip_now: f64,
     sun_label: String, // "06:14" — next sunrise or today's sunset
     before_dawn: bool, // show a sunrise icon vs a sunset icon
     hours: Vec<HourPt>,
     days: Vec<DayPt>,
     loaded: bool,
+    // Throttle: the host ticks us ~every 2s, but weather changes slowly and
+    // open-meteo's free tier rate-limits (HTTP 429). `cooldown` counts ticks left
+    // before the next fetch — refresh on a ~15-min cadence, back off gently on error.
+    cooldown: u32,
 }
 
 impl Default for Weather {
@@ -58,15 +66,35 @@ impl Default for Weather {
             is_day: true,
             wind: 0.0,
             humidity: 0.0,
-            precip_now: 0.0,
             sun_label: String::new(),
             before_dawn: false,
             hours: Vec::new(),
             days: Vec::new(),
             loaded: false,
+            cooldown: 0, // fetch on the first tick
         }
     }
 }
+
+// Roughly 2s per host tick. ~15 min between good refreshes; ~2 min retry on error
+// (gentle enough to let a tripped rate-limit recover instead of hammering it).
+const REFRESH_TICKS: u32 = 450;
+const RETRY_TICKS: u32 = 60;
+
+// ── type/icon scale ─────────────────────────────────────────────────────────
+// One base unit drives the whole widget; every icon and text size below is a
+// ratio of it, so changing BASE rescales the chip and popup coherently. The
+// ratios are tuned so BASE = 14 reproduces the hand-tuned look exactly.
+const BASE: f32 = 14.0; // chip icon + temperature — the unit everything scales from
+const HERO_ICON: f32 = BASE * 2.43; // ≈34  popup condition hero
+const HERO_TEMP: f32 = BASE * 2.14; // ≈30  popup big temperature
+const HOUR_ICON: f32 = BASE * 1.43; // ≈20  hourly-strip icon
+const DAY_ICON: f32 = BASE * 1.29; // ≈18  daily-row icon
+const BODY: f32 = BASE * 0.93; // ≈13  condition label, row temperatures
+const LABEL: f32 = BASE * 0.86; // ≈12  daily weekday + daily precip
+const SMALL: f32 = BASE * 0.79; // ≈11  secondary text + metric icons
+const TINY: f32 = BASE * 0.71; // ≈10  hourly precip %
+const HAIR: f32 = BASE * 0.5; // ≈7   divider hairline
 
 impl Plugin for Weather {
     fn load(&mut self, config: Vec<(String, String)>) {
@@ -85,54 +113,49 @@ impl Plugin for Weather {
 
     fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
         let Event::Timer = ev else { return false };
-        let url = format!(
-            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
-             &current=temperature_2m,apparent_temperature,weathercode,is_day,windspeed_10m,relative_humidity_2m,precipitation\
-             &hourly=temperature_2m,weathercode,precipitation_probability\
-             &daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset\
-             &forecast_days=4&timezone=auto",
-            self.lat, self.lon
-        );
-        match ctx.http_get(&url) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(v) => {
-                    self.ingest(&v);
-                    true
-                }
-                Err(e) => {
-                    ctx.log(&format!("weather: parse {e}"));
-                    false
-                }
-            },
-            Err(e) => {
-                ctx.log(&format!("weather: {e}"));
-                false
-            }
+        // Throttle: only fetch when the cooldown has elapsed (weather is slow and
+        // the APIs rate-limit). Every other tick is a no-op.
+        if self.cooldown > 0 {
+            self.cooldown -= 1;
+            return false;
+        }
+        // Primary source is open-meteo (richer data, WMO codes). Fall back to
+        // wttr.in when it's unavailable — e.g. open-meteo's daily quota is spent.
+        if self.fetch_open_meteo(ctx) || self.fetch_wttr(ctx) {
+            self.cooldown = REFRESH_TICKS;
+            true
+        } else {
+            self.cooldown = RETRY_TICKS;
+            false
         }
     }
 
     fn view(&self) -> Render {
         if !self.loaded {
             return row([
-                Icon::Cloud.view(15.0, Token::FgDim),
+                Icon::Cloud.view(BASE, Token::FgDim),
                 text("\u{2026}").color(Token::FgDim),
             ])
             .spacing(6.0);
         }
+        // One coherent look: the condition icon + temp, and (when rain is likely) a
+        // precip cluster that MATCHES the condition icon — same 14px size, same
+        // tint — so the two icons read as a set, not a mismatch.
+        let tint = sky_tint(self.code, self.is_day);
         let mut items = vec![
-            wmo_icon(self.code, self.is_day).view(15.0, sky_tint(self.code, self.is_day)),
-            text(format!("{:.0}\u{b0}", self.temp)).color(temp_color(self.temp)),
+            wmo_icon(self.code, self.is_day).view(BASE, tint),
+            text(format!("{:.0}\u{b0}", self.temp))
+                .color(temp_color(self.temp))
+                .size(BASE),
         ];
-        // precip cluster: only when it's raining now or imminent — keeps the chip
-        // clean on dry days, a heads-up on wet ones.
         let next_pop = self.hours.first().map(|h| h.pop).unwrap_or(0);
-        if self.precip_now > 0.0 || next_pop >= 30 {
+        if next_pop > 0 {
             items.push(
                 row([
-                    Icon::Droplets.view(10.0, Token::Accent),
-                    text(format!("{next_pop}%")).color(Token::Accent).size(11.0),
+                    Icon::Droplets.view(BASE, tint),
+                    text(format!("{next_pop}%")).color(tint).size(BASE),
                 ])
-                .spacing(2.0),
+                .spacing(4.0),
             );
         }
         row(items).spacing(6.0)
@@ -158,6 +181,135 @@ impl Plugin for Weather {
 }
 
 impl Weather {
+    /// Fetch + parse open-meteo (the primary source). Returns false (so the caller
+    /// can fall back) on any network error, including a 429 daily-quota response.
+    fn fetch_open_meteo(&mut self, ctx: &mut dyn Ctx) -> bool {
+        let url = format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+             &current=temperature_2m,apparent_temperature,weathercode,is_day,windspeed_10m,relative_humidity_2m,precipitation\
+             &hourly=temperature_2m,weathercode,precipitation_probability\
+             &daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset\
+             &forecast_days=4&timezone=auto",
+            self.lat, self.lon
+        );
+        match ctx.http_get(&url) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(v) if v["current"].is_object() => {
+                    self.ingest(&v);
+                    true
+                }
+                _ => false, // error body (e.g. quota exceeded) — let the fallback try
+            },
+            Err(e) => {
+                ctx.log(&format!("weather: open-meteo {e}"));
+                false
+            }
+        }
+    }
+
+    /// Fallback source: wttr.in (`j1` JSON). Different shape — WWO codes, string
+    /// values, AM/PM times, 3-hour hourly steps — mapped onto the same struct.
+    fn fetch_wttr(&mut self, ctx: &mut dyn Ctx) -> bool {
+        let url = format!("https://wttr.in/{},{}?format=j1", self.lat, self.lon);
+        match ctx.http_get(&url) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(v) if v["current_condition"].is_array() => {
+                    self.ingest_wttr(&v);
+                    true
+                }
+                _ => {
+                    ctx.log("weather: wttr.in parse failed");
+                    false
+                }
+            },
+            Err(e) => {
+                ctx.log(&format!("weather: wttr.in {e}"));
+                false
+            }
+        }
+    }
+
+    /// Parse wttr.in's `j1` payload into the same fields `ingest` fills.
+    fn ingest_wttr(&mut self, v: &Value) {
+        let cur = &v["current_condition"][0];
+        self.temp = sf(&cur["temp_C"]);
+        self.feels = sf(&cur["FeelsLikeC"]);
+        self.code = wwo_to_wmo(su(&cur["weatherCode"]));
+        self.wind = sf(&cur["windspeedKmph"]);
+        self.humidity = sf(&cur["humidity"]);
+        let now_h = ampm_hour(cur["observation_time"].as_str().unwrap_or("12:00 PM"));
+
+        // daily (today + up to 3) + a date→(sunrise,sunset hour) table.
+        let days = v["weather"].as_array();
+        let mut sun: Vec<(u32, u32)> = Vec::new(); // per-day (sunrise_h, sunset_h)
+        self.days.clear();
+        if let Some(ds) = days {
+            for (i, d) in ds.iter().enumerate() {
+                let date = d["date"].as_str().unwrap_or("");
+                let astro = &d["astronomy"][0];
+                let sr = ampm_hour(astro["sunrise"].as_str().unwrap_or("06:00 AM"));
+                let ss = ampm_hour(astro["sunset"].as_str().unwrap_or("06:00 PM"));
+                sun.push((sr, ss));
+                let hourly = d["hourly"].as_array();
+                let day_code = hourly
+                    .and_then(|h| h.iter().find(|x| x["time"].as_str() == Some("1200")))
+                    .map(|x| wwo_to_wmo(su(&x["weatherCode"])))
+                    .unwrap_or(self.code);
+                let pop = hourly
+                    .map(|h| {
+                        h.iter()
+                            .filter_map(|x| x["chanceofrain"].as_str()?.parse::<u8>().ok())
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                self.days.push(DayPt {
+                    label: if i == 0 { "Today".into() } else { weekday(date).into() },
+                    hi: sf(&d["maxtempC"]),
+                    lo: sf(&d["mintempC"]),
+                    code: day_code,
+                    pop,
+                });
+            }
+        }
+
+        // today's sun for the metric line + the chip's day/night icon.
+        if let Some((sr, ss)) = sun.first() {
+            self.before_dawn = now_h < *sr;
+            let h = if self.before_dawn { *sr } else { *ss };
+            self.sun_label = format!("{h:02}:00");
+            self.is_day = now_h >= *sr && now_h < *ss;
+        }
+
+        // hourly strip: the 3-hour slots from the current slot onward, next 6.
+        self.hours.clear();
+        if let Some(ds) = days {
+            let mut slots: Vec<(usize, u32, &Value)> = Vec::new(); // (day, hour, slot)
+            for (di, d) in ds.iter().enumerate() {
+                if let Some(h) = d["hourly"].as_array() {
+                    for slot in h {
+                        slots.push((di, su(&slot["time"]) / 100, slot));
+                    }
+                }
+            }
+            let start = slots
+                .iter()
+                .position(|(di, hour, _)| *di == 0 && *hour >= now_h)
+                .unwrap_or(0);
+            for (di, hour, slot) in slots.into_iter().skip(start).take(6) {
+                let is_day = sun.get(di).map(|(sr, ss)| hour >= *sr && hour < *ss).unwrap_or(true);
+                self.hours.push(HourPt {
+                    label: format!("{hour:02}"),
+                    temp: sf(&slot["tempC"]),
+                    code: wwo_to_wmo(su(&slot["weatherCode"])),
+                    pop: slot["chanceofrain"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+                    is_day,
+                });
+            }
+        }
+        self.loaded = true;
+    }
+
     fn ingest(&mut self, v: &Value) {
         let cur = &v["current"];
         self.temp = cur["temperature_2m"].as_f64().unwrap_or(0.0);
@@ -166,7 +318,6 @@ impl Weather {
         self.is_day = cur["is_day"].as_i64().unwrap_or(1) != 0;
         self.wind = cur["windspeed_10m"].as_f64().unwrap_or(0.0);
         self.humidity = cur["relative_humidity_2m"].as_f64().unwrap_or(0.0);
-        self.precip_now = cur["precipitation"].as_f64().unwrap_or(0.0);
         let now = cur["time"].as_str().unwrap_or("");
 
         // daily (today + 3): build the day cards and a date→(sunrise,sunset) lookup.
@@ -218,19 +369,19 @@ impl Weather {
 
     fn header(&self) -> Render {
         let temp_line = row([
-            text(format!("{:.0}\u{b0}", self.temp)).color(temp_color(self.temp)).size(30.0),
-            text(condition_label(self.code)).color(Token::FgDim).size(13.0),
+            text(format!("{:.0}\u{b0}", self.temp)).color(temp_color(self.temp)).size(HERO_TEMP),
+            text(condition_label(self.code)).color(Token::FgDim).size(BODY),
         ])
         .spacing(6.0)
         .align(Align::End);
 
         let hero = row([
-            wmo_icon(self.code, self.is_day).view(34.0, sky_tint(self.code, self.is_day)),
+            wmo_icon(self.code, self.is_day).view(HERO_ICON, sky_tint(self.code, self.is_day)),
             column([
                 temp_line,
                 text(format!("Feels {:.0}\u{b0}  \u{b7}  {}", self.feels, self.place))
                     .color(Token::FgDim)
-                    .size(11.0),
+                    .size(SMALL),
             ])
             .spacing(1.0),
         ])
@@ -259,10 +410,10 @@ impl Weather {
             .iter()
             .map(|h| {
                 column([
-                    text(h.label.clone()).color(Token::FgDim).size(11.0),
-                    wmo_icon(h.code, h.is_day).view(20.0, sky_tint(h.code, h.is_day)),
-                    text(format!("{:.0}\u{b0}", h.temp)).color(temp_color(h.temp)).size(13.0),
-                    text(pop_str(h.pop)).color(Token::Accent).size(10.0),
+                    text(h.label.clone()).color(Token::FgDim).size(SMALL),
+                    wmo_icon(h.code, h.is_day).view(HOUR_ICON, sky_tint(h.code, h.is_day)),
+                    text(format!("{:.0}\u{b0}", h.temp)).color(temp_color(h.temp)).size(BODY),
+                    text(pop_str(h.pop)).color(Token::Accent).size(TINY),
                 ])
                 .spacing(4.0)
                 .align(Align::Center)
@@ -280,23 +431,23 @@ impl Weather {
                 // vs muted-low hierarchy while reading as a single range (the slash
                 // does the column work that proportional text can't).
                 let range = row([
-                    text(fig_temp(d.hi)).color(temp_color(d.hi)).size(13.0),
-                    text("/").color(Token::FgDim).size(13.0),
-                    text(fig_temp(d.lo)).color(Token::FgDim).size(13.0),
+                    text(fig_temp(d.hi)).color(temp_color(d.hi)).size(BODY),
+                    text("/").color(Token::FgDim).size(BODY),
+                    text(fig_temp(d.lo)).color(Token::FgDim).size(BODY),
                 ])
                 .spacing(1.0)
                 .align(Align::Center);
 
                 let mut cells = vec![
-                    text(pad_right(&d.label, 5)).color(Token::Fg).size(12.0),
-                    wmo_icon(d.code, true).view(18.0, sky_tint(d.code, true)),
+                    text(pad_right(&d.label, 5)).color(Token::Fg).size(LABEL),
+                    wmo_icon(d.code, true).view(DAY_ICON, sky_tint(d.code, true)),
                     range,
                 ];
                 // precip demoted to the trailing edge (no second water glyph — the
                 // condition icon already says rain); raggedness hides off the right.
                 if d.pop >= 20 {
                     cells.push(spacer(8.0));
-                    cells.push(text(format!("{}%", d.pop)).color(Token::Accent).size(12.0));
+                    cells.push(text(format!("{}%", d.pop)).color(Token::Accent).size(LABEL));
                 }
                 row(cells).spacing(10.0).align(Align::Center)
             })
@@ -309,11 +460,11 @@ impl Weather {
 /// days" chapters (the DSL has no border node, so a hairline of light box-rule
 /// glyphs at a small size stands in).
 fn divider() -> Render {
-    text("\u{2500}".repeat(48)).color(Token::FgDim).size(7.0)
+    text("\u{2500}".repeat(48)).color(Token::FgDim).size(HAIR)
 }
 
 fn metric(icon: Icon, tint: Token, label: String) -> Render {
-    row([icon.view(11.0, tint), text(label).color(Token::FgDim).size(11.0)]).spacing(4.0)
+    row([icon.view(SMALL, tint), text(label).color(Token::FgDim).size(SMALL)]).spacing(4.0)
 }
 
 // ── WMO weathercode → icon / label / colour ─────────────────────────────────
@@ -475,6 +626,51 @@ fn weekday(date: &str) -> &'static str {
     }
     let w = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d).rem_euclid(7) as usize;
     ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][w]
+}
+
+// ── wttr.in helpers (its j1 values are strings; codes are WWO, not WMO) ──────
+
+/// Parse a stringy JSON number (wttr.in encodes everything as strings).
+fn sf(v: &Value) -> f64 {
+    v.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0)
+}
+fn su(v: &Value) -> u32 {
+    v.as_str().and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// "05:17 AM" / "09:08 PM" → hour of day (0–23).
+fn ampm_hour(s: &str) -> u32 {
+    let s = s.trim();
+    let hour: u32 = s
+        .split(':')
+        .next()
+        .and_then(|h| h.trim().parse().ok())
+        .unwrap_or(12);
+    let pm = s.to_uppercase().contains("PM");
+    match (hour % 12, pm) {
+        (h, true) => h + 12,
+        (h, false) => h,
+    }
+}
+
+/// Map a WWO weather code (wttr.in) onto the closest WMO code, so the existing
+/// `wmo_icon`/`condition_label` logic applies unchanged.
+fn wwo_to_wmo(code: u32) -> u8 {
+    match code {
+        113 => 0,                                  // clear / sunny
+        116 => 2,                                  // partly cloudy
+        119 | 122 => 3,                            // cloudy / overcast
+        143 | 248 | 260 => 45,                     // mist / fog
+        176 | 263 | 266 | 293 | 296 | 353 => 61,   // patchy/light rain & drizzle
+        299 | 302 | 356 => 63,                     // moderate rain
+        305 | 308 | 359 => 65,                     // heavy rain
+        // sleet / freezing rain / ice pellets
+        182 | 185 | 281 | 284 | 311 | 314 | 317 | 320 | 350 | 362 | 365 | 374 | 377 => 66,
+        179 | 227 | 323 | 326 | 329 | 332 | 368 | 371 => 71, // snow
+        230 | 335 | 338 => 75,                     // heavy snow / blizzard
+        200 | 386 | 389 | 392 | 395 => 95,         // thunder
+        _ => 3,                                    // default: cloudy
+    }
 }
 
 export_plugin!(Weather);
