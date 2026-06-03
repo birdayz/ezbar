@@ -3,7 +3,9 @@ use std::time::Duration;
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{SinkExt, Stream};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
-use iced::{event, window, Background, Border, Color, Element, Length, Subscription, Task};
+use iced::{
+    event, window, Background, Border, Color, Element, Length, Padding, Subscription, Task,
+};
 use iced_layershell::build_pattern::daemon;
 use iced_layershell::reexport::{
     Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
@@ -705,6 +707,9 @@ impl Bar {
             Message::OutputsChanged => self.reconcile_surfaces(),
             Message::WindowClosed(id) => {
                 if self.is_bar(id) {
+                    log::info!(
+                        "WindowClosed: bar surface {id:?} closed by compositor — drop + reconcile"
+                    );
                     // A bar surface went away (monitor unplugged/slept). Drop it and
                     // reconcile — if the output is truly gone it stays gone; if it
                     // returns the output-event path re-adds it. We do NOT exit the
@@ -1135,29 +1140,48 @@ impl Bar {
                 },
                 ..Default::default()
             };
-            let ws_pill = container(ws_row)
-                .padding([2, 10])
-                .center_y(Length::Fill)
-                .style(pill_style);
-            let title_pill = container(title_el)
-                .padding([2, 12])
-                .center_y(Length::Fill)
-                .style(pill_style);
+            // Each visible island floats inside a FULL-HEIGHT cell, so its hit/hover
+            // area reaches the screen's top & bottom edges (Fitts's law — slamming the
+            // cursor to the border still lands on the bar) even though the pill itself
+            // is inset. The 4px float used to live on the bar's outer padding; moving
+            // it per-cell keeps the look identical while opening the edge.
+            let float = Padding::from([4, 0]);
+            let ws_pill = container(
+                container(ws_row)
+                    .padding([2, 10])
+                    .center_y(Length::Fill)
+                    .style(pill_style),
+            )
+            .height(Length::Fill)
+            .padding(float);
+            let title_pill = container(
+                container(title_el)
+                    .padding([2, 12])
+                    .center_y(Length::Fill)
+                    .style(pill_style),
+            )
+            .height(Length::Fill)
+            .padding(float);
             // right cluster: one sub-island per group, `group_gap` between.
             let mut right_pills: Vec<Element<Message>> = Vec::new();
             for (i, g) in right_groups.iter().enumerate() {
                 if i > 0 {
                     right_pills.push(Space::new().width(Length::Fixed(gap)).into());
                 }
-                let pill = container(self.build_widgets(g))
-                    .padding([2, 10])
-                    .center_y(Length::Fill)
-                    .style(pill_style);
+                // full-height cell holding the inset, floating pill
+                let cell = container(
+                    container(self.build_widgets(g))
+                        .padding([2, 10])
+                        .center_y(Length::Fill)
+                        .style(pill_style),
+                )
+                .height(Length::Fill)
+                .padding(float);
                 // Whole-pill hover: when the group is a single opted-in module, the
-                // pill — padding ring and all — is its hover surface, not just its
-                // content. The mouse_area sits OUTSIDE the padding (RFC 0001 popups).
+                // whole cell — float and all, up to the screen edge — is its hover
+                // surface. The mouse_area sits OUTSIDE the padding (RFC 0001 popups).
                 right_pills.push(match self.pill_hover(g) {
-                    Some((instance, enter, leave)) => mouse_area(pill)
+                    Some((instance, enter, leave)) => mouse_area(cell)
                         .on_enter(Message::ModuleMsg {
                             instance,
                             msg: enter,
@@ -1167,7 +1191,7 @@ impl Bar {
                             msg: leave,
                         })
                         .into(),
-                    None => pill.into(),
+                    None => cell.into(),
                 });
             }
             let right_cluster = row(right_pills).align_y(Vertical::Center);
@@ -1183,7 +1207,7 @@ impl Bar {
             )
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding([4, 10])
+            .padding([0, 10])
             .into()
         } else {
             // Solid slab: one run, groups joined by a divider in a `group_gap` (the
@@ -1371,6 +1395,14 @@ impl Bar {
         let desired = desired_outputs(&self.config);
         let desired_names: std::collections::HashSet<&str> =
             desired.iter().map(|o| o.name.as_str()).collect();
+        log::info!(
+            "reconcile: desired={:?} tracked={:?}",
+            desired_names,
+            self.bars
+                .iter()
+                .map(|b| (b.output.as_str(), b.id))
+                .collect::<Vec<_>>()
+        );
         let mut tasks = Vec::new();
 
         // Close surfaces whose output is gone or de-selected.
@@ -1380,6 +1412,11 @@ impl Bar {
             if desired_names.contains(b.output.as_str()) {
                 kept.push(b);
             } else {
+                log::info!(
+                    "reconcile: CLOSE {:?} (output {} de-selected)",
+                    b.id,
+                    b.output
+                );
                 tasks.push(iced::window::close(b.id));
                 closed_any = true;
             }
@@ -1392,6 +1429,7 @@ impl Bar {
                 Some(b) => b.width = o.width,
                 None => {
                     let id = window::Id::unique();
+                    log::info!("reconcile: CREATE {id:?} for output {}", o.name);
                     tasks.push(Task::done(Message::NewLayerShell {
                         settings: bar_settings(&self.config, self.bar_pos, &o.name),
                         id,
