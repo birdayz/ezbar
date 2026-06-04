@@ -38,9 +38,6 @@ enum Msg {
     Update(Vec<Workspace>),
     Switch(String),
     Scroll(ScrollDelta),
-    /// A frame tick while a fade runs — a state no-op that just forces `view` to
-    /// re-interpolate (RFC 0010 §3.2). Dropped once every pill settles.
-    Tick,
 }
 
 pub struct Workspaces {
@@ -86,20 +83,12 @@ impl Module for Workspaces {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        let ws = ezbar_plugin::sub::keyed(self.instance, ws_sub);
-        // Drive redraws ONLY while a fade is in progress; iced drops the `frames` recipe
-        // the moment this returns false, so an idle bar gets zero extra redraws. Reading
-        // `now` here ≥ the frame instant, so the sub can only drop *after* the visual
-        // settles, never mid-fade (RFC 0010 §5).
-        let now = Instant::now();
-        if self.anim.values().any(|a| a.is_animating(now)) {
-            Subscription::batch([
-                ws,
-                ezbar_plugin::iced::window::frames().map(|_| ModMsg::new(Msg::Tick)),
-            ])
-        } else {
-            ws
-        }
+        // NOTE: the RFC 0010 cross-fade drove redraws with `window::frames()`. In
+        // iced_layershell that frame-callback path corrupts the seat's pointer tracking
+        // (`layershellev: mouse hasn't entered`), killing whole-pill hover after the first
+        // workspace switch. Until a layershell-safe redraw driver is in place, the highlight
+        // is discrete (no fade) — hover correctness wins over the polish.
+        ezbar_plugin::sub::keyed(self.instance, ws_sub)
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
@@ -127,7 +116,7 @@ impl Module for Workspaces {
                     sway::run_command("workspace next_on_output");
                 }
             }
-            Some(Msg::Tick) | None => {}
+            None => {}
         }
         Response::none()
     }
@@ -145,17 +134,13 @@ impl Module for Workspaces {
         let chip_h = (ctx.theme.bar_height as f32 - 10.0).max(14.0);
         let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
 
-        // One `now` for the whole frame — no intra-frame skew across pills (RFC 0010 §3.3).
-        let now = Instant::now();
+        // Discrete focus state (motion's live fade is disabled — see `subscription`): the
+        // chip renders the fully-focused (t=1) or resting (t=0) paint, no interpolation.
         let chips: Vec<Element<ModMsg>> = self
             .list
             .iter()
             .map(|w| {
-                let t = self
-                    .anim
-                    .get(&w.name)
-                    .map(|a| a.interpolate(0.0_f32, 1.0_f32, now))
-                    .unwrap_or(if w.focused { 1.0 } else { 0.0 });
+                let t = if w.focused { 1.0 } else { 0.0 };
                 chip(w, self.style, ctx, cell_w, chip_h, t)
             })
             .collect();

@@ -1,6 +1,16 @@
 # RFC 0010: motion — the GPU's unused payoff (workspace transition, v1)
 
-- **Status:** **Implemented** (v2) — shipped in `src/modules/workspaces.rs`. ACK'd by both
+- **Status:** **Implemented but DISABLED at runtime** (v2) — the cross-fade landed and was
+  ACK'd, but live on the bar it regressed **hover**: the redraw driver was `window::frames()`,
+  and in **iced_layershell** the frame-callback path corrupts `layershellev`'s pointer-seat
+  tracking (`mouse hasn't entered`), so whole-pill hover (the weather forecast popup) died
+  after the first workspace switch. The animation is disabled (the highlight renders discrete,
+  `t ∈ {0,1}`) to keep hover correct — found only by deploying to the real layershell surface,
+  which the design/impl reviews (mainline-iced reasoning) couldn't surface. **Re-enable plan:**
+  drive the fade with a plain `iced::time::every(16ms)` timer (gated on `is_animating`) instead
+  of `window::frames()` — a timer-driven redraw doesn't touch the frame-callback/seat path. The
+  `anim` state machinery is left in place for that. (Original design notes below, unchanged.)
+- **Was: Implemented** (v2) — shipped in `src/modules/workspaces.rs`. ACK'd by both
   a systems reviewer (Torvalds) and a UI/iced reviewer at design time *and* on the impl.
   Two folded cleanups landed: `.duration(Duration::from_millis(180))` set explicitly (the
   constructor otherwise ships lilt's 100 ms default), and **each pill's `Animation` stays
