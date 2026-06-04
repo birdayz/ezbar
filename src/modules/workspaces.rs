@@ -38,6 +38,9 @@ enum Msg {
     Update(Vec<Workspace>),
     Switch(String),
     Scroll(ScrollDelta),
+    /// A redraw tick while a fade runs (only when `animate` is on) — a state no-op that
+    /// just re-`view`s so the interpolation advances. Dropped once every pill settles.
+    Tick,
 }
 
 pub struct Workspaces {
@@ -45,9 +48,14 @@ pub struct Workspaces {
     style: WsStyle,
     list: Vec<Workspace>,
     scroll_accum: f32,
+    /// Opt-in cross-fade (RFC 0010), `[modules.workspaces].animate` (default **false**).
+    /// Off by default because the fade's redraw driver must not disturb layershell's pointer
+    /// seat — this gate keeps the default bar's hover safe while the timer-driven fade is
+    /// verified live (the old `window::frames()` driver broke hover; this uses `time::every`).
+    animate: bool,
     /// Per-workspace focus animation, keyed by name (bounded by the ~10 workspace count,
     /// evicted on every update). Each pill animates independently so the cross-fade reads
-    /// as a *moving* highlight, not a synchronized blink.
+    /// as a *moving* highlight, not a synchronized blink. Unused while `animate` is off.
     anim: HashMap<String, Animation<bool>>,
 }
 
@@ -63,6 +71,10 @@ impl Workspaces {
             style,
             list: Vec::new(),
             scroll_accum: 0.0,
+            animate: cfg
+                .get("animate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             anim: HashMap::new(),
         }
     }
@@ -83,12 +95,20 @@ impl Module for Workspaces {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        // NOTE: the RFC 0010 cross-fade drove redraws with `window::frames()`. In
-        // iced_layershell that frame-callback path corrupts the seat's pointer tracking
-        // (`layershellev: mouse hasn't entered`), killing whole-pill hover after the first
-        // workspace switch. Until a layershell-safe redraw driver is in place, the highlight
-        // is discrete (no fade) — hover correctness wins over the polish.
-        ezbar_plugin::sub::keyed(self.instance, ws_sub)
+        let ws = ezbar_plugin::sub::keyed(self.instance, ws_sub);
+        // Drive redraws while a fade runs — but with `time::every`, NOT `window::frames()`:
+        // the frame-callback path corrupts layershell's pointer seat (`mouse hasn't entered`)
+        // and kills hover. A plain timer ticks `view` without touching that path. Gated on
+        // `animate` so the default bar has zero extra redraws and a known-safe hover.
+        if self.animate && self.anim.values().any(|a| a.is_animating(Instant::now())) {
+            Subscription::batch([
+                ws,
+                ezbar_plugin::iced::time::every(Duration::from_millis(16))
+                    .map(|_| ModMsg::new(Msg::Tick)),
+            ])
+        } else {
+            ws
+        }
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
@@ -116,7 +136,7 @@ impl Module for Workspaces {
                     sway::run_command("workspace next_on_output");
                 }
             }
-            None => {}
+            Some(Msg::Tick) | None => {}
         }
         Response::none()
     }
@@ -134,13 +154,24 @@ impl Module for Workspaces {
         let chip_h = (ctx.theme.bar_height as f32 - 10.0).max(14.0);
         let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
 
-        // Discrete focus state (motion's live fade is disabled — see `subscription`): the
-        // chip renders the fully-focused (t=1) or resting (t=0) paint, no interpolation.
+        // `t` is the eased focus-ness when `animate` is on (one `now` for the whole frame, no
+        // intra-frame skew), else discrete {0,1} (the default — chip renders the resting or
+        // fully-focused paint, no interpolation).
+        let now = Instant::now();
         let chips: Vec<Element<ModMsg>> = self
             .list
             .iter()
             .map(|w| {
-                let t = if w.focused { 1.0 } else { 0.0 };
+                let t = if self.animate {
+                    self.anim
+                        .get(&w.name)
+                        .map(|a| a.interpolate(0.0_f32, 1.0_f32, now))
+                        .unwrap_or(if w.focused { 1.0 } else { 0.0 })
+                } else if w.focused {
+                    1.0
+                } else {
+                    0.0
+                };
                 chip(w, self.style, ctx, cell_w, chip_h, t)
             })
             .collect();

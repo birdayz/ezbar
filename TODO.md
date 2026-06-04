@@ -15,14 +15,14 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   Host delivers press/right-press/scroll/enter/leave to the guest's `update(Event::Pointer)`
   through the reactor, bounded by the cadence gate + WALL/epoch. Buttons + scroll-to-adjust
   + hover. Drag/release deferred to an additive v0.2.0 WIT.
-- [~] **Motion — first eased transition** — built (RFC 0010) but **DISABLED at runtime**.
-  The workspace cross-fade drove redraws with `window::frames()`, which in **iced_layershell**
-  corrupts the pointer-seat (`mouse hasn't entered`) and **broke hover** after the first
-  workspace switch — a layershell-only failure the mainline-iced reviews couldn't catch, found
-  only by deploying live. The highlight is back to discrete (hover restored). **Re-enable:**
-  drive the fade with `iced::time::every(16ms)` (gated on `is_animating`) instead of frame
-  callbacks — needs **live verification** (frames-vs-timer can't be told apart by `swaymsg`
-  cursor warps; only a real hover confirms it). The `anim` machinery is left in place.
+- [~] **Motion — first eased transition** — built (RFC 0010), **opt-in/default-off**
+  (`[modules.workspaces].animate = true`). The original `window::frames()` driver broke hover
+  in iced_layershell (frame-callback path corrupts the pointer-seat → `mouse hasn't entered`),
+  a layershell-only failure the mainline-iced reviews couldn't catch — found by deploying live.
+  Re-driven with `iced::time::every(16ms)` (no frame callbacks → shouldn't touch the seat) and
+  gated off by default so the default bar's hover is known-safe. **Needs one live check:** flip
+  `animate = true`, switch a workspace, confirm hover still opens popups (cursor warps can't
+  tell the drivers apart — only a real hover does).
 
 ### P1 — finish the platform
 - [x] **Event-driven cadence (`set_timeout`)** — **DONE** (RFC 0011). The reactor honors
