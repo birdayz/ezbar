@@ -8,21 +8,39 @@
 //! [modules.workspaces]
 //! style = "boxed"   # boxed | filled | outlined | underbar
 //! ```
+//!
+//! **Motion (RFC 0010):** when the focused workspace changes, the accent highlight
+//! *cross-fades* from the old pill to the new instead of hard-cutting. Each pill owns an
+//! `Animation<bool>` ("am I focused") keyed by name; `view` reads a single `now`, projects
+//! each into a scalar `t ∈ [0,1]` and hand-lerps the focused colors (`Animation<bool>`
+//! interpolates `f32`, not `Color`). Frames are requested *only while a fade runs*, so an
+//! idle bar costs zero extra redraws.
+
+use std::collections::HashMap;
 
 use ezbar_plugin::iced::alignment::{Horizontal, Vertical};
+use ezbar_plugin::iced::animation::Easing;
 use ezbar_plugin::iced::futures::{Stream, StreamExt};
 use ezbar_plugin::iced::mouse::ScrollDelta;
+use ezbar_plugin::iced::time::{Duration, Instant};
 use ezbar_plugin::iced::widget::{column, container, mouse_area, row, text, Space};
-use ezbar_plugin::iced::{Background, Border, Color, Element, Length, Subscription};
+use ezbar_plugin::iced::{Animation, Background, Border, Color, Element, Length, Subscription};
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::config::WsStyle;
 use crate::sources::sway::{self, Workspace};
 
+/// ~150 ms snappy settle — **not** lilt's `EaseInOut` 100 ms default (its slow start reads
+/// as lag). The incoming pill leads the outgoing one, so it reads as a moving highlight.
+const FADE: Duration = Duration::from_millis(180);
+
 enum Msg {
     Update(Vec<Workspace>),
     Switch(String),
     Scroll(ScrollDelta),
+    /// A frame tick while a fade runs — a state no-op that just forces `view` to
+    /// re-interpolate (RFC 0010 §3.2). Dropped once every pill settles.
+    Tick,
 }
 
 pub struct Workspaces {
@@ -30,6 +48,10 @@ pub struct Workspaces {
     style: WsStyle,
     list: Vec<Workspace>,
     scroll_accum: f32,
+    /// Per-workspace focus animation, keyed by name (bounded by the ~10 workspace count,
+    /// evicted on every update). Each pill animates independently so the cross-fade reads
+    /// as a *moving* highlight, not a synchronized blink.
+    anim: HashMap<String, Animation<bool>>,
 }
 
 impl Workspaces {
@@ -44,6 +66,7 @@ impl Workspaces {
             style,
             list: Vec::new(),
             scroll_accum: 0.0,
+            anim: HashMap::new(),
         }
     }
 }
@@ -63,12 +86,38 @@ impl Module for Workspaces {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        ezbar_plugin::sub::keyed(self.instance, ws_sub)
+        let ws = ezbar_plugin::sub::keyed(self.instance, ws_sub);
+        // Drive redraws ONLY while a fade is in progress; iced drops the `frames` recipe
+        // the moment this returns false, so an idle bar gets zero extra redraws. Reading
+        // `now` here ≥ the frame instant, so the sub can only drop *after* the visual
+        // settles, never mid-fade (RFC 0010 §5).
+        let now = Instant::now();
+        if self.anim.values().any(|a| a.is_animating(now)) {
+            Subscription::batch([
+                ws,
+                ezbar_plugin::iced::window::frames().map(|_| ModMsg::new(Msg::Tick)),
+            ])
+        } else {
+            ws
+        }
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
         match msg.get::<Msg>() {
-            Some(Msg::Update(ws)) => self.list = ws.clone(),
+            Some(Msg::Update(ws)) => {
+                let now = Instant::now();
+                for w in ws {
+                    self.anim
+                        .entry(w.name.clone())
+                        .or_insert_with(|| {
+                            Animation::new(w.focused).easing(Easing::EaseOutCubic).duration(FADE)
+                        })
+                        .go_mut(w.focused, now); // lilt no-ops if the target is unchanged
+                }
+                // Evict gone workspaces so the map can't grow — no lifecycle leak.
+                self.anim.retain(|name, _| ws.iter().any(|w| &w.name == name));
+                self.list = ws.clone();
+            }
             Some(Msg::Switch(name)) => sway::run_command(format!("workspace {name}")),
             Some(Msg::Scroll(delta)) => {
                 let dir = self.scroll_dir(*delta);
@@ -78,7 +127,7 @@ impl Module for Workspaces {
                     sway::run_command("workspace next_on_output");
                 }
             }
-            None => {}
+            Some(Msg::Tick) | None => {}
         }
         Response::none()
     }
@@ -96,10 +145,19 @@ impl Module for Workspaces {
         let chip_h = (ctx.theme.bar_height as f32 - 10.0).max(14.0);
         let cell_w = (max_chars * fs * 0.62 + 8.0).max(chip_h);
 
+        // One `now` for the whole frame — no intra-frame skew across pills (RFC 0010 §3.3).
+        let now = Instant::now();
         let chips: Vec<Element<ModMsg>> = self
             .list
             .iter()
-            .map(|w| chip(w, self.style, ctx, cell_w, chip_h))
+            .map(|w| {
+                let t = self
+                    .anim
+                    .get(&w.name)
+                    .map(|a| a.interpolate(0.0_f32, 1.0_f32, now))
+                    .unwrap_or(if w.focused { 1.0 } else { 0.0 });
+                chip(w, self.style, ctx, cell_w, chip_h, t)
+            })
             .collect();
 
         mouse_area(row(chips).spacing(4).align_y(Vertical::Center))
@@ -135,13 +193,32 @@ fn ws_sub(_id: &u64) -> impl Stream<Item = ModMsg> {
     sway::workspaces().map(|ws| ModMsg::new(Msg::Update(ws)))
 }
 
+/// `(background, border_width, border_color, text)` — the full paint of one chip in one
+/// logical state. `background == TRANSPARENT` means "no fill". The border *width* is fixed
+/// per pill (the resting state's), so a focus fade only recolors and never reflows.
+type Paint = (Color, f32, Color, Color);
+
+/// Linear rgba lerp — `Animation<bool>` only interpolates `f32`, so the view drives a
+/// scalar `t` and lerps each color channel by hand (RFC 0010 §2).
+fn lerp(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
 /// One workspace as a square, state-filled chip — state drives the *fill*, not width.
+/// `t ∈ [0,1]` is the eased focus-ness: `view` lerps between this pill's resting paint and
+/// its focused paint so the accent highlight cross-fades on a workspace switch (RFC 0010).
 fn chip<'a>(
     w: &'a Workspace,
     style: WsStyle,
     ctx: &Ctx,
     cell_w: f32,
     chip_h: f32,
+    t: f32,
 ) -> Element<'a, ModMsg> {
     let accent = ctx.accent();
     let fg = ctx.fg();
@@ -151,21 +228,30 @@ fn chip<'a>(
     let fs = ctx.theme.text_size;
     let radius: f32 = 0.0; // square identity
 
-    let focused = w.focused;
+    // Resting (non-focused) state of THIS pill, by its current flags. The focused flag is
+    // animated, so `visible` here is "visible on another output" (multi-monitor).
     let visible = w.visible && !w.focused;
     let urgent = w.urgent;
     let tint = |c: Color, a: f32| Color { a, ..c };
 
     if style == WsStyle::Underbar {
-        let (txt, bar_color) = if urgent {
+        // Underbar: a 2px bar (fixed height — no reflow) under centered text. Lerp the text
+        // and bar colors between resting and focused by `t`.
+        // Rest bar is accent-at-alpha-0, not `TRANSPARENT` ({0,0,0,0}): lerping from pure
+        // transparent-black would drag the rgb toward black mid-fade (a muddy, darkened
+        // lilac). Holding the accent rgb and animating only alpha reads as the bar cleanly
+        // materializing. Alpha-0 still renders nothing, so the resting look is unchanged.
+        let (rest_txt, rest_bar) = if urgent {
             (urg, urg)
-        } else if focused {
-            (fg, accent)
         } else if visible {
-            (fg, Color::TRANSPARENT)
+            (fg, tint(accent, 0.0))
         } else {
-            (dim, Color::TRANSPARENT)
+            (dim, tint(accent, 0.0))
         };
+        let (foc_txt, foc_bar) = if urgent { (urg, urg) } else { (fg, accent) };
+        let txt = lerp(rest_txt, foc_txt, t);
+        let bar_color = lerp(rest_bar, foc_bar, t);
+
         let label = container(text(w.name.clone()).size(fs).color(txt))
             .width(Length::Fixed(cell_w))
             .height(Length::Fill)
@@ -182,42 +268,62 @@ fn chip<'a>(
             .into();
     }
 
-    let (bg, bw, bc, txt): (Option<Color>, f32, Color, Color) = match style {
+    // The resting and focused paints for this style. `urgent` wins at both ends, so an
+    // urgent pill keeps its discrete red and doesn't fade (RFC 0010 §3.3).
+    let (rest, foc): (Paint, Paint) = match style {
         WsStyle::Filled => {
-            if urgent {
-                (Some(urg), 0.0, urg, base)
-            } else if focused {
-                (Some(accent), 0.0, accent, base)
+            let urgent_p = (urg, 0.0, urg, base);
+            let focused_p = if urgent { urgent_p } else { (accent, 0.0, accent, base) };
+            // accent-at-alpha-0 (not `TRANSPARENT`) so the fill fades in on-hue, not via
+            // darkened-toward-black; `bg.a > 0.001` still suppresses it at rest.
+            let rest = if urgent {
+                urgent_p
             } else if visible {
-                (None, 0.0, fg, fg)
+                (tint(accent, 0.0), 0.0, fg, fg)
             } else {
-                (None, 0.0, dim, dim)
-            }
+                (tint(accent, 0.0), 0.0, dim, dim)
+            };
+            (rest, focused_p)
         }
         WsStyle::Outlined => {
-            if urgent {
-                (None, 1.5, urg, urg)
-            } else if focused {
-                (None, 1.5, accent, accent)
-            } else if visible {
-                (None, 1.0, tint(fg, 0.35), fg)
+            let urgent_p = (Color::TRANSPARENT, 1.0, urg, urg);
+            let focused_p = if urgent {
+                urgent_p
             } else {
-                (None, 1.0, tint(fg, 0.12), dim)
-            }
+                (Color::TRANSPARENT, 1.0, accent, accent)
+            };
+            let rest = if urgent {
+                urgent_p
+            } else if visible {
+                (Color::TRANSPARENT, 1.0, tint(fg, 0.35), fg)
+            } else {
+                (Color::TRANSPARENT, 1.0, tint(fg, 0.12), dim)
+            };
+            (rest, focused_p)
         }
         // boxed (default): every ws a defined cell, tiered by state, hairline border.
         WsStyle::Boxed | WsStyle::Underbar => {
-            if urgent {
-                (Some(urg), 0.0, urg, base)
-            } else if focused {
-                (Some(accent), 0.0, accent, base)
+            let urgent_p = (urg, 1.0, urg, base);
+            let focused_p = if urgent { urgent_p } else { (accent, 1.0, accent, base) };
+            let rest = if urgent {
+                urgent_p
             } else if visible {
-                (Some(tint(accent, 0.28)), 1.0, tint(accent, 0.55), fg)
+                (tint(accent, 0.28), 1.0, tint(accent, 0.55), fg)
             } else {
-                (Some(tint(fg, 0.10)), 1.0, tint(fg, 0.16), tint(fg, 0.78))
-            }
+                (tint(fg, 0.10), 1.0, tint(fg, 0.16), tint(fg, 0.78))
+            };
+            (rest, focused_p)
         }
     };
+
+    // Fixed border width (the resting state's) so the fade only recolors — animating width
+    // would reflow/jitter every frame. Focused fill == focused border color, so the 1px
+    // border is an invisible seam at the focused end.
+    let bw = rest.1;
+    let bg = lerp(rest.0, foc.0, t);
+    let bc = lerp(rest.2, foc.2, t);
+    let txt = lerp(rest.3, foc.3, t);
+    let background = (bg.a > 0.001).then_some(Background::Color(bg));
 
     let inner = container(text(w.name.clone()).size(fs).color(txt))
         .width(Length::Fixed(cell_w))
@@ -225,7 +331,7 @@ fn chip<'a>(
         .align_x(Horizontal::Center)
         .align_y(Vertical::Center)
         .style(move |_| container::Style {
-            background: bg.map(Background::Color),
+            background,
             border: Border {
                 color: bc,
                 width: bw,

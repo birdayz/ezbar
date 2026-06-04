@@ -11,15 +11,17 @@ It's finishing those two things so the bar does what no other bar can: **feel al
 Each bet runs the drill: RFC → review (2 subagents) → implement → review → commit → merge.
 
 ### P0 — make it alive (start here)
-- [ ] **Pointer events → interactive plugins** — *RFC 0009 accepted (double-ACK); implementing.* The widget
-  DSL already has `mouse-area` and `events` already has `pointer-event`; the host just
-  never delivers them (and the lift drops the hit id). Route press/right-press/scroll/
-  enter/leave to the guest's `update(Event::Pointer{…})` through the reactor, under the
-  same timeout/epoch/trap bounds. Unlocks buttons, sliders, scroll-to-change. *Foundational.*
-- [ ] **Motion — one easing primitive.** The GPU's unused payoff and the r/unixporn
-  "what bar is *that*?". Eased value transitions, sliding/fading popups, smooth graph
-  scroll, hover micro-interactions, 60–120 fps — impossible on a cairo bar. Start with a
-  single host-applied animation primitive (value/opacity ease), then extend.
+- [x] **Pointer events → interactive plugins** — **DONE** (RFC 0009, merged `7e223d5`).
+  Host delivers press/right-press/scroll/enter/leave to the guest's `update(Event::Pointer)`
+  through the reactor, bounded by the cadence gate + WALL/epoch. Buttons + scroll-to-adjust
+  + hover. Drag/release deferred to an additive v0.2.0 WIT.
+- [x] **Motion — first eased transition** — **DONE** (RFC 0010). The GPU's unused payoff
+  and the r/unixporn "what bar is *that*?". On a workspace switch the active highlight
+  **cross-fades** (180 ms `EaseOutCubic`) from the old pill to the new instead of
+  hard-cutting — a thing a cairo/damage-repaint bar physically can't do. Per-pill
+  `iced::Animation<bool>` inside the `workspaces` module; frames requested **only while a
+  fade runs** (idle bar = zero extra redraws). Next motion targets: sliding/fading popups,
+  smooth graph scroll, hover micro-interactions — and eventually a plugin-authored tween.
 
 ### P1 — finish the platform
 - [ ] **Event-driven cadence (`set_timeout`)** — kill the 2 s blind poll (the one
