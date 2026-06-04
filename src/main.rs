@@ -126,6 +126,28 @@ fn main() -> iced_layershell::Result {
             }
             return Ok(());
         }
+        Some("update") => {
+            // `ezbar update [<id>] [--registry <dir|git-url>]` — re-install newest from source.
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let reg = args
+                .iter()
+                .position(|a| a == "--registry" || a == "-r")
+                .and_then(|i| args.get(i + 1).cloned())
+                .or_else(|| std::env::var("EZBAR_REGISTRY").ok());
+            let id = args
+                .iter()
+                .take_while(|a| *a != "--registry" && *a != "-r")
+                .find(|a| !a.starts_with('-'))
+                .cloned();
+            match registry::update(id.as_deref(), reg.as_deref()) {
+                Ok(s) => print!("{s}"),
+                Err(e) => {
+                    eprintln!("ezbar update: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
         Some("search") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             let registry = args
@@ -308,6 +330,7 @@ fn print_help() {
          ezbar search <q>   search a registry for plugins (--registry <dir|git-url>)\n    \
          ezbar list         list installed plugins + their consent state + declared caps\n    \
          ezbar add <id>     install a plugin from a registry dir (--registry <dir> or $EZBAR_REGISTRY)\n    \
+         ezbar update [id]  re-install newer versions of installed plugins from their source\n    \
          ezbar remove <id>  delete an installed plugin (and its consent record; not your config)\n    \
          ezbar inspect <f>  show what a plugin .wasm declares + the [modules.<id>] block to paste\n    \
          ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \

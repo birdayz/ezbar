@@ -138,6 +138,8 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
     } else {
         format!("publisher {}", picked.publisher)
     };
+    // Remember what we installed + from where, so `update` can re-fetch and `list` shows it.
+    let _ = record_installed(id, &picked.version, registry);
     // Print what to grant, from the just-installed artifact's embedded manifest (RFC 0014:
     // print, never auto-write). Falls back gracefully if it carries no manifest.
     let grants = ezbar::grants::inspect(&dest, id).unwrap_or_default();
@@ -146,6 +148,116 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
         picked.version,
         dest.display()
     ))
+}
+
+/// `ezbar update [<id>]` — re-install `<id>` (or every installed plugin) from the registry it
+/// came from when a newer in-WIT-window version exists; skip the ones already at the latest.
+/// `registry_override` (a `--registry`) wins over each plugin's recorded source. Reuses
+/// [`add`] for the actual install, so verify/grants/pin/record all apply.
+pub fn update(id: Option<&str>, registry_override: Option<&str>) -> Result<String, String> {
+    let ids: Vec<String> = match id {
+        Some(i) => vec![i.to_string()],
+        None => {
+            let dir = ezbar::config::plugins_dir().ok_or("no config dir")?;
+            ezbar_wasm::discover(&dir).into_iter().map(|(id, _)| id).collect()
+        }
+    };
+    if ids.is_empty() {
+        return Ok("no plugins installed".to_string());
+    }
+    let mut out = String::new();
+    for id in ids {
+        let recorded = installed_of(&id);
+        let source = registry_override
+            .map(String::from)
+            .or_else(|| recorded.as_ref().map(|(_, r)| r.clone()))
+            .filter(|s| !s.is_empty());
+        let Some(source) = source else {
+            out.push_str(&format!("{id}: unknown source — pass --registry to update\n"));
+            continue;
+        };
+        // Peek the registry's newest in-window version before re-installing.
+        let newest = (|| {
+            let root = resolve_registry(&source).ok()?;
+            let dir = root.join("plugins").join(&id);
+            let entries: Vec<Entry> = std::fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("toml"))
+                .filter_map(|p| std::fs::read_to_string(&p).ok())
+                .filter_map(|b| parse_entry(&b).ok())
+                .collect();
+            pick_in_window(&entries, SUPPORTED_WIT).map(|e| e.version.clone())
+        })();
+        let Some(newest) = newest else {
+            out.push_str(&format!("{id}: not found in {source}\n"));
+            continue;
+        };
+        let have = recorded.as_ref().map(|(v, _)| v.as_str()).unwrap_or("");
+        if !have.is_empty() && cmp_version(&newest, have) != Ordering::Greater {
+            out.push_str(&format!("{id}: already at latest ({have})\n"));
+            continue;
+        }
+        match add(&id, &source) {
+            Ok(_) => out.push_str(&format!("{id}: updated {have} → {newest}\n")),
+            Err(e) => out.push_str(&format!("{id}: update failed — {e}\n")),
+        }
+    }
+    Ok(out)
+}
+
+// ── install state: what `ezbar add` installed (version + source) ────────────
+/// `…/ezbar/installed.toml` (`[<id>] version, registry`) — so `ezbar update` re-fetches from
+/// the same place and skips already-latest, and `ezbar list` shows the installed version.
+fn installed_path() -> Option<PathBuf> {
+    Some(ezbar::config::path()?.with_file_name("installed.toml"))
+}
+
+fn load_installed() -> toml::value::Table {
+    installed_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|b| b.parse::<toml::Value>().ok())
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default()
+}
+
+fn save_installed(t: toml::value::Table) -> bool {
+    let Some(path) = installed_path() else { return false };
+    let body = format!(
+        "# ezbar installed-plugin state (version + source registry) — host-owned.\n\n{}",
+        toml::to_string(&toml::Value::Table(t)).unwrap_or_default()
+    );
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("toml.ezbar-tmp");
+    std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_ok()
+}
+
+/// The (version, source-registry) `ezbar add` recorded for `id`, if any.
+fn installed_of(id: &str) -> Option<(String, String)> {
+    let t = load_installed();
+    let e = t.get(id)?;
+    let get = |k: &str| e.get(k).and_then(|v| v.as_str()).map(String::from);
+    Some((get("version")?, get("registry").unwrap_or_default()))
+}
+
+fn record_installed(id: &str, version: &str, registry: &str) -> bool {
+    let mut t = load_installed();
+    let mut e = toml::value::Table::new();
+    e.insert("version".into(), toml::Value::String(version.to_string()));
+    e.insert("registry".into(), toml::Value::String(registry.to_string()));
+    t.insert(id.to_string(), toml::Value::Table(e));
+    save_installed(t)
+}
+
+fn forget_installed(id: &str) -> bool {
+    let mut t = load_installed();
+    if t.remove(id).is_none() {
+        return false;
+    }
+    save_installed(t)
 }
 
 // ── TOFU publisher-pin (RFC 0014 §6) ────────────────────────────────────────
@@ -365,7 +477,8 @@ pub fn list() -> Result<String, String> {
         let caps = ezbar_wasm::manifest::read_file(&path)
             .map(|m| ezbar::grants::cap_summary(&m))
             .unwrap_or_else(|| "no manifest".to_string());
-        out.push_str(&format!("{id:<16} {state:<38} {caps}\n"));
+        let ver = installed_of(&id).map(|(v, _)| v).unwrap_or_default();
+        out.push_str(&format!("{id:<16} {ver:<9} {state:<38} {caps}\n"));
     }
     Ok(out)
 }
@@ -383,6 +496,7 @@ pub fn remove(id: &str) -> Result<String, String> {
     std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
     let forgot = ezbar::grants::forget(id);
     let unpinned = unpin(id);
+    let _ = forget_installed(id);
     let cleaned = match (forgot, unpinned) {
         (true, true) => " and its consent + publisher records",
         (true, false) => " and its consent record",
