@@ -204,4 +204,29 @@ mod tests {
         // a stray close is a no-op and coalesces away
         assert_eq!(parse("x[/c]y"), vec![seg("xy", None, false)]);
     }
+
+    #[test]
+    fn view_builds_every_path_without_panicking() {
+        // Exercise the render side (not just the parser): a `view` panic isn't contained,
+        // so make sure the rich_text/span build runs for styled, plain, and unknown-token
+        // input against a real `Ctx`.
+        use ezbar_plugin::iced::Element;
+        use ezbar_plugin::{Ctx, ModMsg, ThemeTokens};
+        let theme = ThemeTokens {
+            fg: [1.0; 4],
+            fg_dim: [0.6, 0.6, 0.6, 1.0],
+            urgent: [1.0, 0.0, 0.0, 1.0],
+            warn: [1.0, 0.8, 0.0, 1.0],
+            ok: [0.0, 1.0, 0.0, 1.0],
+            accent: [0.5, 0.3, 0.9, 1.0],
+            sep: [0.3; 4],
+            bg: [0.1, 0.1, 0.1, 1.0],
+            text_size: 13.0,
+            bar_height: 28,
+        };
+        let ctx = Ctx { instance_id: 0, theme: &theme };
+        let _styled: Element<'_, ModMsg> = super::view("net [c=urgent]down[/c] [b]!!![/b]", &ctx);
+        let _plain: Element<'_, ModMsg> = super::view("just text", &ctx);
+        let _unknown: Element<'_, ModMsg> = super::view("[c=nope]x[/c]", &ctx); // unknown token → builds, no colour
+    }
 }
