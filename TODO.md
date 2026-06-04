@@ -204,8 +204,10 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   WASM-only bug. Factored into `with_pill_hover(group, widgets)`, now called from BOTH branches.
   (Note: the layershellev `mouse hasn't entered` seat warnings seen while chasing this were a
   red herring — built-in hover worked throughout.) (`main.rs:bar_view`, `with_pill_hover`)
-- [ ] **LOW** — Module instance ids restart at 1 on rebuild (harmless per review, but
-  identity isn't stable across reorders).
+- [x] **LOW** — Module instance identity **is** stable — RESOLVED (was stale). Instance ids
+  are `stable_id(key)` = a hash of the placement **key** (RFC 0004), so a rebuild/reorder keeps
+  each instance's id (hence its state + subscriptions) — independent of zone and order. Covered
+  by `stable_id_is_deterministic_and_distinct`. (`main.rs:stable_id`)
 
 ## Tier-B desktop stack (RFC 0003 — "expensive, demand-gated")
 
