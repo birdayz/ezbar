@@ -55,7 +55,10 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
 - [x] Cache eviction sweep — **DONE**. After publishing a fresh `.cwasm` (a plugin rebuilt),
   evict the oldest beyond a 24-artifact cap (`sweep_cache`), so the cache can't grow one
   ~MB file per rebuild forever. Self-healing: an evicted-but-active artifact recompiles once.
-- [ ] Capability matcher: normalize host/port/case (no naive string equality).
+- [x] Capability matcher — **DONE**. `host_matches` normalizes case (DNS is
+  case-insensitive) and treats a port-less grant as authorizing any port, while a
+  `:port`-pinned grant must match exactly. Replaces the naive `grant == host` that rejected
+  `API.Example.com` or an explicit `:443`. No implicit subdomain match (security). Tested.
 
 ### Anti-goals (the Linus part)
 No chasing waybar's module count. No config knobs for zero users. Every hour on a

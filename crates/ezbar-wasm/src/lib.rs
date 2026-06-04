@@ -149,9 +149,10 @@ impl ezbar::plugin::host::Host for Host {
         }
     }
     async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        // host[:port] authority, after the scheme and before the path/query.
         let h = url.split("://").nth(1).unwrap_or(&url);
-        let h = h.split('/').next().unwrap_or(h);
-        if !self.granted_network.iter().any(|g| g == h) {
+        let h = h.split(['/', '?', '#']).next().unwrap_or(h);
+        if !self.granted_network.iter().any(|g| host_matches(g, h)) {
             return Err(format!("capability denied: network host '{h}' not granted"));
         }
         // Async fetch: this `await` suspends the guest's fiber, freeing the reactor
@@ -1018,6 +1019,24 @@ fn cache_dir() -> Option<PathBuf> {
     Some(base.join("ezbar").join("wasm"))
 }
 
+/// Does a `[modules.<id>].network` grant authorize requests to `url_host` (the
+/// `host[:port]` lifted from the URL)? Case-insensitive (DNS is); a port-less grant
+/// authorizes the host on any port, while a grant that pins a `:port` must match exactly.
+/// Replaces the old naive `grant == url_host`, which rejected `API.Example.com` or an
+/// explicit `:443` against an `example.com` grant.
+fn host_matches(grant: &str, url_host: &str) -> bool {
+    let g = grant.trim().to_ascii_lowercase();
+    let h = url_host.trim().to_ascii_lowercase();
+    if g.is_empty() {
+        return false;
+    }
+    if g.contains(':') {
+        g == h // grant pins a port → exact host:port
+    } else {
+        h.split(':').next() == Some(g.as_str()) // host-only grant → any port
+    }
+}
+
 fn hash64(bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1465,4 +1484,31 @@ pub fn discover(dir: &Path) -> Vec<(String, PathBuf)> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_matches;
+
+    #[test]
+    fn host_grant_is_case_insensitive_and_port_agnostic() {
+        assert!(host_matches("api.open-meteo.com", "api.open-meteo.com"));
+        assert!(host_matches("API.Open-Meteo.com", "api.open-meteo.com")); // case
+        assert!(host_matches("api.open-meteo.com", "api.open-meteo.com:443")); // any port
+        assert!(host_matches(" api.open-meteo.com ", "api.open-meteo.com")); // trimmed
+    }
+
+    #[test]
+    fn port_pinned_grant_matches_exactly() {
+        assert!(host_matches("example.com:8080", "example.com:8080"));
+        assert!(!host_matches("example.com:8080", "example.com:9090"));
+        assert!(!host_matches("example.com:8080", "example.com")); // pinned port required
+    }
+
+    #[test]
+    fn unrelated_host_or_empty_grant_is_denied() {
+        assert!(!host_matches("example.com", "evil.com"));
+        assert!(!host_matches("example.com", "sub.example.com")); // no implicit subdomain
+        assert!(!host_matches("", "example.com"));
+    }
 }
