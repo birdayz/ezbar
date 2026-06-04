@@ -67,6 +67,9 @@ use ezbar_plugin::iced::mouse::ScrollDelta;
 /// the injected [`set_feed_sampler`] closure against it.
 pub use ezbar::plugin::types::FeedKind;
 
+/// The `ezbar:manifest` capability-declaration reader (RFC 0014 Phase A).
+pub mod manifest;
+
 // resource bounds (RFC 0006 §1a / RFC 0008: fixed constants)
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 const DEADLINE_TICKS: u64 = 20; // ~200ms guest CPU before a cooperative epoch yield

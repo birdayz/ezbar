@@ -22,6 +22,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # `time` for the per-call wall-clock backstop + POLL, `rt` for spawn_blocking compiles,
 # `sync` for the GUI→drive-task pointer-event channel (RFC 0009).
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+wasmparser = "0.248"
+toml = "0.8"
 
 # `examples/preview.rs` renders a `.wasm` plugin in the real themed harness window
 # (same loop the bar uses) — a dev-only render-preview, kept out of the bar build.

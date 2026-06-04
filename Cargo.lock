@@ -1468,6 +1468,8 @@ dependencies = [
  "log",
  "reqwest",
  "tokio",
+ "toml 0.8.23",
+ "wasmparser 0.248.0",
  "wasmtime",
  "wasmtime-wasi",
 ]

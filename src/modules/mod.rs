@@ -71,6 +71,39 @@ fn feed_grants(cfg: &toml::Value) -> Vec<String> {
     string_or_array(cfg, "feeds")
 }
 
+/// Warn for each capability a plugin's embedded `ezbar:manifest` *declares* but the user
+/// did not *grant* in `[modules.<id>]` (RFC 0014 Phase A). The manifest is only a
+/// declaration — enforcement is still the per-call host checks — so this never blocks a
+/// load; it just turns a silently-inert widget into a logged, actionable diagnostic. A
+/// plugin with no manifest (the common case today) produces nothing.
+fn warn_undeclared_grants(id: &str, path: &Path, net: &[String], feeds: &[String], sway: bool) {
+    let Some(m) = ezbar_wasm::manifest::read_file(path) else {
+        return;
+    };
+    for h in &m.network {
+        if !net.iter().any(|g| g.eq_ignore_ascii_case(h)) {
+            log::warn!(
+                "plugin '{id}' declares it needs network host {h:?}, but it isn't in \
+                 [modules.{id}].network — requests there will be denied"
+            );
+        }
+    }
+    for f in &m.feeds {
+        if !feeds.iter().any(|g| g == f) {
+            log::warn!(
+                "plugin '{id}' declares it needs feed {f:?}, but it isn't in \
+                 [modules.{id}].feeds — it won't receive that metric"
+            );
+        }
+    }
+    if m.sway && !sway {
+        log::warn!(
+            "plugin '{id}' declares it needs sway, but [modules.{id}].sway isn't set — \
+             sway-snapshot will be denied"
+        );
+    }
+}
+
 /// A `[modules.<id>].<key>` value that is either a single string or an array of strings.
 fn string_or_array(cfg: &toml::Value, key: &str) -> Vec<String> {
     match cfg.get(key) {
@@ -246,11 +279,18 @@ pub fn build(
             // not its id. A binary the user never consented to (a same-named swap) inherits
             // nothing — it runs fully sandboxed until re-approved with `ezbar grant <id>`.
             let (net, feeds, sway) = match crate::grants::decide(other, &path) {
-                crate::grants::Decision::Granted => (
-                    network_grants(cfg), // `[modules.<id>].network`
-                    feed_grants(cfg),    // `[modules.<id>].feeds` (RFC 0012)
-                    cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // RFC 0013
-                ),
+                crate::grants::Decision::Granted => {
+                    let g = (
+                        network_grants(cfg), // `[modules.<id>].network`
+                        feed_grants(cfg),    // `[modules.<id>].feeds` (RFC 0012)
+                        cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // RFC 0013
+                    );
+                    // RFC 0014 Phase A: if the plugin's embedded `ezbar:manifest` DECLARES a
+                    // capability the user didn't grant, say so — an ungranted-and-therefore-
+                    // silent widget then explains itself instead of failing mute.
+                    warn_undeclared_grants(other, &path, &g.0, &g.1, g.2);
+                    g
+                }
                 // The on-disk bytes don't match the consented hash — withhold every cap.
                 crate::grants::Decision::Withheld => (Vec::new(), Vec::new(), false),
             };
