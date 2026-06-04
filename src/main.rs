@@ -492,6 +492,30 @@ fn desired_outputs(cfg: &Config) -> Vec<OutputInfo> {
         .collect()
 }
 
+/// The pure output-churn decision (RFC 0004): given the `desired` output names and the
+/// currently-`tracked` `(output, surface-id)` pairs, return `(close, create)` — the surface
+/// ids to close (their output is gone or de-selected) and the output names that need a new
+/// surface (desired but untracked). **Dedups**: an output already tracked, or listed twice in
+/// `desired`, yields at most ONE surface — the guard against the "two-bars saga" (a duplicate
+/// bar stacked on one output). Generic over the id type so it unit-tests without `window::Id`.
+fn plan_surfaces<Id: Copy>(desired: &[String], tracked: &[(String, Id)]) -> (Vec<Id>, Vec<String>) {
+    use std::collections::HashSet;
+    let desired_set: HashSet<&str> = desired.iter().map(String::as_str).collect();
+    let tracked_set: HashSet<&str> = tracked.iter().map(|(n, _)| n.as_str()).collect();
+    let close = tracked
+        .iter()
+        .filter(|(n, _)| !desired_set.contains(n.as_str()))
+        .map(|(_, id)| *id)
+        .collect();
+    let mut seen = HashSet::new();
+    let create = desired
+        .iter()
+        .filter(|n| !tracked_set.contains(n.as_str()) && seen.insert(n.as_str()))
+        .cloned()
+        .collect();
+    (close, create)
+}
+
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
@@ -1679,42 +1703,37 @@ impl Bar {
         );
         let mut tasks = Vec::new();
 
+        // The pure close/create decision (deduped against the two-bars saga).
+        let desired_list: Vec<String> = desired.iter().map(|o| o.name.clone()).collect();
+        let tracked: Vec<(String, window::Id)> =
+            self.bars.iter().map(|b| (b.output.clone(), b.id)).collect();
+        let (to_close, to_create) = plan_surfaces(&desired_list, &tracked);
+
         // Close surfaces whose output is gone or de-selected.
-        let mut kept = Vec::with_capacity(self.bars.len());
-        let mut closed_any = false;
-        for b in self.bars.drain(..) {
-            if desired_names.contains(b.output.as_str()) {
-                kept.push(b);
-            } else {
-                log::info!(
-                    "reconcile: CLOSE {:?} (output {} de-selected)",
-                    b.id,
-                    b.output
-                );
-                tasks.push(iced::window::close(b.id));
-                closed_any = true;
+        let closed_any = !to_close.is_empty();
+        for id in &to_close {
+            log::info!("reconcile: CLOSE {id:?} (output de-selected)");
+            tasks.push(iced::window::close(*id));
+        }
+        self.bars.retain(|b| !to_close.contains(&b.id));
+
+        // Refresh widths of surviving surfaces against the live output geometry.
+        for o in &desired {
+            if let Some(b) = self.bars.iter_mut().find(|b| b.output == o.name) {
+                b.width = o.width;
             }
         }
-        self.bars = kept;
 
-        // Open surfaces for newly-matching outputs; refresh widths of kept ones.
-        for o in desired {
-            match self.bars.iter_mut().find(|b| b.output == o.name) {
-                Some(b) => b.width = o.width,
-                None => {
-                    let id = window::Id::unique();
-                    log::info!("reconcile: CREATE {id:?} for output {}", o.name);
-                    tasks.push(Task::done(Message::NewLayerShell {
-                        settings: bar_settings(&self.config, self.bar_pos, &o.name),
-                        id,
-                    }));
-                    self.bars.push(BarSurface {
-                        id,
-                        output: o.name,
-                        width: o.width,
-                    });
-                }
-            }
+        // Open surfaces for newly-matching outputs.
+        for name in to_create {
+            let width = desired.iter().find(|o| o.name == name).map_or(1920, |o| o.width);
+            let id = window::Id::unique();
+            log::info!("reconcile: CREATE {id:?} for output {name}");
+            tasks.push(Task::done(Message::NewLayerShell {
+                settings: bar_settings(&self.config, self.bar_pos, &name),
+                id,
+            }));
+            self.bars.push(BarSurface { id, output: name, width });
         }
 
         // If the cursor's output no longer has a bar, forget it (so popups don't
@@ -2053,6 +2072,33 @@ mod tests {
 
     fn keys(cfg: &Config) -> Vec<String> {
         desired_module_specs(cfg).into_iter().map(|s| s.key).collect()
+    }
+
+    // ── output-churn reconcile (RFC 0004) — the regression harness for the two-bars saga ──
+    fn plan(desired: &[&str], tracked: &[(&str, u32)]) -> (Vec<u32>, Vec<String>) {
+        let d: Vec<String> = desired.iter().map(|s| s.to_string()).collect();
+        let t: Vec<(String, u32)> = tracked.iter().map(|(n, i)| (n.to_string(), *i)).collect();
+        plan_surfaces(&d, &t)
+    }
+
+    #[test]
+    fn churn_creates_appearing_outputs_and_closes_gone_ones() {
+        // new output B appears next to a tracked A
+        assert_eq!(plan(&["DP-1", "DP-2"], &[("DP-1", 1)]), (vec![], vec!["DP-2".into()]));
+        // an output goes away → its surface closes
+        assert_eq!(plan(&["DP-1"], &[("DP-1", 1), ("DP-2", 2)]), (vec![2], vec![]));
+        // hot-swap: A leaves as B arrives
+        assert_eq!(plan(&["DP-2"], &[("DP-1", 1)]), (vec![1], vec!["DP-2".into()]));
+        // steady state: nothing to do (idempotent — no churn out for unchanged in)
+        assert_eq!(plan(&["DP-1"], &[("DP-1", 1)]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn churn_never_stacks_a_duplicate_bar() {
+        // the two-bars saga: the same output listed twice must create ONE surface, not two
+        assert_eq!(plan(&["DP-1", "DP-1"], &[]), (vec![], vec!["DP-1".into()]));
+        // and never a second surface for an already-tracked output (even if double-listed)
+        assert_eq!(plan(&["DP-1", "DP-1"], &[("DP-1", 1)]), (vec![], vec![]));
     }
 
     #[test]
