@@ -804,6 +804,32 @@ pub fn load() -> Config {
 mod tests {
     use super::*;
 
+    fn toml(s: &str) -> toml::Value {
+        s.parse::<toml::Value>().unwrap()
+    }
+
+    #[test]
+    fn merge_module_config_overrides_and_deep_merges() {
+        // shared `[modules.<id>]` defaults overlaid by an instance's inline config.
+        let defaults = toml("interval = 2\n[graph]\nline_color = \"accent\"\nheight = 16");
+        let inline = toml("interval = 5\n[graph]\nheight = 24");
+        let merged = merge_module_config(Some(&defaults), &inline);
+        let t = merged.as_table().unwrap();
+        // a scalar is overwritten by the inline value…
+        assert_eq!(t["interval"].as_integer(), Some(5));
+        // …and a nested table DEEP-merges: inline's `height` wins, shared's `line_color`
+        // survives (a naive overwrite would drop it — the bug this guards).
+        let g = t["graph"].as_table().unwrap();
+        assert_eq!(g["height"].as_integer(), Some(24));
+        assert_eq!(g["line_color"].as_str(), Some("accent"));
+    }
+
+    #[test]
+    fn merge_module_config_with_no_defaults_is_just_inline() {
+        let merged = merge_module_config(None, &toml("x = 1"));
+        assert_eq!(merged.as_table().unwrap()["x"].as_integer(), Some(1));
+    }
+
     #[test]
     fn color_parses_hex_forms() {
         assert_eq!(Color::parse("#ffffff"), Some(Color([1.0, 1.0, 1.0, 1.0])));
