@@ -163,6 +163,25 @@ cargo run --example harness -- github          # preview a built-in module
 Guide: [`.claude/skills/ezbar-plugin-author/SKILL.md`](.claude/skills/ezbar-plugin-author/SKILL.md).
 Design: [`rfcs/0001-pluggable-modules.md`](rfcs/0001-pluggable-modules.md).
 
+## WASM plugins & capability safety
+
+Drop a `.wasm` (built against the [WASM SDK](.claude/skills/ezbar-wasm-plugin-author/SKILL.md))
+in `~/.config/ezbar/plugins/` and it's placeable by its filename. A plugin is sandboxed
+(wasmtime); the only things it can do are **read-only and user-granted** in
+`[modules.<id>]` — `network` (an HTTP-GET host allow-list), `feeds` (cpu/memory/…), and
+`sway` (read-only workspace/title). Nothing else: no fs, no exec, no driving the bar.
+
+Consent is bound to the plugin's **content hash**, not its name (RFC 0014), so a swapped
+binary can't inherit a grant:
+
+```sh
+ezbar grant <id>            # approve the plugin's current bytes (re-run after a rebuild/update)
+ezbar package my.wasm       # author: embed an ezbar:manifest (declared caps) + print the registry entry
+```
+
+A plugin's embedded manifest only *declares* what it needs; the host warns if it declares
+a capability you didn't grant. Design: [`rfcs/0014-plugin-registry.md`](rfcs/0014-plugin-registry.md).
+
 ## Layout
 
 ```
