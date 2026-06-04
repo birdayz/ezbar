@@ -21,7 +21,7 @@ use tokio::runtime::Handle;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::add_to_linker_async;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use ezbar_plugin::iced::advanced::subscription::{from_recipe, EventStream, Hasher, Recipe};
 use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
@@ -69,6 +69,17 @@ pub use ezbar::plugin::types::FeedKind;
 
 /// The `ezbar:manifest` capability-declaration reader (RFC 0014 Phase A).
 pub mod manifest;
+
+/// A granted directory (the `fs` capability). `host_path` is preopened into the guest's WASI
+/// filesystem at `guest_path`, so the plugin uses normal `std::fs` there — WASI enforces the
+/// jail (no ambient authority, no `..`/symlink escape). Writable iff `write` (else read-only).
+/// Default-deny: a plugin with no `FsGrant`s sees no filesystem at all.
+#[derive(Clone, Debug)]
+pub struct FsGrant {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub write: bool,
+}
 
 // resource bounds (RFC 0006 §1a / RFC 0008: fixed constants)
 const EPOCH_TICK: Duration = Duration::from_millis(10);
@@ -811,6 +822,7 @@ impl Reactor {
         grants: Vec<String>,
         grants_feeds: Vec<String>,
         grant_sway: bool,
+        grants_fs: Vec<FsGrant>,
         token: u64,
         slot: Slot,
         input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -823,6 +835,7 @@ impl Reactor {
                     grants,
                     grants_feeds,
                     grant_sway,
+                    grants_fs,
                     token,
                     slot,
                     input,
@@ -842,6 +855,7 @@ impl Reactor {
         grants: Vec<String>,
         grants_feeds: Vec<String>,
         grant_sway: bool,
+        grants_fs: Vec<FsGrant>,
         token: u64,
         slot: Slot,
         mut input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -855,11 +869,12 @@ impl Reactor {
                 .await
                 .context("compile task join")??
         };
+        let wasi = build_wasi(&grants_fs);
         let mut store = Store::new(
             &self.engine,
             Host {
                 table: ResourceTable::new(),
-                wasi: WasiCtxBuilder::new().build(),
+                wasi,
                 limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
                 granted_network: grants,
                 client: self.client.clone(),
@@ -1135,6 +1150,36 @@ async fn step(store: &mut Store<Host>, plugin: &DrivenPlugin, slot: &Slot, event
 // not per-instance private-dirty. This is the lever that takes the per-plugin floor
 // from the JIT-code-dominated ~17 MB down toward the linear-memory floor.
 
+/// Build the guest's `WasiCtx` with exactly the granted directories preopened (the `fs`
+/// capability). An empty grant list ⇒ no filesystem at all (default-deny). WASI does the
+/// scoping: the guest can only touch what's preopened, with no `..`/symlink escape, and write
+/// only where `write` is set. A directory that doesn't exist is skipped (logged), not fatal.
+fn build_wasi(fs: &[FsGrant]) -> WasiCtx {
+    let mut b = WasiCtxBuilder::new();
+    for g in fs {
+        let (dir, file) = if g.write {
+            (DirPerms::all(), FilePerms::all())
+        } else {
+            (DirPerms::READ, FilePerms::READ)
+        };
+        if let Err(e) = b.preopened_dir(&g.host_path, &g.guest_path, dir, file) {
+            log::warn!(
+                "ezbar-wasm: fs grant {:?} -> {} skipped: {e}",
+                g.host_path,
+                g.guest_path
+            );
+        } else {
+            log::info!(
+                "ezbar-wasm: fs grant {:?} -> {} ({})",
+                g.host_path,
+                g.guest_path,
+                if g.write { "rw" } else { "ro" }
+            );
+        }
+    }
+    b.build()
+}
+
 /// Load `path` as a component, preferring a cached compiled artifact (mmap'd) and
 /// falling back to a fresh compile that is then cached. Blocking — run on the pool.
 fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
@@ -1294,6 +1339,7 @@ impl WasmModule {
         grants: Vec<String>,
         grants_feeds: Vec<String>,
         grant_sway: bool,
+        grants_fs: Vec<FsGrant>,
     ) -> Self {
         let slot: Slot = Arc::new(Shared {
             slots: Mutex::new(Slots::default()),
@@ -1306,6 +1352,7 @@ impl WasmModule {
             grants,
             grants_feeds,
             grant_sway,
+            grants_fs,
             instance, // feed-subscription token
             slot.clone(),
             rx,

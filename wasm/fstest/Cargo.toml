@@ -1,0 +1,17 @@
+[package]
+name = "fstest"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar WASM plugin: show the first line of a file, read via the fs capability."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

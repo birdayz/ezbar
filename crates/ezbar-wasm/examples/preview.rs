@@ -35,6 +35,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let mut grants: Vec<String> = Vec::new();
     let mut grants_feeds: Vec<String> = Vec::new();
     let mut grant_sway = false;
+    let mut grants_fs: Vec<ezbar_wasm::FsGrant> = Vec::new();
     let mut config: Vec<(String, String)> = Vec::new();
     let mut check = false;
 
@@ -49,6 +50,24 @@ fn main() -> ezbar_plugin::iced::Result {
                 None => fail("--feed needs a kind, e.g. --feed cpu"),
             },
             "--sway" => grant_sway = true,
+            // --fs <hostpath>[:<guestmount>][:rw]   (mount defaults to /<basename>, ro)
+            "--fs" => match args.next() {
+                Some(spec) => {
+                    let mut it = spec.split(':');
+                    let host = it.next().unwrap_or("");
+                    let host_path = PathBuf::from(host);
+                    let guest_path = match it.next().filter(|s| !s.is_empty()) {
+                        Some(g) => g.to_string(),
+                        None => format!(
+                            "/{}",
+                            host_path.file_name().and_then(|s| s.to_str()).unwrap_or("dir")
+                        ),
+                    };
+                    let write = it.next() == Some("rw");
+                    grants_fs.push(ezbar_wasm::FsGrant { host_path, guest_path, write });
+                }
+                None => fail("--fs needs <hostpath>[:<guestmount>][:rw]"),
+            },
             "--set" => match args.next() {
                 Some(kv) => match kv.split_once('=') {
                     Some((k, v)) => config.push((k.to_string(), v.to_string())),
@@ -119,6 +138,7 @@ fn main() -> ezbar_plugin::iced::Result {
         grants,
         grants_feeds,
         grant_sway,
+        grants_fs,
     );
 
     // Headless smoke test: drive the plugin briefly and report what it rendered.

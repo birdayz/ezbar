@@ -71,6 +71,45 @@ fn feed_grants(cfg: &toml::Value) -> Vec<String> {
     string_or_array(cfg, "feeds")
 }
 
+/// Granted directories for a plugin, from `[modules.<id>].fs` — a list of
+/// `{ path = "~/dir", mode = "r"|"rw", at = "/mount" }`. `path` is `~`-expanded; `mode`
+/// defaults to read-only; `at` (the guest mount point) defaults to `/<basename>`. The WASM
+/// tier preopens these into the guest's WASI filesystem (the fs capability tier).
+fn fs_grants(cfg: &toml::Value) -> Vec<ezbar_wasm::FsGrant> {
+    let Some(arr) = cfg.get("fs").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|it| {
+            let host_path = expand_tilde(it.get("path")?.as_str()?);
+            let write = it
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case("rw") || m.eq_ignore_ascii_case("w"));
+            let guest_path = it
+                .get("at")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    let base = host_path.file_name().and_then(|s| s.to_str()).unwrap_or("dir");
+                    format!("/{base}")
+                });
+            Some(ezbar_wasm::FsGrant { host_path, guest_path, write })
+        })
+        .collect()
+}
+
+/// Expand a leading `~/` against `$HOME`; leave everything else verbatim.
+fn expand_tilde(p: &str) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(p),
+        },
+        None => PathBuf::from(p),
+    }
+}
+
 /// Warn for each capability a plugin's embedded `ezbar:manifest` *declares* but the user
 /// did not *grant* in `[modules.<id>]` (RFC 0014 Phase A). The manifest is only a
 /// declaration — enforcement is still the per-call host checks — so this never blocks a
@@ -278,12 +317,13 @@ pub fn build(
             // RFC 0014 Phase A: bind the capability grant to the artifact's *content hash*,
             // not its id. A binary the user never consented to (a same-named swap) inherits
             // nothing — it runs fully sandboxed until re-approved with `ezbar grant <id>`.
-            let (net, feeds, sway) = match crate::grants::decide(other, &path) {
+            let (net, feeds, sway, fs) = match crate::grants::decide(other, &path) {
                 crate::grants::Decision::Granted => {
                     let g = (
-                        network_grants(cfg), // `[modules.<id>].network`
-                        feed_grants(cfg),    // `[modules.<id>].feeds` (RFC 0012)
-                        cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // RFC 0013
+                        network_grants(cfg),                                       // `[modules.<id>].network`
+                        feed_grants(cfg),                                          // `.feeds` (RFC 0012)
+                        cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // `.sway` (RFC 0013)
+                        fs_grants(cfg),                                            // `.fs` (the fs tier)
                     );
                     // RFC 0014 Phase A: if the plugin's embedded `ezbar:manifest` DECLARES a
                     // capability the user didn't grant, say so — an ungranted-and-therefore-
@@ -292,7 +332,7 @@ pub fn build(
                     g
                 }
                 // The on-disk bytes don't match the consented hash — withhold every cap.
-                crate::grants::Decision::Withheld => (Vec::new(), Vec::new(), false),
+                crate::grants::Decision::Withheld => (Vec::new(), Vec::new(), false, Vec::new()),
             };
             let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
                 rt.clone(),
@@ -303,6 +343,7 @@ pub fn build(
                 net,
                 feeds,
                 sway,
+                fs,
             ));
             m
         }),
@@ -315,6 +356,22 @@ mod tests {
 
     fn tbl(s: &str) -> toml::Value {
         s.parse::<toml::Value>().unwrap()
+    }
+
+    #[test]
+    fn fs_grants_parse_path_mode_and_mount() {
+        // explicit mount + rw
+        let g = fs_grants(&tbl("fs = [{ path = \"/etc\", at = \"/etc-ro\", mode = \"rw\" }]"));
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].host_path, std::path::PathBuf::from("/etc"));
+        assert_eq!(g[0].guest_path, "/etc-ro");
+        assert!(g[0].write);
+        // default mode = read-only, default mount = /<basename>
+        let g = fs_grants(&tbl("fs = [{ path = \"/var/log\" }]"));
+        assert_eq!(g[0].guest_path, "/log");
+        assert!(!g[0].write);
+        // no fs key → no grants (default-deny)
+        assert!(fs_grants(&tbl("")).is_empty());
     }
 
     #[test]
