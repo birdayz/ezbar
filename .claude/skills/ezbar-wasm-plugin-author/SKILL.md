@@ -206,6 +206,7 @@ sway = false
 
 ```sh
 ezbar package weather.wasm        # embeds ezbar:manifest, prints the registry entry + sha256
+ezbar inspect weather.wasm        # verify: prints the declared caps + the grant block users paste
 ```
 
 The host **reads** the embedded manifest at load: if your plugin declares a capability the
