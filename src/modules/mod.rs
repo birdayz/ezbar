@@ -170,12 +170,21 @@ fn expand_tilde(p: &str) -> PathBuf {
 /// declaration — enforcement is still the per-call host checks — so this never blocks a
 /// load; it just turns a silently-inert widget into a logged, actionable diagnostic. A
 /// plugin with no manifest (the common case today) produces nothing.
-fn warn_undeclared_grants(id: &str, path: &Path, net: &[String], feeds: &[String], sway: bool) {
+#[allow(clippy::too_many_arguments)]
+fn warn_undeclared_grants(
+    id: &str,
+    path: &Path,
+    net: &[String],
+    feeds: &[String],
+    sway: bool,
+    fs: &[ezbar_wasm::FsGrant],
+    exec: &[String],
+) {
     let Some(m) = ezbar_wasm::manifest::read_file(path) else {
         return;
     };
     for h in &m.network {
-        if !net.iter().any(|g| g.eq_ignore_ascii_case(h)) {
+        if !net.iter().any(|g| g == "*" || g.eq_ignore_ascii_case(h)) {
             log::warn!(
                 "plugin '{id}' declares it needs network host {h:?}, but it isn't in \
                  [modules.{id}].network — requests there will be denied"
@@ -183,7 +192,7 @@ fn warn_undeclared_grants(id: &str, path: &Path, net: &[String], feeds: &[String
         }
     }
     for f in &m.feeds {
-        if !feeds.iter().any(|g| g == f) {
+        if !feeds.iter().any(|g| g == "*" || g == f) {
             log::warn!(
                 "plugin '{id}' declares it needs feed {f:?}, but it isn't in \
                  [modules.{id}].feeds — it won't receive that metric"
@@ -195,6 +204,23 @@ fn warn_undeclared_grants(id: &str, path: &Path, net: &[String], feeds: &[String
             "plugin '{id}' declares it needs sway, but [modules.{id}].sway isn't set — \
              sway-snapshot will be denied"
         );
+    }
+    // Dangerous tier (RFC 0015): declared fs/exec the user didn't grant. Loud — these are
+    // the powerful ones, and a fetched plugin should never get them silently.
+    if !m.fs.is_empty() && fs.is_empty() {
+        log::warn!(
+            "plugin '{id}' declares it needs filesystem access ({:?}), but [modules.{id}].fs \
+             is unset — file reads will be denied (DANGEROUS tier; grant by hand)",
+            m.fs
+        );
+    }
+    for p in &m.exec {
+        if !exec.iter().any(|g| g == "*" || g == p) {
+            log::warn!(
+                "plugin '{id}' declares it needs to run {p:?}, but it isn't in \
+                 [modules.{id}].exec — exec will be denied (DANGEROUS tier; grant by hand)"
+            );
+        }
     }
 }
 
@@ -388,7 +414,7 @@ pub fn build(
                     // RFC 0014 Phase A: if the plugin's embedded `ezbar:manifest` DECLARES a
                     // capability the user didn't grant, say so — an ungranted-and-therefore-
                     // silent widget then explains itself instead of failing mute.
-                    warn_undeclared_grants(other, &path, &g.0, &g.1, g.2);
+                    warn_undeclared_grants(other, &path, &g.0, &g.1, g.2, &g.3, &g.4);
                     g
                 }
                 // The on-disk bytes don't match the consented hash — withhold every cap.

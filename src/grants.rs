@@ -234,6 +234,19 @@ pub fn grant_block(id: &str, m: &ezbar_wasm::manifest::Manifest) -> String {
     if m.sway {
         s.push_str("sway = true\n");
     }
+    if !m.fs.is_empty() {
+        // fs needs a mode the manifest doesn't pin — emit a read-only template to edit.
+        let entries = m
+            .fs
+            .iter()
+            .map(|p| format!("{{ path = {p:?}, mode = \"r\" }}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("fs = [{entries}]   # DANGEROUS — review; set mode = \"rw\" if needed\n"));
+    }
+    if !m.exec.is_empty() {
+        s.push_str(&format!("exec = [{}]   # DANGEROUS — runs these programs\n", join(&m.exec)));
+    }
     s
 }
 
@@ -308,6 +321,12 @@ pub fn cap_summary(m: &ezbar_wasm::manifest::Manifest) -> String {
     if m.sway {
         parts.push("sway (read-only)".to_string());
     }
+    if !m.fs.is_empty() {
+        parts.push(format!("\u{26a0} fs: {}", m.fs.join(", "))); // ⚠ dangerous tier
+    }
+    if !m.exec.is_empty() {
+        parts.push(format!("\u{26a0} exec: {}", m.exec.join(", ")));
+    }
     if parts.is_empty() {
         "no capabilities".to_string()
     } else {
@@ -354,8 +373,8 @@ mod tests {
         use ezbar_wasm::manifest::Manifest;
         let m = Manifest {
             network: vec!["api.open-meteo.com".into(), "wttr.in".into()],
-            feeds: vec![],
             sway: true,
+            ..Default::default()
         };
         let block = grant_block("weather", &m);
         assert_eq!(

@@ -20,12 +20,18 @@
 use std::path::Path;
 
 /// The capabilities a plugin declares it needs. Mirrors the `[modules.<id>]` grant keys
-/// (`network` / `feeds` / `sway`) so the host can diff declared-vs-granted directly.
+/// (`network`/`feeds`/`sway`/`fs`/`exec`) so the host can diff declared-vs-granted directly.
+/// `fs`/`exec` are the **dangerous tier** (RFC 0015) — a declaration of them is what `ezbar
+/// inspect` flags loud and `ezbar add` refuses to silently activate.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub network: Vec<String>,
     pub feeds: Vec<String>,
     pub sway: bool,
+    /// declared fs dirs (the `path` of each `fs` grant entry), e.g. `["~/notes"]`
+    pub fs: Vec<String>,
+    /// declared programs, e.g. `["kubectl"]`
+    pub exec: Vec<String>,
 }
 
 /// The custom-section name carrying the manifest TOML.
@@ -47,10 +53,20 @@ pub fn parse(body: &str) -> Option<Manifest> {
             _ => Vec::new(),
         }
     };
+    // `fs` is a list of `{ path, mode, at }` tables (the grant shape) — collect the paths.
+    let fs = match caps.get("fs") {
+        Some(toml::Value::Array(a)) => a
+            .iter()
+            .filter_map(|e| e.get("path").and_then(|p| p.as_str()).map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    };
     Some(Manifest {
         network: list("network"),
         feeds: list("feeds"),
         sway: caps.get("sway").and_then(|v| v.as_bool()).unwrap_or(false),
+        fs,
+        exec: list("exec"),
     })
 }
 
@@ -138,6 +154,17 @@ mod tests {
         assert_eq!(nested.network, ["a", "b"]);
         assert!(!nested.sway);
         assert!(nested.feeds.is_empty());
+    }
+
+    #[test]
+    fn parses_the_dangerous_tier_fs_and_exec() {
+        let m = parse(
+            "[capabilities]\nexec = [\"kubectl\", \"git\"]\n\
+             fs = [{ path = \"~/.kube\", mode = \"r\" }, { path = \"~/notes\", mode = \"rw\" }]",
+        )
+        .unwrap();
+        assert_eq!(m.exec, ["kubectl", "git"]);
+        assert_eq!(m.fs, ["~/.kube", "~/notes"]); // the paths of each fs grant entry
     }
 
     #[test]
