@@ -46,6 +46,16 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   user approves on install. Multi-language already works (Rust + Go/TinyGo). The network
   effect no other bar has.
 
+### P1 (cont.) — read-only sway IPC: **designed, ready to implement**
+- [ ] **Read-only sway state** — **RFC 0013 Accepted** (both reviewers ACK after folding
+  push→**pull**). Completes "safe capabilities": a plugin reads the workspace list + focused
+  title via a `sway-snapshot() -> result<sway-state, string>` host call, capability-gated by
+  `[modules.<id>].sway`. Forces the **first WIT version bump** (`since-v0.2.0`) + the
+  frozen-version-window infra (RFC 0006 §4). Implement in **two phases**: (1) the version
+  window — dual bindgen, `enum DrivenPlugin`, `ezbar:api-version` detection, prove v0.1.0
+  weather + a v0.2.0 plugin co-load on one binary; (2) sway-read as a thin pull consumer +
+  `wintitle`/`wsplugin` dogfoods. Read-only (no `run_command`) is hard out of scope.
+
 ### Ongoing — reliability (table stakes)
 - [ ] **Multi-monitor / hotplug / sway-reload hardening** + a regression harness for
   output churn (the two-bars saga bit us twice). Stunning-but-flaky ≠ best.
