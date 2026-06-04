@@ -8,7 +8,7 @@
 //! to your sway config".)
 
 use std::cmp::Ordering;
-use std::path::Path;
+use std::path::PathBuf;
 
 /// One `plugins/<id>/<version>.toml` index entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,10 +77,11 @@ pub fn verify_sha256(bytes: &[u8], expected: &str) -> bool {
 /// artifact. Resolves the newest in-WIT-window version, verifies its `sha256`, installs it
 /// to the plugins dir, and prints the grant block — **never** touching `config.toml`. Returns
 /// a human-facing summary. (TOFU publisher-pin is deferred; a local dir is already trusted.)
-pub fn add(id: &str, registry: &Path) -> Result<String, String> {
-    let dir = registry.join("plugins").join(id);
+pub fn add(id: &str, registry: &str) -> Result<String, String> {
+    let root = resolve_registry(registry)?;
+    let dir = root.join("plugins").join(id);
     let rd = std::fs::read_dir(&dir)
-        .map_err(|e| format!("no plugin '{id}' in registry {}: {e}", registry.display()))?;
+        .map_err(|e| format!("no plugin '{id}' in registry {registry}: {e}"))?;
     let entries: Vec<Entry> = rd
         .flatten()
         .map(|e| e.path())
@@ -123,6 +124,57 @@ pub fn add(id: &str, registry: &Path) -> Result<String, String> {
         picked.version,
         dest.display()
     ))
+}
+
+/// Resolve a registry location to a local directory to read from: a filesystem path is used
+/// as-is; a **git URL** (`…://…`, `git@…`, or a `.git` suffix — including the future official
+/// `https://github.com/birdayz/ezbar-plugins.git`) is shallow-cloned (or fast-forward-pulled)
+/// into a per-URL cache dir first. So `ezbar add` works against a hosted registry, not only a
+/// local folder, while reusing the exact same local resolution/verify/install core.
+fn resolve_registry(loc: &str) -> Result<PathBuf, String> {
+    if is_git_url(loc) {
+        clone_or_pull(loc)
+    } else {
+        Ok(PathBuf::from(loc))
+    }
+}
+
+/// A git remote we should clone rather than read as a local path.
+fn is_git_url(s: &str) -> bool {
+    s.contains("://") || s.starts_with("git@") || s.trim_end_matches('/').ends_with(".git")
+}
+
+/// Shallow-clone `url` into `~/.cache/ezbar/registry/<hash>` (or `git pull --ff-only` if
+/// already cloned). A pull failure falls back to the cached clone (offline-tolerant); only a
+/// first-clone failure is fatal.
+fn clone_or_pull(url: &str) -> Result<PathBuf, String> {
+    use std::process::Command;
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or("no cache dir (set HOME or XDG_CACHE_HOME)")?;
+    let key = &ezbar::grants::sha256_hex(url.as_bytes())[..16];
+    let dir = base.join("ezbar").join("registry").join(key);
+    if dir.join(".git").is_dir() {
+        // best-effort refresh; keep the cached clone if offline / the pull fails
+        let _ = Command::new("git")
+            .args(["-C", &dir.to_string_lossy(), "pull", "--ff-only", "--quiet"])
+            .status();
+        return Ok(dir);
+    }
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let ok = Command::new("git")
+        .args(["clone", "--depth", "1", "--quiet", url, &dir.to_string_lossy()])
+        .status()
+        .map_err(|e| format!("run git: {e} (is git installed?)"))?
+        .success();
+    if ok {
+        Ok(dir)
+    } else {
+        Err(format!("git clone {url} failed"))
+    }
 }
 
 /// `ezbar list` — the installed plugins, each with its short content hash, consent state,

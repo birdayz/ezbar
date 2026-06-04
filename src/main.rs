@@ -147,7 +147,7 @@ fn main() -> iced_layershell::Result {
                 .or_else(|| std::env::var("EZBAR_REGISTRY").ok());
             let id = args.iter().find(|a| !a.starts_with('-')).cloned();
             match (id, registry) {
-                (Some(id), Some(reg)) => match registry::add(&id, std::path::Path::new(&reg)) {
+                (Some(id), Some(reg)) => match registry::add(&id, &reg) {
                     Ok(msg) => print!("{msg}"),
                     Err(e) => {
                         eprintln!("ezbar add: {e}");
