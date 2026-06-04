@@ -165,8 +165,10 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   `canvas(Graph{…}).width().height()` block in cpu/memory/temperature/ping is now one
   `modules::graph_widget(gcfg, kind, values, line_color)`, so a graph change (size/stroke/
   fill, a future `smooth`) touches one spot, not four.
-- [ ] **LOW** — Restore the workspaces **urgent blink** (dropped in the module port; the
-  module would own a 500ms tick like `calendar`). (`modules/workspaces.rs`)
+- [x] **LOW** — Workspaces **urgent pulse** restored — DONE. A `blink_on` toggle driven by
+  a 500ms `time::every` armed ONLY while a workspace is urgent (gated like `calendar`; a calm
+  bar arms no timer), alpha-dimming the urgent colour on the off-beat via a pure unit-tested
+  `urgent_pulse()` so all four chip styles throb. (`modules/workspaces.rs`)
 - [x] **LOW** — `ezbar msg volume` **routes through the volume module** now — DONE. The
   IPC/keybind path dispatches `ModuleMsg` to the volume instance (via `volume::adjust_msg`),
   which changes the level and refreshes its displayed value in one `update` (no lag waiting
