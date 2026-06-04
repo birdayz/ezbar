@@ -40,6 +40,14 @@ type Ctx interface {
 	// Log writes a line to the bar's log (stderr).
 	Log(msg string)
 	// SetTimeout asks the host to deliver the next EvTimer after ms milliseconds.
+	//
+	// One-shot: this schedules exactly ONE timer. To keep a cadence, call it again
+	// from each EvTimer (e.g. SetTimeout(1000) every tick for a 1 Hz clock) — if you
+	// don't re-arm, the timer goes silent after firing once. SetTimeout(0) cancels:
+	// no timer until you arm one again (a purely reactive plugin that only redraws on
+	// pointer/feed events should call this once so it costs zero). Values below 100ms
+	// are floored to 100ms. A plugin that never calls this keeps a legacy ~2s
+	// heartbeat (the zero-config default).
 	SetTimeout(ms uint32)
 }
 

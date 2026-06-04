@@ -24,8 +24,13 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   smooth graph scroll, hover micro-interactions — and eventually a plugin-authored tween.
 
 ### P1 — finish the platform
-- [ ] **Event-driven cadence (`set_timeout`)** — kill the 2 s blind poll (the one
-  un-Zellij thing left); plugins pick their own wake cadence, idle plugins cost zero.
+- [x] **Event-driven cadence (`set_timeout`)** — **DONE** (RFC 0011). The reactor honors
+  the frozen `host.set-timeout`: one-shot timer, re-armed per tick; a plugin that never
+  arms keeps a legacy 2 s heartbeat, `set_timeout(0)` opts out to **zero** wakes. Killed the
+  blind poll, added an immediate post-init bootstrap tick (chip paints at t≈0), surfaced
+  `set_timeout` on the Rust `Ctx` (Go already had it) with an identical loud docstring, and
+  migrated weather/btc/quakes off the 2 s poll (they were hammering open-meteo/Coinbase/USGS
+  at 0.5 Hz) onto real cadences with error backoff.
 - [ ] **Safe host capabilities** so the powerful widgets *can* be plugins (RFC 0007
   showed they can't today): host-computed **feeds** (cpu/mem/temp/net) + **read-only
   sway IPC** (workspaces/title). The sandbox stays a sandbox.

@@ -48,10 +48,6 @@ struct Weather {
     hours: Vec<HourPt>,
     days: Vec<DayPt>,
     loaded: bool,
-    // Throttle: the host ticks us ~every 2s, but weather changes slowly and
-    // open-meteo's free tier rate-limits (HTTP 429). `cooldown` counts ticks left
-    // before the next fetch — refresh on a ~15-min cadence, back off gently on error.
-    cooldown: u32,
 }
 
 impl Default for Weather {
@@ -71,15 +67,16 @@ impl Default for Weather {
             hours: Vec::new(),
             days: Vec::new(),
             loaded: false,
-            cooldown: 0, // fetch on the first tick
         }
     }
 }
 
-// Roughly 2s per host tick. ~15 min between good refreshes; ~2 min retry on error
-// (gentle enough to let a tripped rate-limit recover instead of hammering it).
-const REFRESH_TICKS: u32 = 450;
-const RETRY_TICKS: u32 = 60;
+// Event-driven cadence (RFC 0011): weather changes slowly and open-meteo's free tier
+// rate-limits (HTTP 429), so we drive our own clock instead of the host heartbeat —
+// ~15 min between good refreshes, ~2 min retry on error (gentle enough to let a tripped
+// rate-limit recover instead of hammering it).
+const REFRESH_MS: u32 = 15 * 60 * 1000;
+const RETRY_MS: u32 = 2 * 60 * 1000;
 
 // ── type/icon scale ─────────────────────────────────────────────────────────
 // One base unit drives the whole widget; every icon and text size below is a
@@ -113,21 +110,13 @@ impl Plugin for Weather {
 
     fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
         let Event::Timer = ev else { return false };
-        // Throttle: only fetch when the cooldown has elapsed (weather is slow and
-        // the APIs rate-limit). Every other tick is a no-op.
-        if self.cooldown > 0 {
-            self.cooldown -= 1;
-            return false;
-        }
-        // Primary source is open-meteo (richer data, WMO codes). Fall back to
-        // wttr.in when it's unavailable — e.g. open-meteo's daily quota is spent.
-        if self.fetch_open_meteo(ctx) || self.fetch_wttr(ctx) {
-            self.cooldown = REFRESH_TICKS;
-            true
-        } else {
-            self.cooldown = RETRY_TICKS;
-            false
-        }
+        // Primary source is open-meteo (richer data, WMO codes). Fall back to wttr.in when
+        // it's unavailable — e.g. open-meteo's daily quota is spent. Re-arm the next tick
+        // *unconditionally* (RFC 0011 one-shot timer): a longer cadence on good data, a
+        // shorter retry on error — never leave ourselves un-armed.
+        let ok = self.fetch_open_meteo(ctx) || self.fetch_wttr(ctx);
+        ctx.set_timeout(if ok { REFRESH_MS } else { RETRY_MS });
+        ok
     }
 
     fn view(&self) -> Render {

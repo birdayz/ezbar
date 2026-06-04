@@ -88,7 +88,14 @@ impl Plugin for Ticker {
 
     fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
         match ev {
-            Event::Timer => self.fetch(ctx),
+            // Drive our own poll clock (RFC 0011) instead of the host's 2 s heartbeat —
+            // a spot price every 30 s is plenty and stops us hammering Coinbase. Re-arm
+            // unconditionally (one-shot timer): a gentle 60 s backoff on a failed fetch.
+            Event::Timer => {
+                let ok = self.fetch(ctx);
+                ctx.set_timeout(if ok { 30_000 } else { 60_000 });
+                ok
+            }
             Event::Pointer { id, kind, delta } if id == "chip" => match kind {
                 PointerKind::Scroll => {
                     let n = self.pairs.len();

@@ -338,6 +338,18 @@ pub trait Ctx {
     fn http_get(&mut self, url: &str) -> Result<Vec<u8>, String>;
     /// Append a line to the bar's log.
     fn log(&mut self, msg: &str);
+    /// Ask the host to deliver the next [`Event::Timer`] after `ms` milliseconds.
+    ///
+    /// **One-shot:** this schedules exactly ONE timer. To keep a cadence, call it again
+    /// from each `Event::Timer` (e.g. `ctx.set_timeout(1000)` every tick for a 1 Hz clock)
+    /// — if you don't re-arm, the timer goes silent after firing once. `set_timeout(0)`
+    /// **cancels**: no timer until you arm one again (a purely reactive plugin that only
+    /// redraws on pointer/feed events should call this once so it costs zero). Values below
+    /// 100 ms are floored to 100 ms.
+    ///
+    /// A plugin that *never* calls this keeps a legacy ~2 s heartbeat (the zero-config
+    /// default), so a trivial poller Just Works without arming anything.
+    fn set_timeout(&mut self, ms: u32);
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are

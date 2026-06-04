@@ -34,6 +34,9 @@ impl crate::Ctx for HostCtx {
     fn log(&mut self, msg: &str) {
         p::host::log(msg);
     }
+    fn set_timeout(&mut self, ms: u32) {
+        p::host::set_timeout(ms);
+    }
 }
 
 struct Component;

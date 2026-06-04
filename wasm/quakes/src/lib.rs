@@ -71,34 +71,38 @@ impl Plugin for Quakes {
             self.feed
         );
         match ctx.http_get(&url) {
-            Ok(bytes) => {
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(v) => {
+                    let mut quakes = Vec::new();
+                    if let Some(features) = v["features"].as_array() {
+                        for f in features {
+                            let p = &f["properties"];
+                            // `mag` can be null for some events — skip those.
+                            let Some(mag) = p["mag"].as_f64() else { continue };
+                            let place = p["place"].as_str().unwrap_or("unknown").to_string();
+                            quakes.push(Quake { mag, place });
+                        }
+                    }
+                    // Feed is newest-first; reverse for a left-to-right-in-time spark.
+                    self.mags = quakes.iter().rev().map(|q| q.mag).collect();
+                    self.quakes = quakes;
+                    self.err = false;
+                }
+                Err(_) => {
                     ctx.log("quakes: malformed GeoJSON");
                     self.err = true;
-                    return true;
-                };
-                let mut quakes = Vec::new();
-                if let Some(features) = v["features"].as_array() {
-                    for f in features {
-                        let p = &f["properties"];
-                        // `mag` can be null for some events — skip those.
-                        let Some(mag) = p["mag"].as_f64() else { continue };
-                        let place = p["place"].as_str().unwrap_or("unknown").to_string();
-                        quakes.push(Quake { mag, place });
-                    }
                 }
-                // Feed is newest-first; reverse for a left-to-right-in-time spark.
-                self.mags = quakes.iter().rev().map(|q| q.mag).collect();
-                self.quakes = quakes;
-                self.err = false;
-                true
-            }
+            },
             Err(e) => {
                 ctx.log(&format!("quakes: {e}"));
                 self.err = true;
-                true
             }
         }
+        // Drive our own poll clock (RFC 0011) rather than the host's 2 s heartbeat — quakes
+        // trickle in, so refresh ~every 2 min and retry sooner on error. Re-armed on every
+        // path (one-shot timer); we always re-render (the chip shows a `!` on error).
+        ctx.set_timeout(if self.err { 60_000 } else { 120_000 });
+        true
     }
 
     fn view(&self) -> Render {

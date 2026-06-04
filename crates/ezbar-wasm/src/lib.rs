@@ -48,9 +48,15 @@ const DEADLINE_TICKS: u64 = 20; // ~200ms guest CPU before a cooperative epoch y
 const MEM_LIMIT: usize = 2 << 20; // 2 MiB per plugin store (RFC 0008 §3.4: 8→2)
 const MAX_NODES: usize = 2_000;
 const MAX_DEPTH: usize = 32;
-const POLL: Duration = Duration::from_secs(2); // v1 timer cadence
-                                               // Per-call wall-clock backstop — the *primary* CPU bound (epoch-yield only smooths, a
-                                               // yielding guest never self-traps). Must exceed the 8s http timeout (RFC 0008 §3.4).
+// Legacy heartbeat: the wake cadence for a plugin that never calls `set-timeout` (RFC
+// 0011). Plugins that do call it pick their own cadence and idle ones cost zero.
+const POLL: Duration = Duration::from_secs(2);
+// Floor a guest's self-requested wake cadence at 10 Hz — `set-timeout(1)` would otherwise
+// busy-spin update→view→render 1000×/s. A status bar never needs faster (view is a static
+// snapshot; motion is host-side, RFC 0010). `0` is exempt — it means "cancel" (RFC 0011 §3.1).
+const MIN_TIMER_MS: u32 = 100;
+// Per-call wall-clock backstop — the *primary* CPU bound (epoch-yield only smooths, a
+// yielding guest never self-traps). Must exceed the 8s http timeout (RFC 0008 §3.4).
 const WALL: Duration = Duration::from_secs(12);
 // RFC 0009: minimum gap between pointer-driven guest calls — a yield point between calls
 // that caps pointer cadence to ~62/s/plugin regardless of input rate or guest slowness.
@@ -70,6 +76,17 @@ struct Host {
     // epoch-pause hack: a fiber parked in `http_get.await` runs no guest code, so it
     // burns no epoch by construction (RFC 0008 §3.3).
     client: reqwest::Client,
+    // The guest's pending `set-timeout` request, written by the import during a guest
+    // call and drained by the drive loop right after the call returns (RFC 0011). No
+    // lock/Arc: the `Host` *is* the store data, mutated only on the owning fiber.
+    timer_request: Option<TimerRequest>,
+}
+
+/// A guest's `set-timeout` request (RFC 0011). `After(d)` = one `Event::Timer` in `d`;
+/// `Cancel` (`ms == 0`) = no timer until re-armed.
+enum TimerRequest {
+    After(Duration),
+    Cancel,
 }
 
 impl WasiView for Host {
@@ -94,7 +111,14 @@ impl ezbar::plugin::host::Host for Host {
     async fn fg(&mut self) -> ezbar::plugin::types::Paint {
         ezbar::plugin::types::Paint::Token(ezbar::plugin::types::ThemeToken::Fg)
     }
-    async fn set_timeout(&mut self, _ms: u32) {}
+    async fn set_timeout(&mut self, ms: u32) {
+        // Record the request; the drive loop folds it into the wake cadence after this
+        // call returns (RFC 0011). One-shot: the guest re-arms each tick. `0` cancels.
+        self.timer_request = Some(match ms {
+            0 => TimerRequest::Cancel,
+            n => TimerRequest::After(Duration::from_millis(n.max(MIN_TIMER_MS) as u64)),
+        });
+    }
     async fn subscribe(&mut self, _kinds: Vec<ezbar::plugin::types::EventKind>) {}
     async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
         let h = url.split("://").nth(1).unwrap_or(&url);
@@ -387,6 +411,39 @@ struct Reactor {
     rt: Handle,
 }
 
+/// Per-plugin wake cadence (RFC 0011). `Heartbeat` is the legacy auto-renewing 2 s poll for
+/// a plugin that never calls `set-timeout`; the first request latches it to explicit
+/// one-shot control (`At`) or off (`Idle`), and it never returns to `Heartbeat`.
+#[derive(Clone, Copy)]
+enum Timer {
+    Heartbeat,
+    At(tokio::time::Instant),
+    Idle,
+}
+
+/// Park until this plugin's next timer should fire. `Idle` never fires — a purely reactive
+/// plugin then waits only on its input channel and costs zero.
+async fn sleep_for(t: Timer) {
+    match t {
+        Timer::Idle => std::future::pending::<()>().await,
+        Timer::Heartbeat => tokio::time::sleep(POLL).await,
+        Timer::At(at) => tokio::time::sleep_until(at).await, // absolute → no drift on cancel
+    }
+}
+
+/// Fold the guest's `set-timeout` request (issued during the call just finished) into the
+/// cadence. `None` (no call) leaves the state unchanged — which keeps a `Heartbeat` alive
+/// and preserves a pending `At` across a pointer-driven `update` that didn't re-arm. The
+/// deadline is `now()` *after* the call, so a slow `update` doesn't compound into the next
+/// interval's start (one-shot, not fixed-rate — no catch-up storms). (RFC 0011 §3.)
+fn fold_timer(state: &mut Timer, req: Option<TimerRequest>) {
+    match req {
+        Some(TimerRequest::After(d)) => *state = Timer::At(tokio::time::Instant::now() + d),
+        Some(TimerRequest::Cancel) => *state = Timer::Idle,
+        None => {}
+    }
+}
+
 static REACTOR: OnceLock<Reactor> = OnceLock::new();
 
 /// The process reactor, initialised on first use with the bar's runtime `Handle`
@@ -466,6 +523,7 @@ impl Reactor {
                 limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
                 granted_network: grants,
                 client: self.client.clone(),
+                timer_request: None,
             },
         );
         store.limiter(|h| &mut h.limits);
@@ -504,9 +562,22 @@ impl Reactor {
             }
         }
 
-        // Drive loop: a (coalesced) pointer event when one arrives, else a timer tick after
-        // POLL of quiet. `carry` holds a non-scroll event pulled while coalescing a scroll
-        // run, so it's processed next — a click is never reordered across a scroll batch.
+        // Wake cadence (RFC 0011): `Heartbeat` until the guest takes control via `set-timeout`.
+        // `init` could already have armed one (a future SDK with a ctx in `load`) — fold it.
+        let mut timer = Timer::Heartbeat;
+        fold_timer(&mut timer, store.data_mut().timer_request.take());
+        // Bootstrap: one immediate `Event::Timer` so the chip paints at t≈0 instead of after a
+        // full heartbeat, and a poller arms its real cadence from the first tick. Explicit — it
+        // does NOT consume a one-shot, so a legacy plugin stays on `Heartbeat`.
+        if !step(&mut store, &plugin, &slot, &Event::Timer).await {
+            return Ok(()); // trapped on the first tick — disabled
+        }
+        fold_timer(&mut timer, store.data_mut().timer_request.take());
+
+        // Drive loop: a (coalesced) pointer event when one arrives, else a timer tick when the
+        // plugin's cadence elapses (`set-timeout`, or the legacy heartbeat). `carry` holds a
+        // non-scroll event pulled while coalescing a scroll run, so it's processed next — a
+        // click is never reordered across a scroll batch.
         let mut carry: Option<PointerEvent> = None;
         loop {
             let next = match carry.take() {
@@ -517,11 +588,18 @@ impl Reactor {
                         Some(e) => Some(e),
                         None => return Ok(()), // all senders gone (module dropped) → stop
                     },
-                    _ = tokio::time::sleep(POLL) => None, // timer tick
+                    _ = sleep_for(timer) => None, // cadence elapsed → a timer tick
                 },
             };
             let event = match next {
-                None => Event::Timer,
+                None => {
+                    // One-shot consumed on fire: an explicit `At` drops to `Idle` until the
+                    // guest re-arms in `update`; the legacy `Heartbeat` auto-renews.
+                    if let Timer::At(_) = timer {
+                        timer = Timer::Idle;
+                    }
+                    Event::Timer
+                }
                 Some(first) if matches!(first.kind, PointerKind::Scroll) => {
                     // Coalesce the leading run of consecutive scrolls (lossless sum); a
                     // non-scroll flushes the run and is carried to the next iteration.
@@ -548,6 +626,9 @@ impl Reactor {
             if !step(&mut store, &plugin, &slot, &event).await {
                 return Ok(()); // trap/timeout — store dropped here, on this worker
             }
+            // Fold any `set-timeout` the guest issued during this step into the cadence
+            // (re-arms a one-shot; `None` leaves a heartbeat or a pending `At` untouched).
+            fold_timer(&mut timer, store.data_mut().timer_request.take());
             if is_pointer {
                 // Cadence gate: a yield + min gap between pointer-driven calls so input
                 // can't pin a worker (the real fairness bound — RFC 0009 §3.4).
