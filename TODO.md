@@ -118,8 +118,10 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 - [ ] **MED** — **Icon metric-normalization / per-glyph nudge table.** RFC says this
   "must not ship empty"; today icons rely on the raw font baseline. Promote to an
   `ezbar_plugin::ui` helper (`ctx.icon(Icon::…)`).
-- [ ] **LOW** — `ui::metric_graph` helper to DRY the four near-identical metric module
-  views (cpu/memory/temperature/ping).
+- [x] **LOW** — `graph_widget` helper DRYs the four metric views — **DONE**. The identical
+  `canvas(Graph{…}).width().height()` block in cpu/memory/temperature/ping is now one
+  `modules::graph_widget(gcfg, kind, values, line_color)`, so a graph change (size/stroke/
+  fill, a future `smooth`) touches one spot, not four.
 - [ ] **LOW** — Restore the workspaces **urgent blink** (dropped in the module port; the
   module would own a 500ms tick like `calendar`). (`modules/workspaces.rs`)
 - [x] **LOW** — `ezbar msg volume` **routes through the volume module** now — DONE. The

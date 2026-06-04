@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{canvas, mouse_area, row, text};
-use ezbar_plugin::iced::{Element, Length, Subscription};
+use ezbar_plugin::iced::widget::{mouse_area, row, text};
+use ezbar_plugin::iced::{Element, Subscription};
 use ezbar_plugin::icons::Icon;
-use ezbar_plugin::ui::graph::{Graph, GraphKind};
+use ezbar_plugin::ui::graph::GraphKind;
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
 
 use crate::history::History;
@@ -82,16 +82,13 @@ impl Module for Ping {
         )
         .on_press(ModMsg::new(Msg::Toggle));
         if self.show_graph {
-            let g = canvas(Graph {
-                values: self.hist.ordered(),
-                kind: GraphKind::Ping,
-                line_color: ctx.graph_paint(self.gcfg.line_color.as_deref()),
-                line_width: self.gcfg.line_width,
-                fill: self.gcfg.fill,
-            })
-            .width(Length::Fixed(self.gcfg.width))
-            .height(Length::Fixed(self.gcfg.height));
-            row(vec![lbl.into(), g.into()])
+            let g = crate::modules::graph_widget(
+                &self.gcfg,
+                GraphKind::Ping,
+                self.hist.ordered(),
+                ctx.graph_paint(self.gcfg.line_color.as_deref()),
+            );
+            row(vec![lbl.into(), g])
                 .spacing(4)
                 .align_y(Vertical::Center)
                 .into()

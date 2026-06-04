@@ -137,6 +137,29 @@ pub(crate) fn graph_line_color(cfg: &toml::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Build the sparkline canvas for a metric module from its resolved [`GraphCfg`] — the one
+/// place the four near-identical metric views (cpu/memory/temperature/ping) share, so a graph
+/// change (size, stroke, fill, a future `smooth`) touches one spot, not four. `line_color` is
+/// the resolved override (`None` = per-value threshold colouring).
+pub(crate) fn graph_widget<'a>(
+    gcfg: &GraphCfg,
+    kind: ezbar_plugin::ui::graph::GraphKind,
+    values: Vec<f64>,
+    line_color: Option<ezbar_plugin::iced::Color>,
+) -> ezbar_plugin::iced::Element<'a, ezbar_plugin::ModMsg> {
+    use ezbar_plugin::iced::{widget::canvas, Length};
+    canvas(ezbar_plugin::ui::graph::Graph {
+        values,
+        kind,
+        line_color,
+        line_width: gcfg.line_width,
+        fill: gcfg.fill,
+    })
+    .width(Length::Fixed(gcfg.width))
+    .height(Length::Fixed(gcfg.height))
+    .into()
+}
+
 /// Resolved `[modules.<id>.graph]` knobs for a metric module's sparkline (RFC 0002).
 /// Every field has a sane default so an unconfigured graph looks exactly as before.
 pub(crate) struct GraphCfg {
