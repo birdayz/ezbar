@@ -95,8 +95,10 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   rounding the solid slab needs the transparent-surface + rounded-container path).
 - [ ] **LOW** — Per-output config (per-output `scale`/`height`/outputs) — deferred.
 - [ ] **LOW** — `include = [...]` for the *whole* config (presets already cover theme).
-- [ ] **LOW** — `read_parse` policy nit: deleted file → defaults, but parse error →
-  keep-last-good. Pick one. (`main.rs:read_parse`)
+- [x] **LOW** — `read_parse` policy **made consistent** — DONE. On *reload*, a missing/
+  unreadable file now keeps-last-good (like a parse error), instead of flashing the live bar
+  to defaults during an editor's atomic save. Startup `load()` still treats no-config as
+  defaults (right for a fresh install). (`main.rs:read_parse`)
 
 ## Modules & SDK (RFC 0001 / 0003)
 

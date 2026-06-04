@@ -1828,7 +1828,17 @@ impl Bar {
 /// Re-run the full load pipeline (config.toml + drop-in presets + active preset),
 /// so a file-watch reload keeps the user's selected preset (not just inline theme).
 fn read_parse(_path: &std::path::Path) -> Result<Config, String> {
-    config::load_result()
+    // On a *reload*, a missing/unreadable config means "keep the current config", NOT "reset
+    // to defaults" — so the live bar never flashes to defaults during an editor's atomic save
+    // (write-temp + rename leaves the path briefly absent) or while the file is transiently
+    // gone. This matches the parse-error path (both → `Err` → keep-last-good). Startup
+    // `config::load()` still treats a missing config as defaults, which is right for a fresh
+    // install; only the reload path is conservative.
+    match config::path() {
+        Some(p) if p.exists() => config::load_result(),
+        Some(_) => Err("config file missing — keeping current".into()),
+        None => Err("no config path".into()),
+    }
 }
 
 /// Subscribe to sway `output` events and emit [`Message::OutputsChanged`] on each,
