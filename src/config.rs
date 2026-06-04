@@ -328,30 +328,15 @@ impl Default for PopupTheme {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// `[theme.workspaces]` — only `style` lives here. The chip's colours come straight from the
+/// global `[theme]` tokens (`accent`/`fg`/`fg_dim`/`urgent`), so the chip is themed by theming
+/// the bar. (Earlier drafts carried per-state `focused`/`occupied`/`empty`/`urgent`/`colors`/
+/// `special` fields that the renderer never read — config that lied; dropped, since the global
+/// tokens already cover it. See RFC 0002 / TODO.)
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceTheme {
     pub style: WsStyle,
-    pub focused: Color,
-    pub occupied: Color,
-    pub empty: Color,
-    pub urgent: Color,
-    pub colors: Vec<Color>,
-    pub special: Vec<Color>,
-}
-
-impl Default for WorkspaceTheme {
-    fn default() -> Self {
-        WorkspaceTheme {
-            style: WsStyle::default(),
-            focused: Color::rgba(1.0, 1.0, 1.0, 1.0),
-            occupied: Color::rgba(0.55, 0.55, 0.55, 1.0),
-            empty: Color::rgba(0.35, 0.35, 0.35, 1.0),
-            urgent: Color::rgba(1.0, 0.2, 0.2, 1.0),
-            colors: Vec::new(),
-            special: Vec::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,10 +474,7 @@ impl Default for Theme {
                 glyph: None,
             },
             popup: PopupTheme::default(),
-            workspaces: WorkspaceTheme {
-                focused: hex("#cba6f7"),
-                ..WorkspaceTheme::default()
-            },
+            workspaces: WorkspaceTheme::default(),
         }
     }
 }

@@ -79,10 +79,12 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   · `smooth` are still hardcoded (48/16/`GraphKind`). RFC headline + the r/unixporn reviewer
   flagged the set. (`modules/{cpu,memory,temperature,ping}.rs`, `ezbar_plugin::ui::graph`,
   `config.rs`)
-- [ ] **HIGH** — **`[theme.workspaces]` per-state colours are parsed but unused.** The
-  chip reads `ctx.accent/fg/dim/urgent`; `focused/occupied/empty/urgent/colors/special`
-  in `WorkspaceTheme` do nothing → config that lies. Either wire them through or drop
-  them. (`config.rs:WorkspaceTheme`, `modules/workspaces.rs`)
+- [x] **HIGH** — **`[theme.workspaces]` per-state colours were parsed but unused → DROPPED.**
+  The chip is fully themed by the global `[theme]` tokens (`accent`/`fg`/`fg_dim`/`urgent`)
+  plus `[modules.workspaces].style`, so the parallel `focused/occupied/empty/urgent/colors/
+  special` fields in `WorkspaceTheme` were vestigial config that lied — removed (re-wiring
+  would just duplicate the global theming). `WorkspaceTheme` now carries only `style`.
+  (`config.rs:WorkspaceTheme`)
 - [ ] **MED** — **Inline markup unimplemented.** RFC specs a themed `[c=token]…[/c]` /
   `[b]…[/b]` subset for `window_title`/`custom`; not built. (`config.rs`, `modules/
   window_title.rs`)
