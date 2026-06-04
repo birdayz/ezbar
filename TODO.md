@@ -15,13 +15,14 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   Host delivers press/right-press/scroll/enter/leave to the guest's `update(Event::Pointer)`
   through the reactor, bounded by the cadence gate + WALL/epoch. Buttons + scroll-to-adjust
   + hover. Drag/release deferred to an additive v0.2.0 WIT.
-- [x] **Motion — first eased transition** — **DONE** (RFC 0010). The GPU's unused payoff
-  and the r/unixporn "what bar is *that*?". On a workspace switch the active highlight
-  **cross-fades** (180 ms `EaseOutCubic`) from the old pill to the new instead of
-  hard-cutting — a thing a cairo/damage-repaint bar physically can't do. Per-pill
-  `iced::Animation<bool>` inside the `workspaces` module; frames requested **only while a
-  fade runs** (idle bar = zero extra redraws). Next motion targets: sliding/fading popups,
-  smooth graph scroll, hover micro-interactions — and eventually a plugin-authored tween.
+- [~] **Motion — first eased transition** — built (RFC 0010) but **DISABLED at runtime**.
+  The workspace cross-fade drove redraws with `window::frames()`, which in **iced_layershell**
+  corrupts the pointer-seat (`mouse hasn't entered`) and **broke hover** after the first
+  workspace switch — a layershell-only failure the mainline-iced reviews couldn't catch, found
+  only by deploying live. The highlight is back to discrete (hover restored). **Re-enable:**
+  drive the fade with `iced::time::every(16ms)` (gated on `is_animating`) instead of frame
+  callbacks — needs **live verification** (frames-vs-timer can't be told apart by `swaymsg`
+  cursor warps; only a real hover confirms it). The `anim` machinery is left in place.
 
 ### P1 — finish the platform
 - [x] **Event-driven cadence (`set_timeout`)** — **DONE** (RFC 0011). The reactor honors
