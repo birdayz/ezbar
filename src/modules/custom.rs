@@ -1,13 +1,20 @@
-//! `custom` module (RFC 0003): a no-code, command-driven widget. Runs a shell
-//! `command` every `interval` seconds and shows its (trimmed) stdout next to an
-//! optional `icon`; an optional `on_click` command runs when clicked.
+//! `custom` module (RFC 0003): a no-code, command-driven widget.
 //!
+//! Two forms — **poll** or **stream**:
 //! ```toml
+//! # poll: run `command` every `interval` seconds, show its trimmed stdout
 //! [modules.custom]
 //! command  = "checkupdates | wc -l"
 //! interval = 300
 //! icon     = ""          # a Nerd-Font glyph (themed with the accent colour)
 //! on_click = "alacritty -e paru -Syu"
+//!
+//! # stream: run a long-running `listen_cmd` once; each stdout LINE updates the chip
+//! # (event-driven, no polling — the widget changes the instant the command emits a line).
+//! # If both are set, `listen_cmd` wins. The process is restarted (gently) if it exits.
+//! [modules.weather-stream]
+//! listen_cmd = "my-daemon --watch"   # e.g. a script that prints a value per change
+//! icon       = ""
 //! ```
 
 use std::process::Command;
@@ -29,6 +36,9 @@ pub struct Custom {
     name: String,
     command: String,
     interval: u64,
+    /// A long-running command streamed line-by-line (RFC 0003). When set it supersedes
+    /// `command`/`interval` (the widget is event-driven off the command's stdout).
+    listen_cmd: Option<String>,
     icon: String,
     on_click: Option<String>,
     text: String,
@@ -48,6 +58,7 @@ impl Custom {
                 .and_then(|v| v.as_integer())
                 .unwrap_or(5)
                 .max(1) as u64,
+            listen_cmd: s("listen_cmd").filter(|c| !c.trim().is_empty()),
             icon: s("icon").unwrap_or_default(),
             on_click: s("on_click"),
             text: String::new(),
@@ -61,12 +72,16 @@ impl Module for Custom {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        // Bake command + interval into the recipe data so the fn-ptr stream can read
-        // them, and so a config change re-rolls the recipe (RFC 0002 generation).
-        Subscription::run_with(
-            (self.instance, self.command.clone(), self.interval),
-            custom_stream,
-        )
+        // Bake the command(s) into the recipe data so the fn-ptr stream can read them, and
+        // so a config change re-rolls the recipe (RFC 0002 generation). `listen_cmd` (stream)
+        // supersedes `command` (poll) when set.
+        match &self.listen_cmd {
+            Some(cmd) => Subscription::run_with((self.instance, cmd.clone()), listen_stream),
+            None => Subscription::run_with(
+                (self.instance, self.command.clone(), self.interval),
+                custom_stream,
+            ),
+        }
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
@@ -119,6 +134,51 @@ fn custom_stream(data: &(u64, String, u64)) -> impl Stream<Item = ModMsg> {
     )
 }
 
+/// Stream a long-running command: spawn it once and emit each stdout LINE as it arrives
+/// (event-driven — no polling). If the process exits, it's respawned after a short backoff
+/// (so a crashing `listen_cmd` recovers). `kill_on_drop` ensures the child dies when the
+/// subscription is re-rolled on a config change, instead of leaking.
+fn listen_stream(data: &(u64, String)) -> impl Stream<Item = ModMsg> {
+    let (_, cmd) = data.clone();
+    ezbar_plugin::iced::stream::channel(
+        1,
+        move |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
+            use tokio::io::AsyncBufReadExt;
+            loop {
+                let child = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn();
+                let mut child = match child {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!("custom: listen_cmd spawn failed: {e}");
+                        ezbar_plugin::task::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+                if let Some(stdout) = child.stdout.take() {
+                    let mut lines = tokio::io::BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if out
+                            .send(ModMsg::new(Msg::Data(line.trim().to_string())))
+                            .await
+                            .is_err()
+                        {
+                            return; // module dropped → stop (kill_on_drop reaps the child)
+                        }
+                    }
+                }
+                let _ = child.wait().await; // reap, then respawn after a gentle backoff
+                ezbar_plugin::task::sleep(Duration::from_secs(2)).await;
+            }
+        },
+    )
+}
+
 /// Run a shell command and return its trimmed stdout (empty on any failure).
 fn run_command(cmd: &str) -> String {
     if cmd.trim().is_empty() {
@@ -131,4 +191,27 @@ fn run_command(cmd: &str) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make(cfg: &str) -> Custom {
+        Custom::new(0, "custom", &cfg.parse::<toml::Value>().unwrap())
+    }
+
+    #[test]
+    fn listen_cmd_parsed_when_present() {
+        let c = make("listen_cmd = \"my-daemon --watch\"");
+        assert_eq!(c.listen_cmd.as_deref(), Some("my-daemon --watch"));
+    }
+
+    #[test]
+    fn listen_cmd_absent_or_blank_is_none() {
+        // unset → poll form (command path), not stream
+        assert!(make("command = \"date\"\ninterval = 9").listen_cmd.is_none());
+        // a blank/whitespace value doesn't accidentally select the (empty) stream form
+        assert!(make("listen_cmd = \"   \"").listen_cmd.is_none());
+    }
 }
