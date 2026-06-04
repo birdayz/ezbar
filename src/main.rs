@@ -662,6 +662,8 @@ enum Message {
     Ipc(String),
     OpenPopup(PopupKind),
     ClosePopup,
+    /// Close the open module popup (e.g. a sticky picker) when the pointer leaves it.
+    CloseModulePopup,
     ConfigReloaded(Result<Config, String>),
     WindowClosed(window::Id),
     Cursor(window::Id, f32),
@@ -1108,6 +1110,7 @@ impl Bar {
                 Task::batch([close_mod, open])
             }
             Message::ClosePopup => self.close_popup_task(),
+            Message::CloseModulePopup => self.close_module_popup_any(),
             Message::ConfigReloaded(Ok(cfg)) => {
                 log::info!("config reloaded");
                 self.apply_config(cfg)
@@ -1371,7 +1374,7 @@ impl Bar {
                 return self.popup_view(kind);
             }
         }
-        if let Some((pid, instance, _mode)) = self.module_popup {
+        if let Some((pid, instance, mode)) = self.module_popup {
             if id == pid {
                 if let Some(entry) = self.modules.iter().find(|e| e.id == instance) {
                     let ctx = Ctx {
@@ -1380,7 +1383,16 @@ impl Bar {
                     };
                     if let Some(content) = entry.module.popup(&ctx) {
                         let mapped = content.map(move |m| Message::ModuleMsg { instance, msg: m });
-                        return self.wrap_popup(mapped);
+                        // A sticky (click-opened) popup, e.g. a picker, doesn't close on chip-
+                        // leave — so close it when the pointer leaves the popup surface itself.
+                        let body = if matches!(mode, PopupMode::Click) {
+                            mouse_area(self.wrap_popup(mapped))
+                                .on_exit(Message::CloseModulePopup)
+                                .into()
+                        } else {
+                            self.wrap_popup(mapped)
+                        };
+                        return body;
                     }
                 }
             }
