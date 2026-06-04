@@ -55,10 +55,14 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   a warning (not enforcement) and the consent key stays `sha256(wasm)`. Plus **`ezbar inspect
   <plugin.wasm>`** — the install flow's "print the grant block" half, standalone with zero
   registry (manifest → sha256 + the `[modules.<id>]` block to paste, never auto-written), so the
-  local lifecycle **package → inspect → grant** is complete. **C) TODO — registry:** git-backed
-  per-plugin-versioned index +
-  `install`/`update`/`list`/`remove`/`search` (TOFU publisher-pin, prebuilt+sha256, **print**
-  the grant block, WIT-window negotiation). The network effect no other bar has.
+  local lifecycle **package → inspect → grant** is complete. **C) local core DONE:** `ezbar add
+  <id> [--registry <dir>|$EZBAR_REGISTRY]` (resolve from a **local** registry dir → WIT-window
+  negotiation `registry::pick_in_window` → verify sha256 → install → print grant block), `ezbar
+  list` (installed + consent state + declared caps), `ezbar remove <id>` (delete `.wasm` +
+  consent, never config). Naming: it's `ezbar add` (`ezbar install` already = sway-config).
+  **Remaining:** the HTTPS/git fetch transport (so a **hosted** registry works, not just a local
+  dir) + `update`/`search` + TOFU publisher-pin — needs the registry repo to exist (a publish
+  decision). The network effect no other bar has.
 
 - [~] **CRIT (security) — id-keyed grants → confused-deputy. Hash-binding DONE; manifest
   binding remains.** RFC 0006 §5 promised hash-keyed grants ("can't swap a benign manifest under

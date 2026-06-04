@@ -191,9 +191,19 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
     block to paste (never auto-writing config) + points at `ezbar grant`. So the local lifecycle —
     **package** (author) → **inspect** (see/paste grant) → **grant** (consent to the bytes) — is
     complete; Phase C adds only the network fetch + the registry index on top.
-- **Phase B — `cargo ezbar package`** (§7): the producer tool.
-- **Phase C — the registry + `ezbar install`/`list`/`remove`/`search`/`update`** (§4/§5): the thin
-  consumer layer, TOFU pin, print-the-block, WIT-window version negotiation.
+- **Phase B — `cargo ezbar package`** (§7): the producer tool. **SHIPPED** (`ezbar package`):
+  embeds the manifest + prints the index entry with `sha256` over the shipped artifact.
+- **Phase C — the registry + consumer CLI** (§4/§5). **Local core SHIPPED:** `ezbar add <id>
+  [--registry <dir>|$EZBAR_REGISTRY]` resolves a plugin against a **local** registry directory
+  (`plugins/<id>/<version>.toml` index + co-located `<version>.wasm`), does **WIT-window version
+  negotiation** (`registry::pick_in_window` over the frozen `{0.1.0,0.2.0}` window, newest by
+  dotted-numeric compare), verifies `sha256`, installs, and **prints the grant block**; plus
+  `ezbar list` (installed + consent state + declared caps) and `ezbar remove <id>` (delete the
+  `.wasm` + consent record, never `config.toml`). Naming: plugin install is **`ezbar add`** —
+  `ezbar install` already means "add ezbar to sway config". **Remaining:** the HTTPS/git fetch
+  transport (so a *hosted* registry works, not just a local dir), `update`/`search`, and the TOFU
+  publisher-pin (a local dir is already trusted). The remaining piece needs the registry repo to
+  exist.
 
 ## 9. Open questions — resolved
 1. Manifest transport → embedded section (load-time enforce) **and** index entry (pre-download

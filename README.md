@@ -175,8 +175,11 @@ Consent is bound to the plugin's **content hash**, not its name (RFC 0014), so a
 binary can't inherit a grant:
 
 ```sh
+ezbar add <id> --registry <dir>   # install from a (local) registry: verify sha256 → install → print grant
+ezbar list                  # installed plugins + consent state + declared caps
 ezbar inspect my.wasm       # show what it declares + the exact [modules.<id>] block to paste
 ezbar grant <id>            # approve the plugin's current bytes (re-run after a rebuild/update)
+ezbar remove <id>           # uninstall (deletes the .wasm + consent record, never your config)
 ezbar package my.wasm       # author: embed an ezbar:manifest (declared caps) + print the registry entry
 ```
 
