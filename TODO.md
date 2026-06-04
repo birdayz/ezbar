@@ -96,8 +96,12 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
     `run_command`). **Follow-up:** Go-SDK parity (needs the v0.2.0 Go bindings regenerated).
 
 ### Ongoing — reliability (table stakes)
-- [ ] **Multi-monitor / hotplug / sway-reload hardening** + a regression harness for
-  output churn (the two-bars saga bit us twice). Stunning-but-flaky ≠ best.
+- [~] **Multi-monitor / hotplug / sway-reload hardening** — **churn-decision harness DONE.**
+  The surface reconcile's create/close decision is now a pure `plan_surfaces(desired, tracked)`
+  with an explicit dedup (the two-bars-saga guard) and a unit-test harness covering
+  appear/disappear/hot-swap/steady-state + the duplicate cases. **Remaining:** the live
+  multi-output churn paths (real hotplug ordering, OutputName-arrives-late, sway-reload) — need
+  a second monitor to exercise end to end. Stunning-but-flaky ≠ best.
 
 ### Backlog from the reactor reviews (non-blocking)
 - [ ] Wire `save_state`/`restore` across clean reloads, or drop them from the frozen WIT.
