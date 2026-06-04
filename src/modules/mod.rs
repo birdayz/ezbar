@@ -11,6 +11,7 @@ pub mod github;
 pub mod ip;
 pub mod keyboard;
 pub mod kubectl;
+pub mod markup;
 pub mod media;
 pub mod memory;
 pub mod net;

@@ -17,6 +17,15 @@
 //! icon       = ""
 //! ```
 //!
+//! The command's output may use the inline-markup subset (RFC 0002) to colour or bold a
+//! substring against the theme — no Rust, no Pango:
+//! ```toml
+//! [modules.net]
+//! command = "ping -c1 -W1 1.1.1.1 >/dev/null && echo '[c=ok]up[/c]' || echo '[c=urgent]down[/c]'"
+//! ```
+//! Tags: `[c=TOKEN]…[/c]` (TOKEN = accent/fg/fg_dim/ok/warn/urgent/sep) and `[b]…[/b]`.
+//! Anything that isn't a valid tag is shown literally, so plain output is unaffected.
+//!
 //! The glyph can swap by what the output says, and a danger dot can flag a bad state:
 //! ```toml
 //! [modules.netcheck]
@@ -157,7 +166,10 @@ impl Module for Custom {
         if !icon.is_empty() {
             parts.push(text(icon.to_string()).color(ctx.accent()).into());
         }
-        parts.push(text(self.text.clone()).into());
+        // Render the command output through the inline-markup subset (RFC 0002): a script
+        // can emit `[c=ok]up[/c]` / `[b]…[/b]` to colour or bold a substring. Markup-free
+        // output is a single plain segment → a plain `text` (unchanged for existing widgets).
+        parts.push(crate::modules::markup::view(&self.text, ctx));
         // a danger dot when `alert` matches the output (RFC 0003) — themed `urgent`.
         if self.alert.as_ref().is_some_and(|re| re.is_match(&self.text)) {
             parts.push(

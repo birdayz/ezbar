@@ -134,9 +134,14 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   special` fields in `WorkspaceTheme` were vestigial config that lied — removed (re-wiring
   would just duplicate the global theming). `WorkspaceTheme` now carries only `style`.
   (`config.rs:WorkspaceTheme`)
-- [ ] **MED** — **Inline markup unimplemented.** RFC specs a themed `[c=token]…[/c]` /
-  `[b]…[/b]` subset for `window_title`/`custom`; not built. (`config.rs`, `modules/
-  window_title.rs`)
+- [~] **MED** — **Inline markup — `custom` DONE; `window_title` deferred.** The themed
+  `[c=token]…[/c]` / `[b]…[/b]` subset (RFC 0002) is built as a renderer-agnostic
+  `modules::markup` (parse → coalesce → `rich_text` spans, theme-token colours, forgiving on
+  malformed/literal brackets, unit-tested) and wired into **`custom`** — a script can emit
+  `[c=ok]up[/c]` to colour its output with no Rust. **Deferred:** `window_title` (its text is
+  untrusted external content, so a stray `[` in a title would mis-parse; it needs an explicit
+  `format` string with the title as a `{field}`, parsed before substitution — a separate
+  change). (`modules/markup.rs`, `modules/custom.rs`)
 - [x] **MED** — `[theme.workspaces].colors[]` / `special[]` — **removed** (were
   undocumented + unused; dropped with the other dead `WorkspaceTheme` fields).
 - [ ] **LOW** — `[bar].radius` on the **solid** bar surface (margin/float shipped;
