@@ -42,9 +42,23 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   its own RFC. The sandbox stays a sandbox.
 
 ### P2 — ecosystem
-- [ ] **Plugin registry + `ezbar install <plugin>`** with a capability **manifest** the
-  user approves on install. Multi-language already works (Rust + Go/TinyGo). The network
-  effect no other bar has.
+- [ ] **Plugin registry + `ezbar install` + capability manifest** — **RFC 0014 Accepted**
+  (security + CLI/ecosystem reviewers ACK after fold-ins). Three phases: **A)** manifest reader
+  + the **hash-keyed grant fix** (the security core, see CRIT below) + `cargo ezbar package`'s
+  `wasm-tools` emit; **B)** `cargo ezbar package` producer tool; **C)** the git-backed
+  per-plugin-versioned registry + `install`/`update`/`list`/`remove`/`search` (TOFU
+  publisher-pin, prebuilt+sha256, **print** the grant block — never auto-write config, WIT-window
+  version negotiation). The network effect no other bar has.
+
+- [ ] **CRIT (security) — grants are id-keyed, not `hash(wasm ‖ manifest)`-keyed.** RFC 0006 §5
+  promised hash-keyed grants ("can't swap a benign manifest under a granted hash to escalate"),
+  but the host keys capability grants by the plugin **id** (= config key = `.wasm` stem) and never
+  reads any embedded manifest. So a *different* `weather.wasm` dropped in the plugins dir inherits
+  the existing `[modules.weather]` grant with **no re-prompt** — a confused-deputy (the bar
+  hot-reloads on mtime, so this path is live today). Found by the RFC 0014 security review. Fix =
+  RFC 0014 **Phase A**: move enforcement to a `hash(wasm ‖ manifest)` consent (`grants.toml`), read
+  the embedded manifest at load, refuse-and-explain on no-consent/cap-mismatch, re-prompt on any
+  artifact change. (`crates/ezbar-wasm`, `src/modules/mod.rs`.)
 
 ### P1 (cont.) — read-only sway IPC: **designed, ready to implement**
 - [ ] **Read-only sway state** — **RFC 0013 Accepted** (both reviewers ACK after folding
