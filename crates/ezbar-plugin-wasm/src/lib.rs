@@ -330,7 +330,11 @@ pub enum Feed {
 /// The host performs the call; an ungranted one returns an error.
 pub trait Ctx {
     /// HTTP GET `url` (gated by a `network { host }` capability). Returns the body.
-    /// Runs on the plugin's off-GUI thread, so a blocking fetch is fine.
+    /// The host runs it async; from your plugin it's a normal blocking call. Keep it on
+    /// the **poll/timer** path, NOT in a pointer handler: while a fetch is in flight your
+    /// plugin processes no further input (one drive task per plugin), so a click handler
+    /// that fetches makes the widget unresponsive for the duration. Pointer handlers must
+    /// be cheap; kick I/O to the next `Event::Timer`.
     fn http_get(&mut self, url: &str) -> Result<Vec<u8>, String>;
     /// Append a line to the bar's log.
     fn log(&mut self, msg: &str);

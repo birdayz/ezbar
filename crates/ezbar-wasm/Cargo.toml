@@ -19,8 +19,9 @@ log = "0.4"
 # blocking a thread, so one reactor loop serves many plugins (RFC 0008).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # the reactor drives plugin tasks on the bar's existing runtime (a Handle passed in);
-# `time` for the per-call wall-clock backstop + POLL, `rt` for spawn_blocking compiles.
-tokio = { version = "1", features = ["rt", "time"] }
+# `time` for the per-call wall-clock backstop + POLL, `rt` for spawn_blocking compiles,
+# `sync` for the GUI→drive-task pointer-event channel (RFC 0009).
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 # `examples/preview.rs` renders a `.wasm` plugin in the real themed harness window
 # (same loop the bar uses) — a dev-only render-preview, kept out of the bar build.

@@ -1,4 +1,54 @@
-# ezbar — TODO
+# ezbar — roadmap & TODO
+
+## ★ North star — toward the best bar ever
+
+**Thesis:** ezbar has two assets no other bar has — **GPU rendering** and a **safe,
+hot-reloadable plugin platform** — and today it uses about half of each. "Best bar
+ever" is *not* more built-in modules or theme knobs (that's the waybar treadmill).
+It's finishing those two things so the bar does what no other bar can: **feel alive
+(motion) and let you build & interact (a real widget platform).**
+
+Each bet runs the drill: RFC → review (2 subagents) → implement → review → commit → merge.
+
+### P0 — make it alive (start here)
+- [ ] **Pointer events → interactive plugins** — *RFC 0009 accepted (double-ACK); implementing.* The widget
+  DSL already has `mouse-area` and `events` already has `pointer-event`; the host just
+  never delivers them (and the lift drops the hit id). Route press/right-press/scroll/
+  enter/leave to the guest's `update(Event::Pointer{…})` through the reactor, under the
+  same timeout/epoch/trap bounds. Unlocks buttons, sliders, scroll-to-change. *Foundational.*
+- [ ] **Motion — one easing primitive.** The GPU's unused payoff and the r/unixporn
+  "what bar is *that*?". Eased value transitions, sliding/fading popups, smooth graph
+  scroll, hover micro-interactions, 60–120 fps — impossible on a cairo bar. Start with a
+  single host-applied animation primitive (value/opacity ease), then extend.
+
+### P1 — finish the platform
+- [ ] **Event-driven cadence (`set_timeout`)** — kill the 2 s blind poll (the one
+  un-Zellij thing left); plugins pick their own wake cadence, idle plugins cost zero.
+- [ ] **Safe host capabilities** so the powerful widgets *can* be plugins (RFC 0007
+  showed they can't today): host-computed **feeds** (cpu/mem/temp/net) + **read-only
+  sway IPC** (workspaces/title). The sandbox stays a sandbox.
+
+### P2 — ecosystem
+- [ ] **Plugin registry + `ezbar install <plugin>`** with a capability **manifest** the
+  user approves on install. Multi-language already works (Rust + Go/TinyGo). The network
+  effect no other bar has.
+
+### Ongoing — reliability (table stakes)
+- [ ] **Multi-monitor / hotplug / sway-reload hardening** + a regression harness for
+  output churn (the two-bars saga bit us twice). Stunning-but-flaky ≠ best.
+
+### Backlog from the reactor reviews (non-blocking)
+- [ ] Wire `save_state`/`restore` across clean reloads, or drop them from the frozen WIT.
+- [ ] Cache eviction sweep (`.cwasm` grows unbounded on plugin rebuilds).
+- [ ] Capability matcher: normalize host/port/case (no naive string equality).
+
+### Anti-goals (the Linus part)
+No chasing waybar's module count. No config knobs for zero users. Every hour on a
+builtin nobody asked for is an hour stolen from the platform + the motion.
+
+---
+
+## Detailed backlog
 
 Outstanding work, tagged by criticality. The bar is fully functional today, so there
 are no **CRIT** items (nothing broken/crashing); the highest are promised-but-missing

@@ -38,7 +38,9 @@ wasmtime::component::bindgen!({
 });
 
 // `Tree` is re-exported at the bindgen root by the world's `use`.
+use ezbar::plugin::events::{PointerEvent, PointerKind};
 use ezbar::plugin::ui::Node;
+use ezbar_plugin::iced::mouse::ScrollDelta;
 
 // resource bounds (RFC 0006 §1a / RFC 0008: fixed constants)
 const EPOCH_TICK: Duration = Duration::from_millis(10);
@@ -47,9 +49,15 @@ const MEM_LIMIT: usize = 2 << 20; // 2 MiB per plugin store (RFC 0008 §3.4: 8�
 const MAX_NODES: usize = 2_000;
 const MAX_DEPTH: usize = 32;
 const POLL: Duration = Duration::from_secs(2); // v1 timer cadence
-                                               // Per-call wall-clock backstop — the *primary* CPU bound (epoch-yield only smooths,
-                                               // a yielding guest never self-traps). Must exceed the 8s http timeout (RFC 0008 §3.4).
+                                               // Per-call wall-clock backstop — the *primary* CPU bound (epoch-yield only smooths, a
+                                               // yielding guest never self-traps). Must exceed the 8s http timeout (RFC 0008 §3.4).
 const WALL: Duration = Duration::from_secs(12);
+// RFC 0009: minimum gap between pointer-driven guest calls — a yield point between calls
+// that caps pointer cadence to ~62/s/plugin regardless of input rate or guest slowness.
+const MIN_INTERVAL: Duration = Duration::from_millis(16);
+// Cap on a guest-controlled `mouse-area` hit id: the lifted arena lives outside the
+// store's memory limit, so bound it (same spirit as MAX_NODES).
+const MAX_ID_LEN: usize = 64;
 
 // ── host store data + the gated import interface ─────────────────────────────
 
@@ -153,6 +161,7 @@ enum LNode {
     },
     MouseArea {
         child: u32,
+        id: String,
     },
     Icon {
         id: icons::Icon,
@@ -242,6 +251,8 @@ fn lift_node(n: &Node, idx: u32) -> Result<LNode, String> {
         },
         N::MouseArea(m) => LNode::MouseArea {
             child: check_fwd(idx, m.child)?,
+            // keep the guest's hit id (RFC 0009 — it routes pointer events back), capped.
+            id: m.id.chars().take(MAX_ID_LEN).collect(),
         },
         N::Icon(i) => LNode::Icon {
             id: icon(i.id),
@@ -421,9 +432,10 @@ impl Reactor {
         config: Vec<(String, String)>,
         grants: Vec<String>,
         slot: Slot,
+        input: tokio::sync::mpsc::Receiver<PointerEvent>,
     ) -> tokio::task::JoinHandle<()> {
         self.rt.spawn(async move {
-            if let Err(e) = self.drive(path.clone(), config, grants, slot).await {
+            if let Err(e) = self.drive(path.clone(), config, grants, slot, input).await {
                 log::warn!("ezbar-wasm: plugin {path:?} stopped: {e:#}");
             }
         })
@@ -435,6 +447,7 @@ impl Reactor {
         config: Vec<(String, String)>,
         grants: Vec<String>,
         slot: Slot,
+        mut input: tokio::sync::mpsc::Receiver<PointerEvent>,
     ) -> Result<()> {
         // Load the component via the on-disk artifact cache (mmap'd, Shared_Clean —
         // RFC 0008 §6 Q3), all on the blocking pool so the heavy CPU compile + I/O
@@ -491,66 +504,120 @@ impl Reactor {
             }
         }
 
-        let timer = ezbar::plugin::events::Event::Timer;
+        // Drive loop: a (coalesced) pointer event when one arrives, else a timer tick after
+        // POLL of quiet. `carry` holds a non-scroll event pulled while coalescing a scroll
+        // run, so it's processed next — a click is never reordered across a scroll batch.
+        let mut carry: Option<PointerEvent> = None;
         loop {
-            store.set_epoch_deadline(DEADLINE_TICKS); // re-arm the yield window
-            let dirty =
-                match tokio::time::timeout(WALL, plugin.call_update(&mut store, &timer)).await {
-                    Ok(Ok(d)) => d,
-                    Ok(Err(e)) => {
-                        log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
-                        return Ok(()); // store dropped here, on this worker, never re-entered
-                    }
-                    Err(_) => {
-                        log::warn!("ezbar-wasm: update exceeded {WALL:?} — disabling plugin");
-                        return Ok(());
-                    }
-                };
-            if dirty {
-                store.set_epoch_deadline(DEADLINE_TICKS);
-                let view = match tokio::time::timeout(WALL, plugin.call_view(&mut store)).await {
-                    Ok(Ok(tree)) => match lift(&tree) {
-                        Ok(l) => Some(l),
-                        Err(e) => {
-                            log::warn!("ezbar-wasm: view rejected: {e}");
-                            None
-                        }
+            let next = match carry.take() {
+                Some(c) => Some(c),
+                None => tokio::select! {
+                    biased;
+                    ev = input.recv() => match ev {
+                        Some(e) => Some(e),
+                        None => return Ok(()), // all senders gone (module dropped) → stop
                     },
-                    Ok(Err(e)) => {
-                        log::warn!("ezbar-wasm: view trapped — disabling plugin: {e}");
-                        return Ok(());
+                    _ = tokio::time::sleep(POLL) => None, // timer tick
+                },
+            };
+            let event = match next {
+                None => Event::Timer,
+                Some(first) if matches!(first.kind, PointerKind::Scroll) => {
+                    // Coalesce the leading run of consecutive scrolls (lossless sum); a
+                    // non-scroll flushes the run and is carried to the next iteration.
+                    let mut delta = first.delta;
+                    loop {
+                        match input.try_recv() {
+                            Ok(e) if matches!(e.kind, PointerKind::Scroll) => delta += e.delta,
+                            Ok(e) => {
+                                carry = Some(e);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
                     }
-                    Err(_) => {
-                        log::warn!("ezbar-wasm: view exceeded {WALL:?} — disabling plugin");
-                        return Ok(());
-                    }
-                };
-                store.set_epoch_deadline(DEADLINE_TICKS);
-                let popup = match tokio::time::timeout(WALL, plugin.call_popup(&mut store)).await {
-                    Ok(Ok(Some(tree))) => lift(&tree).ok(),
-                    Ok(Ok(None)) => None,
-                    Ok(Err(e)) => {
-                        log::warn!("ezbar-wasm: popup trapped — disabling plugin: {e}");
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        log::warn!("ezbar-wasm: popup exceeded {WALL:?} — disabling plugin");
-                        return Ok(());
-                    }
-                };
-                {
-                    let mut s = slot.slots.lock().unwrap_or_else(|e| e.into_inner());
-                    if view.is_some() {
-                        s.view = view;
-                    }
-                    s.popup = popup;
+                    Event::Pointer(PointerEvent {
+                        id: first.id,
+                        kind: PointerKind::Scroll,
+                        delta,
+                    })
                 }
-                // A new frame landed — bump the version so the chip re-renders once.
-                slot.version.fetch_add(1, Ordering::Release);
+                Some(first) => Event::Pointer(first),
+            };
+            let is_pointer = matches!(event, Event::Pointer(_));
+            if !step(&mut store, &plugin, &slot, &event).await {
+                return Ok(()); // trap/timeout — store dropped here, on this worker
             }
-            tokio::time::sleep(POLL).await;
+            if is_pointer {
+                // Cadence gate: a yield + min gap between pointer-driven calls so input
+                // can't pin a worker (the real fairness bound — RFC 0009 §3.4).
+                tokio::time::sleep(MIN_INTERVAL).await;
+            }
         }
     }
+}
+
+/// One guest `update(event)` followed by a re-render into the slot if it went dirty.
+/// Returns `false` to disable the plugin (trap/timeout) — the caller then drops the
+/// `Store` on this worker, never re-entered. Every guest call re-arms the epoch deadline
+/// and is wrapped in the WALL backstop (RFC 0008 §3.4 / RFC 0009 implementer checklist).
+async fn step(store: &mut Store<Host>, plugin: &Plugin, slot: &Slot, event: &Event) -> bool {
+    store.set_epoch_deadline(DEADLINE_TICKS);
+    let dirty = match tokio::time::timeout(WALL, plugin.call_update(&mut *store, event)).await {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
+            log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
+            return false;
+        }
+        Err(_) => {
+            log::warn!("ezbar-wasm: update exceeded {WALL:?} — disabling plugin");
+            return false;
+        }
+    };
+    if !dirty {
+        return true;
+    }
+    store.set_epoch_deadline(DEADLINE_TICKS);
+    let view = match tokio::time::timeout(WALL, plugin.call_view(&mut *store)).await {
+        Ok(Ok(tree)) => match lift(&tree) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                log::warn!("ezbar-wasm: view rejected: {e}");
+                None
+            }
+        },
+        Ok(Err(e)) => {
+            log::warn!("ezbar-wasm: view trapped — disabling plugin: {e}");
+            return false;
+        }
+        Err(_) => {
+            log::warn!("ezbar-wasm: view exceeded {WALL:?} — disabling plugin");
+            return false;
+        }
+    };
+    store.set_epoch_deadline(DEADLINE_TICKS);
+    let popup = match tokio::time::timeout(WALL, plugin.call_popup(&mut *store)).await {
+        Ok(Ok(Some(tree))) => lift(&tree).ok(),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            log::warn!("ezbar-wasm: popup trapped — disabling plugin: {e}");
+            return false;
+        }
+        Err(_) => {
+            log::warn!("ezbar-wasm: popup exceeded {WALL:?} — disabling plugin");
+            return false;
+        }
+    };
+    {
+        let mut s = slot.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if view.is_some() {
+            s.view = view;
+        }
+        s.popup = popup;
+    }
+    // A new frame landed — bump the version so the chip re-renders once.
+    slot.version.fetch_add(1, Ordering::Release);
+    true
 }
 
 // ── on-disk compiled-artifact cache (RFC 0008 §6 Q3) ─────────────────────────
@@ -623,6 +690,9 @@ enum Msg {
     Tick,
     Hover,
     Leave,
+    /// A pointer event on one of the plugin's `mouse-area`s (RFC 0009), forwarded to the
+    /// drive task and delivered to the guest as `Event::Pointer`.
+    Pointer(PointerEvent),
 }
 
 /// A loaded WASM plugin, presented to the bar as a [`Module`].
@@ -630,6 +700,14 @@ pub struct WasmModule {
     id: String,
     instance: u64,
     slot: Slot,
+    /// GUI → drive-task pointer events (RFC 0009). Bounded; `try_send` never blocks the
+    /// GUI thread.
+    input: tokio::sync::mpsc::Sender<PointerEvent>,
+    /// Coalesced scroll not yet on the channel: `(id, summed delta)`. When the channel is
+    /// full a scroll merges in here instead of being dropped (no scroll lost), so under a
+    /// flood the backlog collapses to ≤1 pending message and can never fill the channel out
+    /// of a queued `press` (RFC 0009 §3.4 — protect clicks).
+    pending_scroll: Option<(String, f32)>,
     /// The reactor task driving this plugin, aborted on `Drop` (RFC 0008 lifecycle).
     task: tokio::task::JoinHandle<()>,
 }
@@ -663,11 +741,14 @@ impl WasmModule {
             slots: Mutex::new(Slots::default()),
             version: AtomicU64::new(0),
         });
-        let task = reactor(&rt).add_plugin(path, config, grants, slot.clone());
+        let (input, rx) = tokio::sync::mpsc::channel(32);
+        let task = reactor(&rt).add_plugin(path, config, grants, slot.clone(), rx);
         WasmModule {
             id: id.into(),
             instance,
             slot,
+            input,
+            pending_scroll: None,
             task,
         }
     }
@@ -710,6 +791,34 @@ impl Module for WasmModule {
             // (the host doesn't auto-close — the module drives both, like calendar).
             Some(Msg::Hover) => Response::request(HostRequest::OpenPopup(PopupMode::Hover)),
             Some(Msg::Leave) => Response::request(HostRequest::ClosePopup),
+            // Forward a pointer event to the drive task (non-blocking). Scrolls are
+            // coalesced into `pending_scroll` and flushed as one message, so a scroll
+            // flood never fills the channel and evicts a queued `press` (RFC 0009 §3.4).
+            Some(Msg::Pointer(pe)) => {
+                if matches!(pe.kind, PointerKind::Scroll) {
+                    let acc = self.pending_scroll.take().map_or(0.0, |(_, d)| d) + pe.delta;
+                    let merged = PointerEvent {
+                        id: pe.id.clone(),
+                        kind: PointerKind::Scroll,
+                        delta: acc,
+                    };
+                    // On a full channel, retain the accumulator (no scroll is ever lost).
+                    if self.input.try_send(merged).is_err() {
+                        self.pending_scroll = Some((pe.id.clone(), acc));
+                    }
+                } else {
+                    // Flush any pending scroll first (preserve order), then the discrete tap.
+                    if let Some((id, delta)) = self.pending_scroll.take() {
+                        let _ = self.input.try_send(PointerEvent {
+                            id,
+                            kind: PointerKind::Scroll,
+                            delta,
+                        });
+                    }
+                    let _ = self.input.try_send(pe.clone());
+                }
+                Response::none()
+            }
             _ => Response::none(), // Tick: just re-render; `view` reads the cache
         }
     }
@@ -825,6 +934,17 @@ fn paint_color(p: &Paint, ctx: &Ctx) -> Color {
     }
 }
 
+/// Normalize a wheel/touchpad scroll to **line-equivalents** before it crosses the frozen
+/// `f32` ABI (RFC 0009): a notched wheel gives `Lines` (±1/notch), a touchpad gives
+/// `Pixels` (tens per tick); without this the same gesture would differ ~50× and the guest
+/// couldn't tell. `16` ≈ a line height in px.
+fn scroll_lines(d: ScrollDelta) -> f32 {
+    match d {
+        ScrollDelta::Lines { y, .. } => y,
+        ScrollDelta::Pixels { y, .. } => y / 16.0,
+    }
+}
+
 /// Rough content-size of a lifted subtree, used to size a popup surface. Off the
 /// GUI thread we have no real text metrics, so estimate: ~0.55em advance per
 /// char, 1.4em line height. Good enough to keep a popup snug, not pixel-exact.
@@ -857,7 +977,7 @@ fn measure(l: &Lifted, idx: u32) -> (f32, f32) {
             let (cw, ch) = measure(l, *child);
             (cw + padding * 2.0, ch + padding * 2.0)
         }
-        LNode::MouseArea { child } => measure(l, *child),
+        LNode::MouseArea { child, .. } => measure(l, *child),
         LNode::Icon { size, .. } => (*size, *size),
         LNode::Graph { .. } => (48.0, 16.0), // matches the chip sparkline size below
         LNode::Chart { width, height, .. } => (*width, *height),
@@ -920,8 +1040,36 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
         LNode::Container { child, padding } => container(build(l, *child, ctx, depth + 1))
             .padding(*padding)
             .into(),
-        // interactivity (pointer events) is phase-2b; render the child for now
-        LNode::MouseArea { child } => mouse_area(build(l, *child, ctx, depth + 1)).into(),
+        // RFC 0009: route pointer events back to the guest. `press`/`right-press` fire on
+        // button-**down** over the widget — a discrete tap. (iced's `on_release` is *not* a
+        // completed-click primitive: it fires on any release-while-hovering regardless of
+        // where the press began, so it would invent phantom clicks on drag-onto. v1 has no
+        // release/motion, so no drag/cancel semantics.) Scroll is normalized to
+        // line-equivalents host-side before the f32 ABI.
+        LNode::MouseArea { child, id } => {
+            let inner = build(l, *child, ctx, depth + 1);
+            let ptr = |kind, delta| {
+                ModMsg::new(Msg::Pointer(PointerEvent {
+                    id: id.clone(),
+                    kind,
+                    delta,
+                }))
+            };
+            let scroll_id = id.clone();
+            mouse_area(inner)
+                .on_press(ptr(PointerKind::Press, 0.0))
+                .on_right_press(ptr(PointerKind::RightPress, 0.0))
+                .on_enter(ptr(PointerKind::Enter, 0.0))
+                .on_exit(ptr(PointerKind::Leave, 0.0))
+                .on_scroll(move |d| {
+                    ModMsg::new(Msg::Pointer(PointerEvent {
+                        id: scroll_id.clone(),
+                        kind: PointerKind::Scroll,
+                        delta: scroll_lines(d),
+                    }))
+                })
+                .into()
+        }
         LNode::Icon { id, color, size } => id.view(*size, paint_color(color, ctx)),
         LNode::Graph { values, kind, line } => canvas(Graph {
             values: values.clone(),
