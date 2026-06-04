@@ -11,6 +11,7 @@ pub mod github;
 pub mod ip;
 pub mod keyboard;
 pub mod kubectl;
+pub mod media;
 pub mod memory;
 pub mod net;
 pub mod ping;
@@ -113,6 +114,7 @@ pub fn is_module(id: &str) -> bool {
                 | "updates"
                 | "keyboard"
                 | "workspaces"
+                | "media"
                 | "memory"
                 | "temperature"
                 | "ping"
@@ -225,6 +227,7 @@ pub fn build(
         "updates" => Some(Box::new(updates::Updates::new(instance, cfg))),
         "keyboard" => Some(Box::new(keyboard::Keyboard::new(instance, cfg))),
         "workspaces" => Some(Box::new(workspaces::Workspaces::new(instance, cfg))),
+        "media" => Some(Box::new(media::Media::new(instance, cfg))),
         "memory" => Some(Box::new(memory::Memory::new(instance, cfg))),
         "temperature" => Some(Box::new(temperature::Temperature::new(instance, cfg))),
         "ping" => Some(Box::new(ping::Ping::new(instance, cfg))),

@@ -3,6 +3,7 @@ pub mod calendar;
 pub mod claude;
 pub mod github;
 pub mod kubectl;
+pub mod media;
 pub mod ping;
 pub mod spotify;
 pub mod stock;

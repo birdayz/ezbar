@@ -174,8 +174,13 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 
 ## Tier-B desktop stack (RFC 0003 — "expensive, demand-gated")
 
-- [ ] **MED** — **`tray`** (StatusNotifierItem) and **`media`** (MPRIS + art + transport)
-  — the most-requested Tier-B modules; need the `Service` layer first.
+- [~] **MED** — **`media` (MPRIS now-playing) DONE; `tray` remaining.** The `media` module
+  shells out to `playerctl` (dependency-free, like `ping`/`battery`) for status/artist/title
+  from any MPRIS player — click = play/pause (with an immediate state read-back), scroll =
+  skip, hidden when nothing plays, change-gated renders. Opt-in (`[modules.media]`, not in
+  default placement). A richer D-Bus version (album art + the shared `Service` layer) and
+  **`tray`** (StatusNotifierItem) still want the `Service` layer. (`modules/media.rs`,
+  `sources/media.rs`)
 - [ ] **MED** — **OSD** (volume/brightness transient overlay), driven by `ezbar msg
   volume/brightness …` + widget interaction.
 - [ ] **LOW** — `privacy` (PipeWire mic/cam/screenshare dots).
