@@ -186,12 +186,34 @@ An ungranted `feed_subscribe` is silently never delivered (fire-and-forget — d
 busy-wait on it); an ungranted `sway_snapshot()` returns `Err` (synchronous denial,
 like `http_get`). All read-only — no capability lets a plugin *drive* the bar or sway.
 
-> **Planned (not wired yet):** a per-plugin `ezbar-plugin.toml` manifest that
-> *declares* what the plugin needs (`[[capabilities]] kind = "network"`) so the
-> bar can prompt the user to grant on first load and re-prompt on change. Until
-> that ships, declaration is informational and the **config grant above is the
-> real gate** — so document the `[modules.<id>].network` line your plugin needs in
-> your README.
+### Declare what you need — `ezbar-plugin.toml` + `ezbar package`
+
+Ship a sidecar `ezbar-plugin.toml` declaring the capabilities your plugin needs, and embed
+it into the `.wasm` with the producer step (RFC 0014):
+
+```toml
+# ezbar-plugin.toml — beside your built .wasm
+id = "weather"
+name = "Weather"
+version = "1.2.0"
+wit = "0.2.0"                 # the WIT version you built against
+description = "Forecast chip with an hourly/daily hover panel."
+[capabilities]
+network = ["api.open-meteo.com", "wttr.in"]
+feeds = []
+sway = false
+```
+
+```sh
+ezbar package weather.wasm        # embeds ezbar:manifest, prints the registry entry + sha256
+```
+
+The host **reads** the embedded manifest at load: if your plugin declares a capability the
+user didn't grant in `[modules.<id>]`, it logs a clear warning (so an inert widget explains
+itself) instead of failing mute. The manifest is a **declaration, not an authority** — the
+`[modules.<id>]` grant above is still the enforced gate (per-call, and bound to the wasm's
+**content hash**: a user re-approves a changed binary with `ezbar grant <id>`). Still
+document the grant lines your plugin needs in your README so users know what to paste.
 
 ## Rules
 
