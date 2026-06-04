@@ -11,16 +11,25 @@ license = "MIT"
 
 [dependencies]
 ezbar-plugin = { path = "../ezbar-plugin" }
-wasmtime = "45"
+wasmtime = { version = "45", features = ["async"] }   # RFC 0008: async reactor (fibers)
 wasmtime-wasi = "45"
 anyhow = "1"
 log = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# async (not blocking) reqwest: a host http_get suspends the guest fiber instead of
+# blocking a thread, so one reactor loop serves many plugins (RFC 0008).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# the reactor drives plugin tasks on the bar's existing runtime (a Handle passed in);
+# `time` for the per-call wall-clock backstop + POLL, `rt` for spawn_blocking compiles.
+tokio = { version = "1", features = ["rt", "time"] }
 
 # `examples/preview.rs` renders a `.wasm` plugin in the real themed harness window
 # (same loop the bar uses) — a dev-only render-preview, kept out of the bar build.
 [dev-dependencies]
 ezbar-harness = { path = "../ezbar-harness" }
+# the preview owns its own runtime to drive the reactor (the bar reuses iced's, but
+# the preview — especially headless `--check` — has none); multi_thread so tasks run
+# while the harness window blocks. The lib itself never builds a runtime.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[example]]
 name = "preview"

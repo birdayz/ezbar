@@ -127,8 +127,15 @@ pub(crate) fn graph_line_color(cfg: &toml::Value) -> Option<String> {
 }
 
 /// Construct a built-in module by its placement `id` (RFC 0001 factory). `cfg` is
-/// the `[modules.<id>]` table. Returns `None` for ids that are not modules.
-pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Module>> {
+/// the `[modules.<id>]` table. `rt` is the bar's runtime handle, used only by WASM
+/// plugins (the reactor drives their tasks on it — RFC 0008). Returns `None` for ids
+/// that are not modules.
+pub fn build(
+    id: &str,
+    instance: u64,
+    cfg: &toml::Value,
+    rt: &tokio::runtime::Handle,
+) -> Option<Box<dyn Module>> {
     match id {
         "cpu" => Some(Box::new(cpu::Cpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance))),
@@ -154,6 +161,7 @@ pub fn build(id: &str, instance: u64, cfg: &toml::Value) -> Option<Box<dyn Modul
         // a registered WASM plugin (RFC 0006): load the `.wasm` as a Module.
         other => wasm_plugin_path(other).map(|path| {
             let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
+                rt.clone(),
                 instance,
                 other.to_string(),
                 path,

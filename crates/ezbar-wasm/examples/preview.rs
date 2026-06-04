@@ -73,7 +73,16 @@ fn main() -> ezbar_plugin::iced::Result {
         grants,
         config
     );
-    let module = WasmModule::new(0, id, path, config, grants);
+    // The reactor drives the plugin on a tokio runtime. The bar reuses iced's; the
+    // preview owns a small one (RFC 0008 §3.1) — kept alive for the whole run, so it
+    // keeps driving the plugin task even while the harness window blocks below, and
+    // so headless `--check` (which never starts iced) has a runtime at all.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("preview: build tokio runtime");
+    let module = WasmModule::new(rt.handle().clone(), 0, id, path, config, grants);
 
     // Headless smoke test: drive the plugin briefly and report what it rendered.
     if check {

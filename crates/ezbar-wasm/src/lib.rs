@@ -1,44 +1,55 @@
 //! Host runtime for ezbar WASM plugins (RFC 0006 phase 2).
 //!
-//! [`WasmModule`] turns a `.wasm` component into a regular bar [`Module`]: an
-//! off-GUI **actor thread** owns the wasmtime `Store`, drives the plugin's
-//! `update`/`view` loop, lifts the returned widget tree (capped + validated) into
-//! a `Send` arena, and parks it in a shared slot. The bar's `view` only ever
-//! reads that cached slot and renders it as **real iced widgets** — it never
-//! calls into the store. A trap (epoch/OOM) disables the plugin; the bar is
+//! [`WasmModule`] turns a `.wasm` component into a regular bar [`Module`]. RFC 0008:
+//! one shared [`Reactor`] (a single wasmtime `Engine` + one epoch ticker, on the
+//! bar's existing async runtime) drives every plugin as a green-thread task —
+//! `update`/`view` async, host I/O async (a `http_get` suspends the guest's fiber,
+//! not a thread). Each task lifts the returned widget tree (capped + validated) into
+//! a `Send` arena and parks it in a shared slot. The bar's `view` only ever reads
+//! that cached slot and renders it as **real iced widgets** — it never calls into a
+//! store. A trap/OOM/timeout disables that one plugin; the reactor and bar are
 //! untouched.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tokio::runtime::Handle;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
-use wasmtime_wasi::p2::add_to_linker_sync;
+use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use ezbar_plugin::iced::advanced::subscription::{from_recipe, EventStream, Hasher, Recipe};
 use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
 use ezbar_plugin::iced::{alignment, Color, Element, Length, Subscription};
 use ezbar_plugin::ui::graph::{Graph, GraphKind, StockChart};
 use ezbar_plugin::{icons, Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
+// RFC 0008: async world — host imports are async (http_get suspends the guest's
+// fiber instead of blocking a thread), and the export calls are driven with `.await`.
 wasmtime::component::bindgen!({
     world: "plugin",
     path: "../../wit/since-v0.1.0",
+    imports: { default: async },
+    exports: { default: async },
 });
 
 // `Tree` is re-exported at the bindgen root by the world's `use`.
 use ezbar::plugin::ui::Node;
 
-// resource bounds (RFC 0006 §1a, v2.1: fixed constants)
+// resource bounds (RFC 0006 §1a / RFC 0008: fixed constants)
 const EPOCH_TICK: Duration = Duration::from_millis(10);
-const DEADLINE_TICKS: u64 = 20; // ~200ms per guest call
-const MEM_LIMIT: usize = 8 << 20; // 8 MiB per plugin store
+const DEADLINE_TICKS: u64 = 20; // ~200ms guest CPU before a cooperative epoch yield
+const MEM_LIMIT: usize = 2 << 20; // 2 MiB per plugin store (RFC 0008 §3.4: 8→2)
 const MAX_NODES: usize = 2_000;
 const MAX_DEPTH: usize = 32;
 const POLL: Duration = Duration::from_secs(2); // v1 timer cadence
+                                               // Per-call wall-clock backstop — the *primary* CPU bound (epoch-yield only smooths,
+                                               // a yielding guest never self-traps). Must exceed the 8s http timeout (RFC 0008 §3.4).
+const WALL: Duration = Duration::from_secs(12);
 
 // ── host store data + the gated import interface ─────────────────────────────
 
@@ -47,19 +58,10 @@ struct Host {
     wasi: WasiCtx,
     limits: StoreLimits,
     granted_network: Vec<String>,
-    // Set while the guest is parked in a blocking host call (e.g. http_get) so the
-    // epoch ticker pauses — the deadline bounds GUEST cpu, not time spent waiting
-    // on the network, which has its own timeout.
-    epoch_paused: Arc<AtomicBool>,
-}
-
-/// Resets the epoch-pause flag on drop, so every `http_get` return path (incl.
-/// the `?` early-exits) re-arms the ticker.
-struct PauseGuard(Arc<AtomicBool>);
-impl Drop for PauseGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Relaxed);
-    }
+    // One async client, shared from the reactor (Arc-cheap to clone). No more
+    // epoch-pause hack: a fiber parked in `http_get.await` runs no guest code, so it
+    // burns no epoch by construction (RFC 0008 §3.3).
+    client: reqwest::Client,
 }
 
 impl WasiView for Host {
@@ -71,45 +73,49 @@ impl WasiView for Host {
     }
 }
 
+// RFC 0008: host imports are async. INVARIANT (§3.4): every import returns `Err`,
+// never panics — these run on the shared reactor worker, where a panic could wedge
+// the engine. No `unwrap`/indexing/`expect` on guest-influenced data.
 impl ezbar::plugin::host::Host for Host {
-    fn log(&mut self, msg: String) {
+    async fn log(&mut self, msg: String) {
         log::info!("[wasm plugin] {msg}");
     }
-    fn text_size(&mut self) -> f32 {
+    async fn text_size(&mut self) -> f32 {
         14.0
     }
-    fn fg(&mut self) -> ezbar::plugin::types::Paint {
+    async fn fg(&mut self) -> ezbar::plugin::types::Paint {
         ezbar::plugin::types::Paint::Token(ezbar::plugin::types::ThemeToken::Fg)
     }
-    fn set_timeout(&mut self, _ms: u32) {}
-    fn subscribe(&mut self, _kinds: Vec<ezbar::plugin::types::EventKind>) {}
-    fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+    async fn set_timeout(&mut self, _ms: u32) {}
+    async fn subscribe(&mut self, _kinds: Vec<ezbar::plugin::types::EventKind>) {}
+    async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
         let h = url.split("://").nth(1).unwrap_or(&url);
         let h = h.split('/').next().unwrap_or(h);
         if !self.granted_network.iter().any(|g| g == h) {
             return Err(format!("capability denied: network host '{h}' not granted"));
         }
-        // We're on the plugin's off-GUI actor thread, so a blocking fetch is fine.
-        // Pause the epoch ticker for the duration: a slow network response must not
-        // burn the guest's per-call deadline and trap it on resume. The reqwest
-        // timeout bounds the wait independently.
-        self.epoch_paused.store(true, Ordering::Relaxed);
-        let _resume = PauseGuard(self.epoch_paused.clone());
-        let client = reqwest::blocking::Client::builder()
+        // Async fetch: this `await` suspends the guest's fiber, freeing the reactor
+        // worker to serve other plugins. The 8s timeout bounds the wait; the guest
+        // burns no epoch while parked here.
+        let resp = self
+            .client
+            .get(&url)
             .timeout(Duration::from_secs(8))
-            .user_agent("ezbar-wasm")
-            .build()
+            .send()
+            .await
             .map_err(|e| e.to_string())?;
-        let resp = client.get(&url).send().map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("http {}", resp.status()));
         }
-        resp.bytes().map(|b| b.to_vec()).map_err(|e| e.to_string())
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| e.to_string())
     }
-    fn read_file(&mut self, _path: String) -> Result<Vec<u8>, String> {
+    async fn read_file(&mut self, _path: String) -> Result<Vec<u8>, String> {
         Err("capability denied: read-file not granted".into())
     }
-    fn feed_subscribe(&mut self, _feed: ezbar::plugin::types::FeedKind, _min: u32) {}
+    async fn feed_subscribe(&mut self, _feed: ezbar::plugin::types::FeedKind, _min: u32) {}
 }
 
 impl ezbar::plugin::types::Host for Host {}
@@ -339,109 +345,276 @@ fn graph_kind(k: ezbar::plugin::types::GraphKind) -> GraphKind {
     }
 }
 
-// ── the off-GUI actor: owns the Store, drives the plugin, fills the slot ─────
+// ── the cached render slot: writer = the reactor task, readers = the bar ─────
 
 #[derive(Default)]
 struct Slots {
     view: Option<Lifted>,
     popup: Option<Lifted>,
 }
-type Slot = Arc<Mutex<Slots>>;
 
-fn spawn_actor(path: PathBuf, config: Vec<(String, String)>, slot: Slot, grants: Vec<String>) {
-    std::thread::spawn(move || {
-        if let Err(e) = run_actor(&path, config, &slot, grants) {
-            log::warn!("ezbar-wasm: plugin {path:?} stopped: {e:#}");
-        }
-    });
+/// The plugin's cached render, shared between the off-GUI actor (the writer) and
+/// the bar's `view`/subscription (the readers). `version` bumps on every new frame
+/// so the chip's render tick can fire *only when content actually changed* instead
+/// of on a blind 150ms timer — an idle plugin then costs zero per-frame renders
+/// (and zero allocation churn), while a fresh frame still shows within one poll.
+struct Shared {
+    slots: Mutex<Slots>,
+    version: AtomicU64,
+}
+type Slot = Arc<Shared>;
+
+// ── the reactor: ONE shared engine, ONE epoch ticker, N plugin tasks ─────────
+// RFC 0008. The whole-process reactor is built once (lazily) on the first plugin
+// load, from the bar's existing tokio runtime `Handle` — no per-plugin engine, no
+// per-plugin thread.
+
+struct Reactor {
+    engine: Engine,
+    linker: Linker<Host>,
+    client: reqwest::Client,
+    rt: Handle,
 }
 
-fn run_actor(
-    path: &Path,
-    config: Vec<(String, String)>,
-    slot: &Slot,
-    grants: Vec<String>,
-) -> Result<()> {
-    let mut cfg = Config::new();
-    cfg.epoch_interruption(true);
-    let engine = Engine::new(&cfg)?;
-    let component = Component::from_file(&engine, path)?;
-    let mut linker: Linker<Host> = Linker::new(&engine);
-    add_to_linker_sync(&mut linker)?;
-    Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker, |h: &mut Host| h)?;
+static REACTOR: OnceLock<Reactor> = OnceLock::new();
 
-    // epoch ticker for this plugin's engine — paused while the guest is parked in
-    // a blocking host call so network waits don't burn the per-call deadline.
-    let epoch_paused = Arc::new(AtomicBool::new(false));
-    {
-        let eng = engine.clone();
-        let paused = epoch_paused.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(EPOCH_TICK);
-            if !paused.load(Ordering::Relaxed) {
+/// The process reactor, initialised on first use with the bar's runtime `Handle`
+/// (threaded in explicitly per RFC 0008 §3.1 — never `Handle::current()`).
+fn reactor(rt: &Handle) -> &'static Reactor {
+    REACTOR.get_or_init(|| Reactor::new(rt.clone()))
+}
+
+impl Reactor {
+    fn new(rt: Handle) -> Self {
+        let mut cfg = Config::new();
+        cfg.epoch_interruption(true); // async support is always on in wasmtime 45
+        let engine = Engine::new(&cfg).expect("ezbar-wasm: build wasmtime engine");
+        // ONE epoch ticker for the shared engine (a plain sleep loop, not a runtime).
+        {
+            let eng = engine.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(EPOCH_TICK);
                 eng.increment_epoch();
-            }
-        });
+            });
+        }
+        let mut linker: Linker<Host> = Linker::new(&engine);
+        add_to_linker_async(&mut linker).expect("ezbar-wasm: wasi async linker");
+        Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker, |h: &mut Host| h)
+            .expect("ezbar-wasm: plugin linker");
+        // ONE async client shared by every plugin (Arc-cheap clone into each Host).
+        let client = reqwest::Client::builder()
+            .user_agent("ezbar-wasm")
+            .build()
+            .expect("ezbar-wasm: reqwest client");
+        Reactor {
+            engine,
+            linker,
+            client,
+            rt,
+        }
     }
 
-    let wasi = WasiCtxBuilder::new().build();
-    let mut store = Store::new(
-        &engine,
-        Host {
-            table: ResourceTable::new(),
-            wasi,
-            limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
-            granted_network: grants,
-            epoch_paused,
-        },
-    );
-    store.limiter(|h| &mut h.limits);
+    /// Spawn a green-thread driver for one plugin on the shared runtime.
+    fn add_plugin(
+        &'static self,
+        path: PathBuf,
+        config: Vec<(String, String)>,
+        grants: Vec<String>,
+        slot: Slot,
+    ) -> tokio::task::JoinHandle<()> {
+        self.rt.spawn(async move {
+            if let Err(e) = self.drive(path.clone(), config, grants, slot).await {
+                log::warn!("ezbar-wasm: plugin {path:?} stopped: {e:#}");
+            }
+        })
+    }
 
-    store.set_epoch_deadline(DEADLINE_TICKS);
-    let plugin = Plugin::instantiate(&mut store, &component, &linker)?;
-    plugin.call_init(&mut store, &config)?;
-
-    loop {
-        store.set_epoch_deadline(DEADLINE_TICKS); // re-arm per call
-        let dirty = match plugin.call_update(&mut store, &ezbar::plugin::events::Event::Timer) {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
-                return Ok(()); // terminal for instance
+    async fn drive(
+        &'static self,
+        path: PathBuf,
+        config: Vec<(String, String)>,
+        grants: Vec<String>,
+        slot: Slot,
+    ) -> Result<()> {
+        // Load the component via the on-disk artifact cache (mmap'd, Shared_Clean —
+        // RFC 0008 §6 Q3), all on the blocking pool so the heavy CPU compile + I/O
+        // never stalls the reactor worker.
+        let component = {
+            let engine = self.engine.clone();
+            tokio::task::spawn_blocking(move || load_component(&engine, &path))
+                .await
+                .context("compile task join")??
+        };
+        let mut store = Store::new(
+            &self.engine,
+            Host {
+                table: ResourceTable::new(),
+                wasi: WasiCtxBuilder::new().build(),
+                limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
+                granted_network: grants,
+                client: self.client.clone(),
+            },
+        );
+        store.limiter(|h| &mut h.limits);
+        // CPU bound: cooperative epoch-yield (smoothing) + the wall-clock `timeout`
+        // below (the real backstop). A yielding guest never self-traps.
+        store.epoch_deadline_async_yield_and_update(DEADLINE_TICKS);
+        // instantiate + init get the same wall-clock backstop as the loop calls — a
+        // guest that spins in `init` yields on epoch but never self-traps, so without
+        // this the drive loop would never start and nothing could disable it.
+        store.set_epoch_deadline(DEADLINE_TICKS);
+        let plugin = match tokio::time::timeout(
+            WALL,
+            Plugin::instantiate_async(&mut store, &component, &self.linker),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                log::warn!("ezbar-wasm: instantiate failed — disabling plugin: {e}");
+                return Ok(());
+            }
+            Err(_) => {
+                log::warn!("ezbar-wasm: instantiate exceeded {WALL:?} — disabling plugin");
+                return Ok(());
             }
         };
-        if dirty {
-            store.set_epoch_deadline(DEADLINE_TICKS);
-            let view = match plugin.call_view(&mut store) {
-                Ok(tree) => match lift(&tree) {
-                    Ok(l) => Some(l),
-                    Err(e) => {
-                        log::warn!("ezbar-wasm: view rejected: {e}");
-                        None
-                    }
-                },
-                Err(e) => {
-                    log::warn!("ezbar-wasm: view trapped — disabling plugin: {e}");
-                    return Ok(());
-                }
-            };
-            store.set_epoch_deadline(DEADLINE_TICKS);
-            let popup = match plugin.call_popup(&mut store) {
-                Ok(Some(tree)) => lift(&tree).ok(),
-                Ok(None) => None,
-                Err(e) => {
-                    log::warn!("ezbar-wasm: popup trapped — disabling plugin: {e}");
-                    return Ok(());
-                }
-            };
-            let mut s = slot.lock().unwrap();
-            if view.is_some() {
-                s.view = view;
+        match tokio::time::timeout(WALL, plugin.call_init(&mut store, &config)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log::warn!("ezbar-wasm: init failed — disabling plugin: {e}");
+                return Ok(());
             }
-            s.popup = popup;
+            Err(_) => {
+                log::warn!("ezbar-wasm: init exceeded {WALL:?} — disabling plugin");
+                return Ok(());
+            }
         }
-        std::thread::sleep(POLL);
+
+        let timer = ezbar::plugin::events::Event::Timer;
+        loop {
+            store.set_epoch_deadline(DEADLINE_TICKS); // re-arm the yield window
+            let dirty =
+                match tokio::time::timeout(WALL, plugin.call_update(&mut store, &timer)).await {
+                    Ok(Ok(d)) => d,
+                    Ok(Err(e)) => {
+                        log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
+                        return Ok(()); // store dropped here, on this worker, never re-entered
+                    }
+                    Err(_) => {
+                        log::warn!("ezbar-wasm: update exceeded {WALL:?} — disabling plugin");
+                        return Ok(());
+                    }
+                };
+            if dirty {
+                store.set_epoch_deadline(DEADLINE_TICKS);
+                let view = match tokio::time::timeout(WALL, plugin.call_view(&mut store)).await {
+                    Ok(Ok(tree)) => match lift(&tree) {
+                        Ok(l) => Some(l),
+                        Err(e) => {
+                            log::warn!("ezbar-wasm: view rejected: {e}");
+                            None
+                        }
+                    },
+                    Ok(Err(e)) => {
+                        log::warn!("ezbar-wasm: view trapped — disabling plugin: {e}");
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        log::warn!("ezbar-wasm: view exceeded {WALL:?} — disabling plugin");
+                        return Ok(());
+                    }
+                };
+                store.set_epoch_deadline(DEADLINE_TICKS);
+                let popup = match tokio::time::timeout(WALL, plugin.call_popup(&mut store)).await {
+                    Ok(Ok(Some(tree))) => lift(&tree).ok(),
+                    Ok(Ok(None)) => None,
+                    Ok(Err(e)) => {
+                        log::warn!("ezbar-wasm: popup trapped — disabling plugin: {e}");
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        log::warn!("ezbar-wasm: popup exceeded {WALL:?} — disabling plugin");
+                        return Ok(());
+                    }
+                };
+                {
+                    let mut s = slot.slots.lock().unwrap_or_else(|e| e.into_inner());
+                    if view.is_some() {
+                        s.view = view;
+                    }
+                    s.popup = popup;
+                }
+                // A new frame landed — bump the version so the chip re-renders once.
+                slot.version.fetch_add(1, Ordering::Release);
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
+}
+
+// ── on-disk compiled-artifact cache (RFC 0008 §6 Q3) ─────────────────────────
+// Compiling a wasm component JITs ~MBs of native code into *private* (dirty) memory
+// on every load. Instead we compile once, serialize the artifact to disk keyed by the
+// wasm's content hash, and `deserialize_file` (mmap) it thereafter — so the code is
+// file-backed Shared_Clean (reclaimable, shared across instances of the same plugin),
+// not per-instance private-dirty. This is the lever that takes the per-plugin floor
+// from the JIT-code-dominated ~17 MB down toward the linear-memory floor.
+
+/// Load `path` as a component, preferring a cached compiled artifact (mmap'd) and
+/// falling back to a fresh compile that is then cached. Blocking — run on the pool.
+fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
+    let Some(dir) = cache_dir() else {
+        return Ok(Component::from_file(engine, path)?); // no cache location → just compile
+    };
+    let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
+    let key = hash64(&bytes);
+    let cached = dir.join(format!("{key:016x}.cwasm"));
+
+    // Fast path: a prior run compiled this exact wasm — mmap the artifact.
+    if cached.is_file() {
+        // SAFETY: this artifact was produced by our own `serialize`; `deserialize_file`
+        // validates it against this engine + wasmtime version and errors on a mismatch
+        // (a stale cache then just falls through to the recompile below).
+        match unsafe { Component::deserialize_file(engine, &cached) } {
+            Ok(c) => return Ok(c),
+            Err(e) => {
+                log::debug!("ezbar-wasm: stale cache {cached:?} ({e}); recompiling");
+                let _ = std::fs::remove_file(&cached);
+            }
+        }
+    }
+
+    // Compile fresh, then publish the artifact for next time (best-effort, atomic).
+    let component = Component::from_file(engine, path)?;
+    if let Ok(serialized) = component.serialize() {
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join(format!(
+            "{key:016x}.{}.{:x}.tmp",
+            std::process::id(),
+            hash64(path.to_string_lossy().as_bytes())
+        ));
+        if std::fs::write(&tmp, &serialized).is_ok() {
+            let _ = std::fs::rename(&tmp, &cached); // atomic publish — readers see whole files
+        }
+    }
+    Ok(component)
+}
+
+/// `$XDG_CACHE_HOME/ezbar/wasm` (or `~/.cache/...`). `None` if neither is set — we then
+/// compile without caching rather than fall back to a world-writable `/tmp`.
+fn cache_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("ezbar").join("wasm"))
+}
+
+fn hash64(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 // ── the bar Module ───────────────────────────────────────────────────────────
@@ -457,25 +630,45 @@ pub struct WasmModule {
     id: String,
     instance: u64,
     slot: Slot,
+    /// The reactor task driving this plugin, aborted on `Drop` (RFC 0008 lifecycle).
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for WasmModule {
+    fn drop(&mut self) {
+        // Tear the plugin down when the bar drops it (removed from config, or rebuilt
+        // on a `Reconstruct` reconcile). `abort()` cancels any in-flight guest call
+        // (wasmtime drop-to-cancel) and drops the `Store` on its driving worker — so
+        // the plugin stops running, frees its linear memory, and **ceases to exercise
+        // its granted capabilities**. Without this, every config edit would leak a
+        // live `Store` and a revoked network grant would keep firing.
+        self.task.abort();
+    }
 }
 
 impl WasmModule {
-    /// Load `path` as a plugin with the placement `id`. `config` is the
-    /// `[modules.<id>]` table flattened to string pairs; `grants` are the
-    /// granted network hosts (capabilities).
+    /// Load `path` as a plugin with the placement `id`, driven on the reactor that
+    /// runs on `rt` (the bar's existing runtime `Handle`, threaded in explicitly —
+    /// RFC 0008 §3.1). `config` is the `[modules.<id>]` table flattened to string
+    /// pairs; `grants` are the granted network hosts (capabilities).
     pub fn new(
+        rt: Handle,
         instance: u64,
         id: impl Into<String>,
         path: PathBuf,
         config: Vec<(String, String)>,
         grants: Vec<String>,
     ) -> Self {
-        let slot: Slot = Arc::new(Mutex::new(Slots::default()));
-        spawn_actor(path, config, slot.clone(), grants);
+        let slot: Slot = Arc::new(Shared {
+            slots: Mutex::new(Slots::default()),
+            version: AtomicU64::new(0),
+        });
+        let task = reactor(&rt).add_plugin(path, config, grants, slot.clone());
         WasmModule {
             id: id.into(),
             instance,
             slot,
+            task,
         }
     }
 }
@@ -485,7 +678,7 @@ impl WasmModule {
     /// `(view_nodes, popup_nodes)` — both 0 until the actor has produced a frame
     /// (or if the plugin trapped). Used by the `preview --check` smoke test.
     pub fn debug_snapshot(&self) -> (usize, usize) {
-        let s = self.slot.lock().unwrap();
+        let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
         (
             s.view.as_ref().map_or(0, |l| l.nodes.len()),
             s.popup.as_ref().map_or(0, |l| l.nodes.len()),
@@ -498,8 +691,17 @@ impl Module for WasmModule {
         &self.id
     }
 
+    fn shutdown(&mut self) {
+        // The bar's reconcile calls this explicitly before dropping us; `Drop` is the
+        // safety net for every other path. Idempotent — a second `abort` is a no-op.
+        self.task.abort();
+    }
+
     fn subscription(&self) -> Subscription<ModMsg> {
-        ezbar_plugin::sub::keyed(self.instance, tick_stream)
+        from_recipe(TickRecipe {
+            instance: self.instance,
+            slot: self.slot.clone(),
+        })
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
@@ -517,7 +719,7 @@ impl Module for WasmModule {
         // lost in the default 480×400 surface. We have no real text metrics off
         // the GUI thread, so `measure` is a rough layout estimate; pad for the
         // surface chrome and clamp to sane bounds.
-        let s = self.slot.lock().unwrap();
+        let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
         let l = s.popup.as_ref()?;
         if l.nodes.is_empty() {
             return None;
@@ -534,7 +736,7 @@ impl Module for WasmModule {
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         // No content-sized hover mouse_area here: hover is whole-pill, driven by the
         // host from `hover_messages` so the pill's padding ring is hoverable too.
-        let s = self.slot.lock().unwrap();
+        let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
         match &s.view {
             Some(l) if !l.nodes.is_empty() => build(l, l.root, ctx, 0),
             _ => text("\u{2026}").color(ctx.fg_dim()).into(),
@@ -544,13 +746,13 @@ impl Module for WasmModule {
     fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
         // Claim the whole pill as the hover surface — but only when there's a popup
         // to open (no point hovering a chip with nothing behind it).
-        let s = self.slot.lock().unwrap();
+        let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
         let has_popup = s.popup.as_ref().is_some_and(|l| !l.nodes.is_empty());
         has_popup.then(|| (ModMsg::new(Msg::Hover), ModMsg::new(Msg::Leave)))
     }
 
     fn popup(&self, ctx: &Ctx) -> Option<Element<'_, ModMsg>> {
-        let s = self.slot.lock().unwrap();
+        let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
         match &s.popup {
             Some(l) if !l.nodes.is_empty() => Some(build(l, l.root, ctx, 0)),
             _ => None,
@@ -558,19 +760,52 @@ impl Module for WasmModule {
     }
 }
 
-fn tick_stream(_id: &u64) -> impl ezbar_plugin::iced::futures::Stream<Item = ModMsg> {
-    use ezbar_plugin::iced::futures::SinkExt;
-    ezbar_plugin::iced::stream::channel(
-        1,
-        |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
-            loop {
-                ezbar_plugin::task::sleep(Duration::from_millis(150)).await;
-                if out.send(ModMsg::new(Msg::Tick)).await.is_err() {
-                    break;
+/// A change-gated render tick. The old version woke the GUI on a blind 150ms timer
+/// — re-running `view` and reallocating the whole chip tree ~7×/s per plugin even
+/// when the actor produced nothing new (the per-frame allocation "fuel" that, fanned
+/// across tokio workers, bloats glibc arenas). This polls the slot's `version` and
+/// emits a tick ONLY when a new frame landed: an idle plugin costs zero renders, and
+/// a fresh frame still appears within one poll (≤150ms — no latency regression).
+struct TickRecipe {
+    instance: u64,
+    slot: Slot,
+}
+
+impl Recipe for TickRecipe {
+    type Output = ModMsg;
+
+    fn hash(&self, state: &mut Hasher) {
+        use std::hash::Hash;
+        std::any::TypeId::of::<Self>().hash(state);
+        self.instance.hash(state);
+    }
+
+    fn stream(
+        self: Box<Self>,
+        _input: EventStream,
+    ) -> ezbar_plugin::iced::futures::stream::BoxStream<'static, ModMsg> {
+        use ezbar_plugin::iced::futures::SinkExt;
+        let slot = self.slot;
+        Box::pin(ezbar_plugin::iced::stream::channel(
+            1,
+            move |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
+                // One tick up front so the chip adopts whatever is already cached,
+                // then tick only when the version advances (a new frame).
+                let mut seen = slot.version.load(Ordering::Acquire);
+                let _ = out.send(ModMsg::new(Msg::Tick)).await;
+                loop {
+                    ezbar_plugin::task::sleep(Duration::from_millis(150)).await;
+                    let v = slot.version.load(Ordering::Acquire);
+                    if v != seen {
+                        seen = v;
+                        if out.send(ModMsg::new(Msg::Tick)).await.is_err() {
+                            break;
+                        }
+                    }
                 }
-            }
-        },
-    )
+            },
+        ))
+    }
 }
 
 // ── render the lifted tree as real iced widgets ──────────────────────────────

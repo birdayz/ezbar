@@ -20,6 +20,13 @@ use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Reconfigure, The
 
 use std::collections::HashMap;
 
+// jemalloc as the global allocator. glibc malloc hoards freed pages in per-thread
+// arenas and only hands the top back via `malloc_trim`, so the bar's per-frame
+// render churn sawtooths up to each 60s trim. jemalloc purges dirty pages to the OS
+// continuously on a background thread, holding RSS at the working-set floor.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod install;
 mod ipc;
 
@@ -171,6 +178,21 @@ fn acquire_singleton() -> Result<(), ()> {
 }
 
 fn run_bar() -> iced_layershell::Result {
+    // Memory: glibc hoards freed heap in its arenas instead of returning it to the
+    // OS, so the startup churn (wgpu + wasmtime warmup) strands a few hundred MB of
+    // free-but-resident pages — measured ~330 MB that `malloc_trim(0)` hands straight
+    // back. Reclaim on a slow timer from a dedicated thread so it never touches the
+    // render path; glibc-only (a no-op elsewhere, so just compile it out).
+    #[cfg(target_env = "gnu")]
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(60));
+        // SAFETY: `malloc_trim` is thread-safe and only releases free pages back to
+        // the kernel — it never frees live allocations.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    });
+
     // Default to a Nerd Font so the icon glyphs render; overridable via [bar].font.
     let cfg = config::load();
     // Discover WASM plugins (RFC 0006) before any module is built so their ids
@@ -195,9 +217,51 @@ fn run_bar() -> iced_layershell::Result {
         })
         .style(Bar::style)
         .subscription(Bar::subscription)
+        // Cap the async runtime at 2 workers (see `BoundedExecutor`). iced's default
+        // builds one worker per core; a bar's async workload is a few timers + HTTP
+        // polls, so 16 workers just spread the allocation churn across 16 glibc
+        // arenas. (tokio 1.52 ignores `TOKIO_WORKER_THREADS`, so it must be explicit.)
+        .executor::<BoundedExecutor>()
         .default_text_size(14.0)
         .default_font(font)
         .run()
+}
+
+/// A tokio runtime capped to 2 worker threads, mirroring iced's own
+/// `tokio::runtime::Runtime` executor but with an explicit worker count. A status
+/// bar needs almost no concurrency, and fewer worker threads means glibc spins up
+/// far fewer per-thread arenas (each a 64 MB heap it never hands back to the OS).
+struct BoundedExecutor(tokio::runtime::Runtime);
+
+/// The bar's async runtime handle, captured when iced builds `BoundedExecutor` — which
+/// happens before the app boots — so the WASM reactor (RFC 0008) spawns plugin tasks on
+/// this exact runtime. Avoids both a second runtime and any `Handle::current()` ordering
+/// risk in `Bar::new`.
+static RT_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+
+impl iced::Executor for BoundedExecutor {
+    fn new() -> Result<Self, std::io::Error> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let _ = RT_HANDLE.set(rt.handle().clone());
+        Ok(BoundedExecutor(rt))
+    }
+
+    #[allow(clippy::let_underscore_future)]
+    fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        let _ = self.0.spawn(future);
+    }
+
+    fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
+        self.0.block_on(future)
+    }
+
+    fn enter<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = self.0.enter();
+        f()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +308,11 @@ struct Bar {
     // reconfigured/reconstructed so the host's `.with((id, gen))` recipe key changes
     // and iced re-rolls that instance's streams (the old config's streams drop).
     generation: HashMap<u64, u64>,
+
+    // RFC 0008: the bar's async runtime handle, captured in `new` (where iced runs us
+    // inside the executor context). WASM plugins' reactor tasks are spawned on it, so
+    // there's no second runtime; threaded into `build`/`reconcile_modules`.
+    rt: tokio::runtime::Handle,
 }
 
 /// A connected sway output a bar may be placed on.
@@ -532,12 +601,13 @@ fn desired_module_specs(config: &Config) -> Vec<ModuleSpec> {
 
 /// Build the live module set (RFC 0001 factory) from the desired specs, keyed by
 /// `stable_id(key)`.
-fn build_modules(config: &Config) -> Vec<ModuleEntry> {
+fn build_modules(config: &Config, rt: &tokio::runtime::Handle) -> Vec<ModuleEntry> {
     desired_module_specs(config)
         .into_iter()
         .filter_map(|s| {
             let id = stable_id(&s.key);
-            modules::build(&s.type_id, id, &s.cfg).map(|m| ModuleEntry::new(id, s.key, m, s.cfg))
+            modules::build(&s.type_id, id, &s.cfg, rt)
+                .map(|m| ModuleEntry::new(id, s.key, m, s.cfg))
         })
         .collect()
 }
@@ -610,11 +680,18 @@ impl Bar {
                 width: o.width,
             });
         }
+        // The bar's runtime — the one we drive WASM plugins on (RFC 0008 §3.1).
+        // Captured in `BoundedExecutor::new` (runs before boot); `Handle::current()`
+        // is a defensive fallback (iced also runs `new` inside the executor context).
+        let rt = RT_HANDLE
+            .get()
+            .cloned()
+            .unwrap_or_else(tokio::runtime::Handle::current);
         let bar = Bar {
             bars,
             popup: None,
             module_popup: None,
-            modules: build_modules(&config),
+            modules: build_modules(&config, &rt),
             cursor_x: 0.0,
             cursor_output: None,
             config,
@@ -622,6 +699,7 @@ impl Bar {
             screen_w,
             bar_pos,
             generation: HashMap::new(),
+            rt,
         };
         let open = Task::batch(opens);
         // Dev/screenshot hook: open the switcher popup on startup for capture.
@@ -1467,6 +1545,7 @@ impl Bar {
     /// subscriptions. Order follows placement. Returns a task to close a module
     /// popup whose owning instance went away.
     fn reconcile_modules(&mut self) -> Task<Message> {
+        let rt = self.rt.clone(); // cheap (Arc); avoids borrowing self in the build calls
         let specs = desired_module_specs(&self.config);
         let mut live: HashMap<String, ModuleEntry> = self
             .modules
@@ -1490,7 +1569,7 @@ impl Bar {
                     }
                     Reconfigure::Reconstruct => {
                         entry.module.shutdown();
-                        if let Some(m) = modules::build(&s.type_id, id, &s.cfg) {
+                        if let Some(m) = modules::build(&s.type_id, id, &s.cfg, &rt) {
                             self.bump_generation(id);
                             next.push(ModuleEntry::new(id, s.key, m, s.cfg));
                         }
@@ -1501,7 +1580,7 @@ impl Bar {
                 // without ever being recorded in the map, so a remove→re-add must
                 // step past 0 to avoid reusing the old (id, 0) recipe key.
                 None => {
-                    if let Some(m) = modules::build(&s.type_id, id, &s.cfg) {
+                    if let Some(m) = modules::build(&s.type_id, id, &s.cfg, &rt) {
                         self.bump_generation(id);
                         next.push(ModuleEntry::new(id, s.key, m, s.cfg));
                     }

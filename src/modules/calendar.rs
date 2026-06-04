@@ -45,11 +45,19 @@ impl Module for Calendar {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        Subscription::batch([
-            ezbar_plugin::sub::keyed(self.instance, cal_stream),
-            ezbar_plugin::iced::time::every(Duration::from_millis(500))
-                .map(|_| ModMsg::new(Msg::Blink)),
-        ])
+        let mut subs = vec![ezbar_plugin::sub::keyed(self.instance, cal_stream)];
+        // The chip only blinks when the next meeting is urgent or overdue — so only
+        // run the 500ms timer then. Otherwise it would re-render the whole bar twice
+        // a second for a chip that isn't blinking (pure allocation churn). iced
+        // re-evaluates this after each update, so the timer appears/disappears as the
+        // countdown crosses the urgent threshold.
+        if self.data.has_next && (self.data.is_urgent || self.data.is_overdue) {
+            subs.push(
+                ezbar_plugin::iced::time::every(Duration::from_millis(500))
+                    .map(|_| ModMsg::new(Msg::Blink)),
+            );
+        }
+        Subscription::batch(subs)
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {

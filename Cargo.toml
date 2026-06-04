@@ -43,6 +43,11 @@ log = "0.4"
 env_logger = "0.11"
 ical = "0.11.0"
 chrono-tz = "0.10.4"
+libc = "0.2"                     # malloc_trim — hand glibc's retained-free pages back to the OS
+# jemalloc returns freed pages to the OS continuously (background-thread purge),
+# instead of glibc hoarding them in arenas until a manual trim — flattens the bar's
+# render-churn RSS sawtooth down to the working-set floor.
+tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
 
 [dev-dependencies]
 # the module dev harness — used only by examples/harness.rs, so it stays out of

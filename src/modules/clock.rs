@@ -57,10 +57,18 @@ fn clock_stream(data: &(u64, String)) -> impl Stream<Item = ModMsg> {
     ezbar_plugin::iced::stream::channel(
         1,
         move |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
+            // Re-render only when the *rendered* string changes, never on a wake
+            // that produces the identical text. With a seconds format that's still
+            // 1/s (unavoidable); with `%H:%M` it's 1/min — 60× fewer full-bar
+            // relayouts for a clock that didn't visibly move.
+            let mut last: Option<String> = None;
             loop {
                 let s = chrono::Local::now().format(&fmt).to_string();
-                if out.send(ModMsg::new(Tick(s))).await.is_err() {
-                    break;
+                if last.as_deref() != Some(s.as_str()) {
+                    last = Some(s.clone());
+                    if out.send(ModMsg::new(Tick(s))).await.is_err() {
+                        break;
+                    }
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
