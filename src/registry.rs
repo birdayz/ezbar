@@ -151,6 +151,26 @@ pub fn list() -> Result<String, String> {
     Ok(out)
 }
 
+/// `ezbar remove <id>` — delete an installed plugin's `.wasm` and drop its host-owned
+/// consent record. **Never** edits `config.toml` (the user authored it) — it only points out
+/// the `[modules.<id>]` block they may want to remove. Errors if the plugin isn't installed.
+pub fn remove(id: &str) -> Result<String, String> {
+    let dir = ezbar::config::plugins_dir().ok_or("no config dir (set HOME or XDG_CONFIG_HOME)")?;
+    let path = ezbar_wasm::discover(&dir)
+        .into_iter()
+        .find(|(pid, _)| pid == id)
+        .map(|(_, p)| p)
+        .ok_or_else(|| format!("no plugin '{id}' installed in {}", dir.display()))?;
+    std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+    let forgot = ezbar::grants::forget(id);
+    Ok(format!(
+        "removed '{id}' ({}){}.\nezbar did NOT touch config.toml — you may want to delete its \
+         [modules.{id}] block yourself.",
+        path.display(),
+        if forgot { " and its consent record" } else { "" }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

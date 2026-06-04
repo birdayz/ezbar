@@ -72,22 +72,21 @@ fn recorded(id: &str) -> Option<String> {
         .map(|s| s.trim().to_ascii_lowercase())
 }
 
-/// Persist `id -> sha256` into `grants.toml` (best-effort, atomic read-modify-write).
-/// Returns whether the record was written; failure is non-fatal (logged by the caller).
-fn record(id: &str, hex: &str) -> bool {
+/// Load `grants.toml` as a table (empty if missing/malformed — host-owned, full-rewrite).
+fn load_grants() -> toml::value::Table {
+    grants_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|b| b.parse::<toml::Value>().ok())
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default()
+}
+
+/// Serialize the consent table back to `grants.toml` atomically (with the header). Shared by
+/// [`record`] and [`forget`]. Best-effort; returns whether it was written.
+fn save_grants(doc: toml::value::Table) -> bool {
     let Some(path) = grants_path() else {
         return false;
     };
-    // Load-or-empty, set the one key, serialize back. The file is small and host-owned;
-    // a full rewrite (vs. surgical edit) keeps it trivially correct.
-    let mut doc: toml::value::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|b| b.parse::<toml::Value>().ok())
-        .and_then(|v| v.as_table().cloned())
-        .unwrap_or_default();
-    let mut entry = toml::value::Table::new();
-    entry.insert("sha256".into(), toml::Value::String(hex.to_string()));
-    doc.insert(id.to_string(), toml::Value::Table(entry));
     let body = format!(
         "# ezbar capability consent — host-owned, do NOT hand-edit.\n\
          # Each entry binds a plugin id to the sha256 of the .wasm it was approved for\n\
@@ -99,6 +98,27 @@ fn record(id: &str, hex: &str) -> bool {
         let _ = std::fs::create_dir_all(dir);
     }
     write_atomic(&path, &body).is_ok()
+}
+
+/// Persist `id -> sha256` into `grants.toml` (best-effort, atomic read-modify-write).
+/// Returns whether the record was written; failure is non-fatal (logged by the caller).
+fn record(id: &str, hex: &str) -> bool {
+    let mut doc = load_grants();
+    let mut entry = toml::value::Table::new();
+    entry.insert("sha256".into(), toml::Value::String(hex.to_string()));
+    doc.insert(id.to_string(), toml::Value::Table(entry));
+    save_grants(doc)
+}
+
+/// Drop `id`'s consent record from `grants.toml` (for `ezbar remove`). `grants.toml` is
+/// host-authored, so cleaning our own entry is fine — unlike `config.toml`, which we never
+/// touch. Returns whether an entry was actually removed.
+pub fn forget(id: &str) -> bool {
+    let mut doc = load_grants();
+    if doc.remove(id).is_none() {
+        return false;
+    }
+    save_grants(doc)
 }
 
 /// The pure decision over (recorded consent, current artifact hash) — no I/O, so the

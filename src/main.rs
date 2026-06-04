@@ -110,6 +110,22 @@ fn main() -> iced_layershell::Result {
             }
             return Ok(());
         }
+        Some("remove" | "rm") => {
+            match std::env::args().nth(2) {
+                Some(id) => match registry::remove(&id) {
+                    Ok(msg) => println!("{msg}"),
+                    Err(e) => {
+                        eprintln!("ezbar remove: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("ezbar remove: usage: ezbar remove <id>");
+                    std::process::exit(2);
+                }
+            }
+            return Ok(());
+        }
         Some("list") => {
             match registry::list() {
                 Ok(s) => print!("{s}"),
@@ -263,6 +279,7 @@ fn print_help() {
          ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
          ezbar list         list installed plugins + their consent state + declared caps\n    \
          ezbar add <id>     install a plugin from a registry dir (--registry <dir> or $EZBAR_REGISTRY)\n    \
+         ezbar remove <id>  delete an installed plugin (and its consent record; not your config)\n    \
          ezbar inspect <f>  show what a plugin .wasm declares + the [modules.<id>] block to paste\n    \
          ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \
          ezbar package …    embed ezbar:manifest into a built plugin + print its registry entry\n    \
