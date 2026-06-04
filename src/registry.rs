@@ -8,7 +8,7 @@
 //! to your sway config".)
 
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One `plugins/<id>/<version>.toml` index entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,9 +117,7 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
         }
     }
 
-    let artifact = dir.join(format!("{}.wasm", picked.version));
-    let bytes = std::fs::read(&artifact)
-        .map_err(|e| format!("read artifact {}: {e}", artifact.display()))?;
+    let bytes = read_artifact(&dir, picked)?;
     if !verify_sha256(&bytes, &picked.sha256) {
         return Err(format!(
             "sha256 mismatch for '{id}' {} — refusing (corrupt or tampered artifact)",
@@ -212,6 +210,45 @@ fn unpin(id: &str) -> bool {
         return false;
     }
     save_pins(t)
+}
+
+/// Resolve a picked entry to its `.wasm` bytes. Prefer a `<version>.wasm` co-located with the
+/// index entry (a small/personal registry that commits artifacts); otherwise download the
+/// entry's `artifact` release URL (the production model — keeps the git repo small). Either
+/// way the caller verifies `sha256` before installing, so a wrong download is caught.
+fn read_artifact(dir: &Path, entry: &Entry) -> Result<Vec<u8>, String> {
+    let local = dir.join(format!("{}.wasm", entry.version));
+    if local.is_file() {
+        return std::fs::read(&local).map_err(|e| format!("read artifact {}: {e}", local.display()));
+    }
+    let url = entry.artifact.trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        download(url)
+    } else {
+        Err(format!(
+            "no artifact for '{}' {}: neither a co-located {}.wasm nor an http(s) `artifact` URL",
+            entry.id, entry.version, entry.version
+        ))
+    }
+}
+
+/// One-shot HTTPS GET of a release artifact (the CLI is synchronous, so drive a small
+/// current-thread runtime). reqwest is the same client stack the bar's modules use.
+fn download(url: &str) -> Result<Vec<u8>, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("runtime: {e}"))?;
+    rt.block_on(async {
+        let resp = reqwest::get(url).await.map_err(|e| format!("GET {url}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("GET {url}: HTTP {}", resp.status()));
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("read body {url}: {e}"))
+    })
 }
 
 /// Resolve a registry location to a local directory to read from: a filesystem path is used
