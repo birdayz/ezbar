@@ -983,6 +983,7 @@ const MODULE_POPUP_SIZE: (u32, u32) = (480, 400);
 impl Bar {
     fn new() -> (Self, Task<Message>) {
         let config = config::load();
+        modules::set_yolo(config.plugins.yolo); // before any module is built
         let bar_pos = config.bar.position;
         let theme = config.theme_tokens();
         // One surface per matching output (RFC 0004). Empty is valid — the
@@ -1774,6 +1775,8 @@ impl Bar {
             || cfg.bar.layer != self.config.bar.layer;
         self.config = cfg;
         self.theme = self.config.theme_tokens();
+        // Apply [plugins] yolo BEFORE reconciling — module (re)builds read it.
+        modules::set_yolo(self.config.plugins.yolo);
         // Modules reconcile by key (idempotent: unchanged in ⇒ no churn out).
         let modules = self.reconcile_modules();
         // `[bar].outputs` may have changed — add/drop surfaces to match.

@@ -26,9 +26,48 @@ pub mod workspaces;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use ezbar_plugin::Module;
+
+/// Global plugin **yolo** mode (`[plugins] yolo`). When set, every WASM plugin is built with
+/// full capabilities, bypassing the per-module grants and the hash-consent. Set at config
+/// load + reload by [`set_yolo`]; read in [`build`].
+static PLUGIN_YOLO: AtomicBool = AtomicBool::new(false);
+
+/// Apply `[plugins] yolo`. Logs loudly the first time it flips on — it's a security-relevant
+/// mode (plugins get fs/network access). Idempotent; called on every config (re)load.
+pub fn set_yolo(on: bool) {
+    let was = PLUGIN_YOLO.swap(on, Ordering::Relaxed);
+    if on && !was {
+        log::warn!(
+            "ezbar: [plugins] yolo=true — every WASM plugin now gets FULL capabilities \
+             (read/write fs, any network host, all feeds, sway). They stay cpu/mem-sandboxed, \
+             but trust your plugins. Turn it off for fine-grained, default-deny grants."
+        );
+    }
+}
+
+fn plugin_yolo() -> bool {
+    PLUGIN_YOLO.load(Ordering::Relaxed)
+}
+
+/// The full-capability grant set for yolo mode: any host, any feed, sway, and `/` read-write.
+/// `"*"` wildcards are understood by the reactor's per-call checks; the fs grant preopens the
+/// whole filesystem (still bounded by the OS user's own permissions).
+fn yolo_grants() -> (Vec<String>, Vec<String>, bool, Vec<ezbar_wasm::FsGrant>) {
+    (
+        vec!["*".to_string()],
+        vec!["*".to_string()],
+        true,
+        vec![ezbar_wasm::FsGrant {
+            host_path: PathBuf::from("/"),
+            guest_path: "/".to_string(),
+            write: true,
+        }],
+    )
+}
 
 /// Discovered WASM plugins, by placement id (RFC 0006). Populated once at startup.
 static PLUGINS: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
@@ -317,7 +356,11 @@ pub fn build(
             // RFC 0014 Phase A: bind the capability grant to the artifact's *content hash*,
             // not its id. A binary the user never consented to (a same-named swap) inherits
             // nothing — it runs fully sandboxed until re-approved with `ezbar grant <id>`.
-            let (net, feeds, sway, fs) = match crate::grants::decide(other, &path) {
+            let (net, feeds, sway, fs) = if plugin_yolo() {
+                // Yolo: full caps, no per-module grants, no hash-consent. (Still wasm-sandboxed.)
+                yolo_grants()
+            } else {
+                match crate::grants::decide(other, &path) {
                 crate::grants::Decision::Granted => {
                     let g = (
                         network_grants(cfg),                                       // `[modules.<id>].network`
@@ -333,6 +376,7 @@ pub fn build(
                 }
                 // The on-disk bytes don't match the consented hash — withhold every cap.
                 crate::grants::Decision::Withheld => (Vec::new(), Vec::new(), false, Vec::new()),
+                }
             };
             let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
                 rt.clone(),

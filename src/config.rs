@@ -520,6 +520,18 @@ impl Entry {
 // Top-level config
 // ---------------------------------------------------------------------------
 
+/// `[plugins]` — global WASM-plugin policy.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Plugins {
+    /// **Yolo mode.** When true, every WASM plugin is granted *full* capabilities — any
+    /// network host, `/` read-write, all feeds, sway — bypassing the per-`[modules.<id>]`
+    /// grants and the hash-consent. It stays resource-sandboxed (cpu/mem/epoch bounds hold),
+    /// but a plugin can read and write your files. The "I trust my plugins, stop asking"
+    /// switch (like Claude Code / Codex). Default **off**: fine-grained, default-deny grants.
+    pub yolo: bool,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -530,6 +542,8 @@ pub struct Config {
     pub right: Vec<Entry>,
     /// `[modules.<id>]` shared defaults, merged under each instance's inline config.
     pub modules: HashMap<String, toml::Value>,
+    /// `[plugins]` — global WASM-plugin policy (yolo).
+    pub plugins: Plugins,
 }
 
 impl Config {

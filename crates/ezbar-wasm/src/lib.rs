@@ -176,7 +176,7 @@ impl ezbar::plugin::host::Host for Host {
         // Capability check (RFC 0012): only deliver feeds the user granted. Fire-and-forget
         // — the frozen WIT has no result, so an ungranted feed is logged and silently never
         // delivered (the plugin can't tell; documented in the SDK contract).
-        if self.granted_feeds.iter().any(|g| g == feed_kind_name(feed)) {
+        if self.granted_feeds.iter().any(|g| g == "*" || g == feed_kind_name(feed)) {
             self.feed_requests.push((feed, min));
         } else {
             log::info!(
@@ -1269,6 +1269,9 @@ fn host_matches(grant: &str, url_host: &str) -> bool {
     if g.is_empty() {
         return false;
     }
+    if g == "*" {
+        return true; // wildcard — any host (per-plugin `network = ["*"]`, or yolo)
+    }
     if g.contains(':') {
         g == h // grant pins a port → exact host:port
     } else {
@@ -1739,6 +1742,13 @@ mod tests {
         assert!(host_matches("API.Open-Meteo.com", "api.open-meteo.com")); // case
         assert!(host_matches("api.open-meteo.com", "api.open-meteo.com:443")); // any port
         assert!(host_matches(" api.open-meteo.com ", "api.open-meteo.com")); // trimmed
+    }
+
+    #[test]
+    fn wildcard_grant_matches_any_host() {
+        assert!(host_matches("*", "api.open-meteo.com")); // yolo / network = ["*"]
+        assert!(host_matches("*", "anything.example:1234"));
+        assert!(!host_matches("", "api.open-meteo.com")); // empty grant still denies
     }
 
     #[test]
