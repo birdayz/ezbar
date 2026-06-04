@@ -205,9 +205,12 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
   shallow-cloned/ff-pulled to a cache, then resolved locally), and **TOFU publisher-pin**
   (`publishers.toml`) refuses a known id served under a different publisher. **Security model
   complete:** hash-keyed grants + `sha256` verify + WIT-window negotiation + publisher-pin.
-  **Remaining (sugar / gated on a populated hosted registry):** download the artifact from a
-  release URL when an entry uses `artifact = "https://…"` (vs the co-located `<version>.wasm`
-  today), and `update`/`search`.
+  Artifacts resolve **either** co-located in the clone **or** by downloading the entry's
+  `artifact = "https://…"` release URL (sha256-verified either way), and **`ezbar search
+  [<term>]`** lists matching registry plugins. **Remaining (minor):** `update` is deferred —
+  re-running `ezbar add <id>` already installs the newest in-window version; a version-tracking
+  `update`/`update --all` (skip when already latest) needs the installed version recorded,
+  which is incremental polish best done once a populated hosted registry exists.
 
 ## 9. Open questions — resolved
 1. Manifest transport → embedded section (load-time enforce) **and** index entry (pre-download

@@ -188,6 +188,7 @@ Consent is bound to the plugin's **content hash**, not its name — a swapped bi
 nothing (it runs sandboxed until you re-approve). The whole lifecycle is a few commands:
 
 ```sh
+ezbar search <term> --registry <dir|git-url>   # discover plugins in a registry
 ezbar add <id> --registry <dir|git-url>   # resolve newest in-window version → verify sha256 → install → print grant block
 ezbar list                                # installed plugins + consent state + declared caps
 ezbar inspect plugin.wasm                 # what it declares + the exact [modules.<id>] block to paste

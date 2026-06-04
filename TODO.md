@@ -62,10 +62,11 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   consent + pin, never config). Works against a **git-hosted** registry too (any git URL is
   cloned/pulled to a cache, then resolved locally), with **TOFU publisher-pin** refusing a known
   id under a changed publisher. Naming: it's `ezbar add` (`ezbar install` already = sway-config).
-  **Security model complete:** hash-keyed grants + sha256 + WIT-window + publisher-pin.
-  **Remaining (sugar):** download the artifact from a release URL (vs co-located `<version>.wasm`)
-  + `update`/`search`. The public registry repo itself is a publish decision (yours). The network
-  effect no other bar has.
+  Artifacts resolve co-located **or** by downloading the entry's `artifact` release URL
+  (sha256-verified), and `ezbar search [<term>]` does discovery. **Security model complete:**
+  hash-keyed grants + sha256 + WIT-window + publisher-pin. **Remaining (minor):** `update`
+  (re-running `ezbar add` already installs newest; a version-tracking `update --all` is deferred).
+  The public registry repo itself is a publish decision (yours). The network effect no other bar has.
 
 - [~] **CRIT (security) — id-keyed grants → confused-deputy. Hash-binding DONE; manifest
   binding remains.** RFC 0006 §5 promised hash-keyed grants ("can't swap a benign manifest under
