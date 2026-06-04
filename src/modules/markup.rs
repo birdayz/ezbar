@@ -123,14 +123,20 @@ fn token_color(token: &str, ctx: &Ctx) -> Option<Color> {
     })
 }
 
-/// Render `text`'s markup into an `Element`. The common, tag-free case is a single
-/// unstyled segment and renders as a plain `text` widget (identical to pre-markup output,
-/// no `rich_text` overhead); only genuinely styled text builds spans.
+/// Render `text`'s markup into an `Element` — `render(&parse(s), ctx)`. The common,
+/// tag-free case renders as a plain `text` widget (no `rich_text` overhead).
 pub fn view<'a>(s: &str, ctx: &Ctx) -> Element<'a, ModMsg> {
-    let segs = parse(s);
+    render(&parse(s), ctx)
+}
+
+/// Render already-parsed [`Segment`]s. Split from [`view`] so a caller that parses a
+/// *format* once and substitutes `{field}`s per frame (e.g. `window_title`) reuses the
+/// span builder without re-parsing. A single unstyled segment renders as a plain `text`
+/// (identical to pre-markup output); only genuinely styled text builds `rich_text` spans.
+pub fn render<'a>(segs: &[Segment], ctx: &Ctx) -> Element<'a, ModMsg> {
     let styled = segs.iter().any(|seg| seg.color.is_some() || seg.bold);
     if !styled {
-        let plain = segs.into_iter().next().map(|s| s.text).unwrap_or_default();
+        let plain = segs.first().map(|s| s.text.clone()).unwrap_or_default();
         return text(plain).into();
     }
     let bold = Font {
