@@ -185,7 +185,12 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
     producer tool):** the domain-separated `hash(wasm ‖ manifest)` key and "declared ≤ consented"
     *enforcement* (vs. today's warning) — both need the manifest **emitted** into real plugins.
     Note: `wasm-tools` 1.251 dropped its `custom-section` subcommand, so the producer (§7) appends
-    the section via `wasm-encoder` rather than the CLI the RFC first assumed.
+    the section via `wasm-encoder` rather than the CLI the RFC first assumed. (3) **`ezbar inspect
+    <plugin.wasm>`** delivers the install flow's **"print the grant block"** half (§5) standalone,
+    with zero registry: it reads the embedded manifest and prints the sha256 + the `[modules.<id>]`
+    block to paste (never auto-writing config) + points at `ezbar grant`. So the local lifecycle —
+    **package** (author) → **inspect** (see/paste grant) → **grant** (consent to the bytes) — is
+    complete; Phase C adds only the network fetch + the registry index on top.
 - **Phase B — `cargo ezbar package`** (§7): the producer tool.
 - **Phase C — the registry + `ezbar install`/`list`/`remove`/`search`/`update`** (§4/§5): the thin
   consumer layer, TOFU pin, print-the-block, WIT-window version negotiation.

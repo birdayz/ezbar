@@ -175,11 +175,13 @@ Consent is bound to the plugin's **content hash**, not its name (RFC 0014), so a
 binary can't inherit a grant:
 
 ```sh
+ezbar inspect my.wasm       # show what it declares + the exact [modules.<id>] block to paste
 ezbar grant <id>            # approve the plugin's current bytes (re-run after a rebuild/update)
 ezbar package my.wasm       # author: embed an ezbar:manifest (declared caps) + print the registry entry
 ```
 
-A plugin's embedded manifest only *declares* what it needs; the host warns if it declares
+A plugin's embedded manifest only *declares* what it needs (`ezbar inspect` reads it and
+prints the grant block — it never writes your config); the host warns if a plugin declares
 a capability you didn't grant. Design: [`rfcs/0014-plugin-registry.md`](rfcs/0014-plugin-registry.md).
 
 ## Layout

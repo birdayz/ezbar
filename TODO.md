@@ -52,8 +52,11 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   the artifact, and prints the `plugins/<id>/<v>.toml` entry with `sha256` over the shipped
   bytes (verified e2e: valid component, sha matches). The wasm *build* stays the author's job
   (cargo/tinygo). Until plugins are republished through it, the declared-vs-granted check stays
-  a warning (not enforcement) and the consent key stays `sha256(wasm)`. **C) TODO — registry:**
-  git-backed per-plugin-versioned index +
+  a warning (not enforcement) and the consent key stays `sha256(wasm)`. Plus **`ezbar inspect
+  <plugin.wasm>`** — the install flow's "print the grant block" half, standalone with zero
+  registry (manifest → sha256 + the `[modules.<id>]` block to paste, never auto-written), so the
+  local lifecycle **package → inspect → grant** is complete. **C) TODO — registry:** git-backed
+  per-plugin-versioned index +
   `install`/`update`/`list`/`remove`/`search` (TOFU publisher-pin, prebuilt+sha256, **print**
   the grant block, WIT-window negotiation). The network effect no other bar has.
 
