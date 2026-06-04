@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub id: String,
+    pub name: String,
     pub version: String,
     pub wit: String,
     pub sha256: String,
@@ -33,14 +34,16 @@ pub fn parse_entry(toml_body: &str) -> Result<Entry, String> {
     let doc: toml::Value = toml_body.parse().map_err(|e| format!("registry entry: {e}"))?;
     let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let req = |k: &str| s(k).ok_or_else(|| format!("registry entry: missing `{k}`"));
+    let id = req("id")?;
     Ok(Entry {
-        id: req("id")?,
+        name: s("name").unwrap_or_else(|| id.clone()),
         version: req("version")?,
         sha256: req("sha256")?,
         wit: s("wit").unwrap_or_else(|| "0.1.0".to_string()),
         artifact: s("artifact").unwrap_or_default(),
         publisher: s("publisher").unwrap_or_default(),
         description: s("description").unwrap_or_default(),
+        id,
     })
 }
 
@@ -302,6 +305,45 @@ fn clone_or_pull(url: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// `ezbar search [<term>]` — each registry plugin's newest in-window version whose
+/// id/name/description contains `term` (everything if empty). Discovery before `add`; reuses
+/// the same registry resolution (a local dir or a git clone).
+pub fn search(term: &str, registry: &str) -> Result<String, String> {
+    let root = resolve_registry(registry)?;
+    let pdir = root.join("plugins");
+    let rd = std::fs::read_dir(&pdir).map_err(|e| format!("read registry {}: {e}", pdir.display()))?;
+    let needle = term.to_lowercase();
+    let mut hits: Vec<(String, String, String)> = Vec::new(); // id, version, description
+    for ent in rd.flatten().filter(|e| e.path().is_dir()) {
+        let entries: Vec<Entry> = std::fs::read_dir(ent.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("toml"))
+            .filter_map(|p| std::fs::read_to_string(&p).ok())
+            .filter_map(|b| parse_entry(&b).ok())
+            .collect();
+        if let Some(e) = pick_in_window(&entries, SUPPORTED_WIT) {
+            let hay = format!("{} {} {}", e.id, e.name, e.description).to_lowercase();
+            if needle.is_empty() || hay.contains(&needle) {
+                hits.push((e.id.clone(), e.version.clone(), e.description.clone()));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return Ok(match term.is_empty() {
+            true => "registry has no plugins in this ezbar's WIT window".into(),
+            false => format!("no plugins match {term:?}"),
+        });
+    }
+    hits.sort();
+    Ok(hits
+        .into_iter()
+        .map(|(id, ver, desc)| format!("{id:<16} {ver:<10} {desc}\n"))
+        .collect())
+}
+
 /// `ezbar list` — the installed plugins, each with its short content hash, consent state,
 /// and declared capabilities. Read-only (never records consent). A management view so a user
 /// can see what's installed and what still needs `ezbar grant`.
@@ -361,6 +403,7 @@ mod tests {
     fn entry(version: &str, wit: &str) -> Entry {
         Entry {
             id: "weather".into(),
+            name: "Weather".into(),
             version: version.into(),
             wit: wit.into(),
             sha256: "deadbeef".into(),
