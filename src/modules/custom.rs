@@ -16,6 +16,18 @@
 //! listen_cmd = "my-daemon --watch"   # e.g. a script that prints a value per change
 //! icon       = ""
 //! ```
+//!
+//! The glyph can swap by what the output says, and a danger dot can flag a bad state:
+//! ```toml
+//! [modules.netcheck]
+//! command = "ping -c1 -W1 1.1.1.1 >/dev/null && echo up || echo down"
+//! icon    = ""                       # fallback glyph
+//! alert   = "down|error"              # paint an urgent dot when the output matches
+//! [[modules.netcheck.icons]]         # first matching regex wins, else `icon`
+//! match = "up";   icon = ""
+//! [[modules.netcheck.icons]]
+//! match = "down"; icon = ""
+//! ```
 
 use std::process::Command;
 use std::time::Duration;
@@ -25,6 +37,7 @@ use ezbar_plugin::iced::futures::{SinkExt, Stream};
 use ezbar_plugin::iced::widget::{mouse_area, row, text};
 use ezbar_plugin::iced::{Element, Subscription};
 use ezbar_plugin::{Ctx, ModMsg, Module, Response};
+use regex::Regex;
 
 enum Msg {
     Data(String),
@@ -40,6 +53,11 @@ pub struct Custom {
     /// `command`/`interval` (the widget is event-driven off the command's stdout).
     listen_cmd: Option<String>,
     icon: String,
+    /// `[[modules.<id>.icons]]` rules — swap the glyph by what the output says (RFC 0003).
+    /// First matching regex wins; falls back to `icon`.
+    icon_rules: Vec<(Regex, String)>,
+    /// `[modules.<id>].alert` regex — paint a danger dot when the output matches.
+    alert: Option<Regex>,
     on_click: Option<String>,
     text: String,
 }
@@ -60,10 +78,44 @@ impl Custom {
                 .max(1) as u64,
             listen_cmd: s("listen_cmd").filter(|c| !c.trim().is_empty()),
             icon: s("icon").unwrap_or_default(),
+            icon_rules: parse_icon_rules(cfg),
+            alert: s("alert").and_then(|p| compile(&p, "alert")),
             on_click: s("on_click"),
             text: String::new(),
         }
     }
+
+    /// The glyph to show for the current output: the first matching `icons` rule, else `icon`.
+    fn current_icon(&self) -> &str {
+        self.icon_rules
+            .iter()
+            .find(|(re, _)| re.is_match(&self.text))
+            .map(|(_, ic)| ic.as_str())
+            .unwrap_or(&self.icon)
+    }
+}
+
+/// Compile a regex, logging (and skipping) an invalid pattern rather than panicking.
+fn compile(pattern: &str, what: &str) -> Option<Regex> {
+    Regex::new(pattern)
+        .map_err(|e| log::warn!("custom: bad {what} regex {pattern:?}: {e}"))
+        .ok()
+}
+
+/// Parse `[[modules.<id>.icons]]` = list of `{ match = "regex", icon = "glyph" }`.
+fn parse_icon_rules(cfg: &toml::Value) -> Vec<(Regex, String)> {
+    cfg.get("icons")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|it| {
+                    let pat = it.get("match")?.as_str()?;
+                    let icon = it.get("icon")?.as_str()?.to_string();
+                    Some((compile(pat, "icon")?, icon))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Module for Custom {
@@ -101,10 +153,20 @@ impl Module for Custom {
 
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let mut parts: Vec<Element<ModMsg>> = Vec::new();
-        if !self.icon.is_empty() {
-            parts.push(text(self.icon.clone()).color(ctx.accent()).into());
+        let icon = self.current_icon();
+        if !icon.is_empty() {
+            parts.push(text(icon.to_string()).color(ctx.accent()).into());
         }
         parts.push(text(self.text.clone()).into());
+        // a danger dot when `alert` matches the output (RFC 0003) — themed `urgent`.
+        if self.alert.as_ref().is_some_and(|re| re.is_match(&self.text)) {
+            parts.push(
+                text("\u{25cf}")
+                    .color(ctx.urgent())
+                    .size(ctx.theme.text_size * 0.7)
+                    .into(),
+            );
+        }
         let content = row(parts).spacing(4).align_y(Vertical::Center);
         match &self.on_click {
             Some(cmd) => mouse_area(content)
@@ -213,5 +275,33 @@ mod tests {
         assert!(make("command = \"date\"\ninterval = 9").listen_cmd.is_none());
         // a blank/whitespace value doesn't accidentally select the (empty) stream form
         assert!(make("listen_cmd = \"   \"").listen_cmd.is_none());
+    }
+
+    #[test]
+    fn icon_rules_swap_glyph_by_output_else_fallback() {
+        let mut c = make(
+            "icon = \"x\"\n[[icons]]\nmatch = \"up\"\nicon = \"U\"\n\
+             [[icons]]\nmatch = \"down\"\nicon = \"D\"",
+        );
+        c.text = "link is up".into();
+        assert_eq!(c.current_icon(), "U");
+        c.text = "link is down".into();
+        assert_eq!(c.current_icon(), "D");
+        c.text = "unknown".into();
+        assert_eq!(c.current_icon(), "x"); // no rule matches → the default `icon`
+    }
+
+    #[test]
+    fn alert_regex_matches_output() {
+        let re = make("alert = \"err|fail\"").alert.unwrap();
+        assert!(re.is_match("got an error"));
+        assert!(!re.is_match("all good"));
+    }
+
+    #[test]
+    fn bad_regex_is_skipped_not_panicked() {
+        let c = make("alert = \"(unclosed\"\n[[icons]]\nmatch = \"[bad\"\nicon = \"z\"");
+        assert!(c.alert.is_none()); // invalid alert pattern dropped (logged), no panic
+        assert!(c.icon_rules.is_empty()); // invalid icon pattern dropped
     }
 }

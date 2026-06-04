@@ -131,10 +131,11 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 - [ ] **MED** — **`Service` layer for non-sway capabilities.** The sway service shares
   one connection; D-Bus/PipeWire need the same before Tier-B, ideally surfaced via
   `Ctx` so third-party plugins use it too (today a module opens its own client).
-- [~] **MED** — **`custom` streaming form — `listen_cmd` DONE.** A long-running command
-  whose stdout LINES each update the chip (event-driven, no polling); supersedes `command`
-  when set, restarts gently on exit, `kill_on_drop` so a config reload doesn't leak the
-  process. **Remaining:** the regex→icon map and the `alert` danger dot. (`modules/custom.rs`)
+- [x] **MED** — **`custom` matched to ashell — DONE.** `listen_cmd` streaming (each stdout
+  line updates the chip, `kill_on_drop`, gentle restart); `[[modules.<id>.icons]]` **regex→
+  icon map** (first matching pattern swaps the glyph, else `icon`); `alert` **regex danger
+  dot** (urgent-themed). Bad patterns are logged + skipped (no panic). Tested. (`modules/
+  custom.rs`)
 - [ ] **MED** — **Icon metric-normalization / per-glyph nudge table.** RFC says this
   "must not ship empty"; today icons rely on the raw font baseline. Promote to an
   `ezbar_plugin::ui` helper (`ctx.icon(Icon::…)`).
