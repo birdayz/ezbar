@@ -1,7 +1,7 @@
 # RFC 0004: Config-reconciled surfaces & modules
 
-- **Status:** Draft (v2 — implemented on branch `rfc-0004-reconcile-poc`; passed an
-  adversarial wlr-layer-shell review, fixes applied. v1 was PoC-only.)
+- **Status:** **Implemented** (v2 — shipped in `main`; passed an adversarial
+  wlr-layer-shell review, fixes applied. v1 was PoC-only.)
 - **Created:** 2026-06-01
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
 - **Depends on:** RFC 0001 (module SDK, `Factory`, phase-2 dlopen), RFC 0002 (config,

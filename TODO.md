@@ -160,5 +160,6 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 - [ ] **LOW** — Per-module config reference (a table of every `[modules.<id>]` key).
 - [ ] **LOW** — A GIF of the live `▾` switcher cycling presets for the README /
   r/unixporn post (a still doesn't convey "no restart").
-- [ ] **LOW** — Mark the RFCs Accepted/Implemented now that the bulk has shipped (they
-  still say "Draft v3").
+- [x] **LOW** — RFC statuses updated: 0002/0003/0004/0005 → **Implemented** (were "Draft").
+  0007 stays **Draft** (genuinely pending the port-list decision). The rest already carried
+  Accepted/Implemented/their runtime-state.

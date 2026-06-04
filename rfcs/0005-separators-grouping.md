@@ -1,6 +1,6 @@
 # RFC 0005: Configurable separators & widget grouping
 
-- **Status:** Draft (v1 — implemented + r/unixporn-reviewed on `rfc-0005-separators`)
+- **Status:** **Implemented** (v1 — shipped in `main`, r/unixporn-reviewed)
 - **Created:** 2026-06-01
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
 - **Depends on:** RFC 0002 (config, `style`, `[theme].separator`, placement groups)

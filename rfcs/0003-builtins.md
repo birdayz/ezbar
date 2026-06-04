@@ -1,6 +1,6 @@
 # RFC 0003: Built-in modules & visual system
 
-- **Status:** Draft (v3 — real screenshots, square workspace chips, the preset
+- **Status:** **Implemented** (v3 — real screenshots, square workspace chips, the preset
   switcher widget, and graph knobs; addresses the r/unixporn review)
 - **Created:** 2026-05-31
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)

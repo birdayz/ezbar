@@ -1,6 +1,6 @@
 # RFC 0002: Configuration, theming & presets
 
-- **Status:** Draft (v3 — adds presets + live switcher, palette variables, floating
+- **Status:** **Implemented** (v3 — presets + live switcher, palette variables, floating
   geometry, graph knobs, and real visual proof; addresses the r/unixporn review)
 - **Created:** 2026-05-31
 - **Target:** ezbar (Rust / iced / wlr-layer-shell)
