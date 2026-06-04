@@ -241,15 +241,27 @@ pub fn build(
         "spotify" => Some(Box::new(spotify::Spotify::new(instance))),
         // a registered WASM plugin (RFC 0006): load the `.wasm` as a Module.
         other => wasm_plugin_path(other).map(|path| {
+            // RFC 0014 Phase A: bind the capability grant to the artifact's *content hash*,
+            // not its id. A binary the user never consented to (a same-named swap) inherits
+            // nothing — it runs fully sandboxed until re-approved with `ezbar grant <id>`.
+            let (net, feeds, sway) = match crate::grants::decide(other, &path) {
+                crate::grants::Decision::Granted => (
+                    network_grants(cfg), // `[modules.<id>].network`
+                    feed_grants(cfg),    // `[modules.<id>].feeds` (RFC 0012)
+                    cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // RFC 0013
+                ),
+                // The on-disk bytes don't match the consented hash — withhold every cap.
+                crate::grants::Decision::Withheld => (Vec::new(), Vec::new(), false),
+            };
             let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
                 rt.clone(),
                 instance,
                 other.to_string(),
                 path,
                 flatten_cfg(cfg),
-                network_grants(cfg), // granted by `[modules.<id>].network`
-                feed_grants(cfg),    // granted by `[modules.<id>].feeds` (RFC 0012)
-                cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // RFC 0013
+                net,
+                feeds,
+                sway,
             ));
             m
         }),

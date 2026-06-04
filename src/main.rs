@@ -80,6 +80,24 @@ fn main() -> iced_layershell::Result {
             }
             return Ok(());
         }
+        Some("grant") => {
+            // Record explicit consent for a plugin's current bytes (RFC 0014 Phase A) —
+            // the re-approval path after a legitimate rebuild/update changed its hash.
+            match std::env::args().nth(2) {
+                Some(id) => match ezbar::grants::grant_cli(&id) {
+                    Ok(msg) => println!("{msg}"),
+                    Err(e) => {
+                        eprintln!("ezbar: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("ezbar grant: usage: ezbar grant <plugin-id>");
+                    std::process::exit(2);
+                }
+            }
+            return Ok(());
+        }
         Some("msg") => {
             let cmd = std::env::args().skip(2).collect::<Vec<_>>().join(" ");
             if cmd.is_empty() {
@@ -148,6 +166,7 @@ fn print_help() {
          USAGE:\n    \
          ezbar              run the bar (default)\n    \
          ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
+         ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \
          ezbar --version    print the version\n    \
          ezbar --help       print this help\n\n\
          EZBAR_CHILD=1 ezbar   run a single foreground instance (no respawn)"

@@ -50,15 +50,23 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   publisher-pin, prebuilt+sha256, **print** the grant block — never auto-write config, WIT-window
   version negotiation). The network effect no other bar has.
 
-- [ ] **CRIT (security) — grants are id-keyed, not `hash(wasm ‖ manifest)`-keyed.** RFC 0006 §5
-  promised hash-keyed grants ("can't swap a benign manifest under a granted hash to escalate"),
-  but the host keys capability grants by the plugin **id** (= config key = `.wasm` stem) and never
-  reads any embedded manifest. So a *different* `weather.wasm` dropped in the plugins dir inherits
-  the existing `[modules.weather]` grant with **no re-prompt** — a confused-deputy (the bar
-  hot-reloads on mtime, so this path is live today). Found by the RFC 0014 security review. Fix =
-  RFC 0014 **Phase A**: move enforcement to a `hash(wasm ‖ manifest)` consent (`grants.toml`), read
-  the embedded manifest at load, refuse-and-explain on no-consent/cap-mismatch, re-prompt on any
-  artifact change. (`crates/ezbar-wasm`, `src/modules/mod.rs`.)
+- [~] **CRIT (security) — id-keyed grants → confused-deputy. Hash-binding DONE; manifest
+  binding remains.** RFC 0006 §5 promised hash-keyed grants ("can't swap a benign manifest under
+  a granted hash to escalate"), but the host keyed capability grants by the plugin **id** (= config
+  key = `.wasm` stem). So a *different* `weather.wasm` under the same id inherited the existing
+  `[modules.weather]` grant with no re-consent — a confused-deputy. (Trigger note, corrected: the
+  config-dir watcher is `NonRecursive`, so a *bare* drop into the `plugins/` subdir does **not**
+  auto-reload; the swap is picked up on the next config reload / `ezbar msg reload` / restart — and
+  `PLUGINS` is a startup `OnceLock`, so a brand-new id needs a restart regardless. Still a real hole
+  on any reload/restart; not literally "live on mtime".) **FIXED (RFC 0014 Phase A core):** the host
+  now binds consent to the artifact's **content hash**, not its id — `src/grants.rs` keeps a
+  host-owned `grants.toml` (`id -> sha256(wasm)`), TOFU on first sight, and **withholds every
+  capability** when the on-disk bytes don't match the consented hash (the plugin still runs
+  sandboxed); `ezbar grant <id>` re-approves after a legitimate rebuild. `build()` gates the grant
+  args through `grants::decide()`; the reactor (the sandbox engine) is untouched — it enforces
+  whatever grants it's handed. **Remaining (Phase B):** read an embedded `ezbar:manifest` and key on
+  the domain-separated `hash(wasm ‖ manifest)` + "declared caps ≤ consented caps" — needs the
+  `wasm-tools` emit step (Rust + TinyGo). (`src/grants.rs`, `src/modules/mod.rs`, `src/main.rs`.)
 
 ### P1 (cont.) — read-only sway IPC: **designed, ready to implement**
 - [ ] **Read-only sway state** — **RFC 0013 Accepted** (both reviewers ACK after folding

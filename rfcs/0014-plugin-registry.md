@@ -26,9 +26,13 @@ the RFC:
    `hash(wasm ‖ manifest)` … can't swap a benign manifest under a granted hash to escalate").
    v2 restores it: **consent + the recorded grant are keyed on `hash(wasm ‖ manifest)`, and the
    host reads the embedded manifest at load and refuses to run a plugin whose declared caps
-   exceed its grant.** Re-prompt on **any** artifact/cap change (install, update, *or a manual
-   drop-in* — the bar hot-reloads on mtime, so this path exists today). **This is also filed as
-   a standalone security TODO against the current code, independent of the registry.**
+   exceed its grant.** Re-consent on **any** artifact/cap change (install, update, *or a manual
+   drop-in*). (Trigger, corrected: the config-dir watcher is `NonRecursive`, so a *bare* drop into
+   the `plugins/` subdir doesn't auto-reload — the swap is picked up on the next config reload /
+   `ezbar msg reload` / restart, and a brand-new id needs a restart (`PLUGINS` is a startup
+   `OnceLock`). Real on any reload/restart; not literally "live on mtime".) **This was filed as a
+   standalone security TODO against the current code, independent of the registry — and its core is
+   now SHIPPED:** see the Phase A status note in §8.
 2. **No unsigned auto-grant. Print-the-block, don't auto-write config (v1).** Checksum is
    *integrity*, not *authenticity* — a malicious publisher is trusted forever, and a compromised
    registry repo rewrites index + checksum + the embedded section atomically (so the
@@ -169,6 +173,14 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
   **move enforcement from id-keyed config to `hash(wasm ‖ manifest)` consent** (fixes the current
   confused-deputy) with a `grants.toml` + a load-time refuse-and-explain. Warn on declared-vs-
   consented mismatch. No registry yet. **This is the load-bearing, security-relevant PR.**
+  - **Status — the hash-keyed grant core is SHIPPED** (the confused-deputy is closed). `src/grants.rs`
+    keys consent on the artifact **content hash** in a host-owned `grants.toml` (`id -> sha256(wasm)`),
+    TOFU on first sight, **withholds every capability** on a hash mismatch (plugin still runs
+    sandboxed), with `ezbar grant <id>` for explicit re-consent; `build()` gates the grant args
+    through `grants::decide()`, the reactor is untouched (it enforces what it's handed). **Deferred to
+    Phase B (coupled to the producer tool):** the embedded `ezbar:manifest` reader, the
+    domain-separated `hash(wasm ‖ manifest)` key, and the "declared caps ≤ consented caps" check —
+    they need the `wasm-tools custom-section` emit step on both Rust and TinyGo guests, which is §7.
 - **Phase B — `cargo ezbar package`** (§7): the producer tool.
 - **Phase C — the registry + `ezbar install`/`list`/`remove`/`search`/`update`** (§4/§5): the thin
   consumer layer, TOFU pin, print-the-block, WIT-window version negotiation.

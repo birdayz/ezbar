@@ -48,6 +48,7 @@ libc = "0.2"                     # malloc_trim — hand glibc's retained-free pa
 # instead of glibc hoarding them in arenas until a manual trim — flattens the bar's
 # render-churn RSS sawtooth down to the working-set floor.
 tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
+sha2 = "0.11.0"
 
 [dev-dependencies]
 # the module dev harness — used only by examples/harness.rs, so it stays out of
