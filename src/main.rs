@@ -1476,8 +1476,13 @@ impl Bar {
                 // Same whole-pill hover wrapping as the islands branch — without this the
                 // solid bar gave WASM plugins (whose `view` self-wires no hover) NO hover
                 // surface at all, so their popups never opened (built-ins like `stock` were
-                // unaffected because they wrap their own `mouse_area`).
-                run.push(self.with_pill_hover(g, self.build_widgets(g)));
+                // unaffected because they wrap their own `mouse_area`). Wrap in a FULL-HEIGHT
+                // centered cell first so the hover surface covers the bar-colored padding
+                // above/below the chip too (Fitts's law), not just the glyph's tight bounds.
+                let cell = container(self.build_widgets(g))
+                    .height(Length::Fill)
+                    .align_y(Vertical::Center);
+                run.push(self.with_pill_hover(g, cell.into()));
             }
             let right_inner: Element<Message> = row(run).align_y(Vertical::Center).into();
             let left_c = container(ws_row)

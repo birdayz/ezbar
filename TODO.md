@@ -177,6 +177,15 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   existing socket first; a live listener is left alone (the instance runs without IPC
   instead of hijacking it), and only a dead/stale socket is unlinked + rebound. Stops a
   second `ezbar` launch from silently stealing `ezbar msg` routing from the running bar.
+- [x] **HIGH** — **WASM-plugin hover was dead on the solid bar — FIXED.** A WASM plugin's
+  `view` emits no hover `mouse_area` (whole-pill hover is host-driven via `hover_messages` +
+  the host wrapping the pill in `mouse_area(on_enter/on_exit)`). That wrapping existed ONLY in
+  the **islands** branch of `bar_view`; the **solid** branch did a bare `build_widgets(g)`, so a
+  plugin pill (e.g. `weather`) had no hover surface and its popup never opened — while built-ins
+  (`stock`) hovered fine (they wrap their own `mouse_area`), which is exactly why it read as a
+  WASM-only bug. Factored into `with_pill_hover(group, widgets)`, now called from BOTH branches.
+  (Note: the layershellev `mouse hasn't entered` seat warnings seen while chasing this were a
+  red herring — built-in hover worked throughout.) (`main.rs:bar_view`, `with_pill_hover`)
 - [ ] **LOW** — Module instance ids restart at 1 on rebuild (harmless per review, but
   identity isn't stable across reorders).
 
