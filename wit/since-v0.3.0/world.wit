@@ -1,0 +1,123 @@
+// ezbar WASM plugin interface — v0.3.0 (RFC 0006 / RFC 0015).
+//
+// A copy of v0.2.0 + the `exec` host call (the `exec` capability tier, RFC 0015). `types`/
+// `ui`/`events` are byte-identical to v0.2.0 (= v0.1.0) so the host remaps them to v0.1.0's
+// generated modules in its version-window bindgen; only `host` + the package version fork.
+//
+// Once shipped this freezes like the others: never edit a shipped `since-vX` dir; a new
+// version is a copy + edit. The host compiles the supported window (RFC 0006 §4); both the
+// host (`wasmtime…bindgen!`) and the SDK (`wit-bindgen`) generate from this.
+
+package ezbar:plugin@0.3.0;
+
+// ── shared types ──────────────────────────────────────────────────────────
+interface types {
+    record rgba8 { r: u8, g: u8, b: u8, a: u8 }
+    enum theme-token { fg, fg-dim, accent, ok, warn, urgent, bg }
+    variant paint { token(theme-token), rgba(rgba8) }
+
+    enum align { start, center, end }
+
+    enum icon-id {
+        cpu, memory, temperature, ping,
+        volume-high, volume-medium, volume-mute,
+        battery, battery-charging, battery-warning,
+        bot, github, spotify, kubernetes,
+        clock, calendar, disk, net, ip, updates, keyboard,
+        cloud, sun, moon, alert, dot,
+        cloud-sun, cloud-moon, cloud-fog, cloud-drizzle, cloud-rain, cloud-rain-wind,
+        cloud-snow, cloud-hail, cloud-lightning, droplets, wind, sunrise, sunset, snowflake,
+    }
+    enum graph-kind { cpu, memory, temperature, ping, generic }
+
+    enum feed-kind { cpu, memory, temperature, ping, battery, net }
+    enum event-kind { timer, pointer, feed, config }
+}
+
+// ── the bounded widget vocabulary (RFC 0006 §2/§2a) ─────────────────────────
+interface ui {
+    use types.{paint, align, icon-id, graph-kind};
+
+    record text-node { content: string, color: paint, size: option<f32> }
+    record icon-node { id: icon-id, color: paint, size: f32 }
+    record graph-node { values: list<f64>, kind: graph-kind, line: paint }
+    record chart-node { values: list<f64>, line: paint, width: f32, height: f32 }
+    record layout-node { children: list<u32>, spacing: f32, align: align }
+    record box-node { child: u32, padding: f32 }
+    record hit-node { child: u32, id: string }
+
+    variant node {
+        %text(text-node),
+        row(layout-node),
+        column(layout-node),
+        container(box-node),
+        mouse-area(hit-node),
+        icon(icon-node),
+        graph(graph-node),
+        chart(chart-node),
+        spacer(f32),
+    }
+    record tree { nodes: list<node>, root: u32 }
+}
+
+// ── host services the guest may import (RFC 0006 §3) ────────────────────────
+interface host {
+    use types.{paint, feed-kind, event-kind};
+
+    // always available
+    log: func(msg: string);
+    text-size: func() -> f32;
+    fg: func() -> paint;
+    set-timeout: func(ms: u32);
+    subscribe: func(kinds: list<event-kind>);
+
+    // gated by `network { host }`
+    http-get: func(url: string) -> result<list<u8>, string>;
+    // gated by `read-file { path }`
+    read-file: func(path: string) -> result<list<u8>, string>;
+    // gated by `bar-state { feeds }`
+    feed-subscribe: func(feed: feed-kind, min-period-ms: u32);
+
+    // RFC 0013: read-only sway state, gated by `[modules.<id>].sway = true`.
+    record sway-workspace { name: string, focused: bool, visible: bool, urgent: bool }
+    record sway-state { workspaces: list<sway-workspace>, title: string }
+    sway-snapshot: func() -> result<sway-state, string>;
+
+    // RFC 0015: run an allow-listed program (the `exec` capability — `[modules.<id>].exec =
+    // ["kubectl", ...]`, or any program under yolo). The host checks `program` against the
+    // allow-list, then runs it to completion off-thread and returns its output. `Err` if the
+    // program isn't granted (synchronous denial) or it couldn't be spawned. This is the
+    // *dangerous tier*: a fetched plugin never gets it without an explicit grant (RFC 0015 §5).
+    record exec-out { code: s32, stdout: list<u8>, stderr: list<u8> }
+    exec: func(program: string, args: list<string>, stdin: option<list<u8>>) -> result<exec-out, string>;
+}
+
+// ── events delivered to the guest ───────────────────────────────────────────
+interface events {
+    use types.{feed-kind};
+
+    enum pointer-kind { press, right-press, scroll, enter, leave }
+    record pointer-event { id: string, kind: pointer-kind, delta: f32 }
+    record feed-sample { feed: feed-kind, value: f64 }
+
+    variant event {
+        timer,
+        pointer(pointer-event),
+        feed(feed-sample),
+        config(list<tuple<string, string>>),
+    }
+}
+
+// ── the plugin world ────────────────────────────────────────────────────────
+world plugin {
+    import host;
+    use ui.{tree};
+    use events.{event};
+
+    export init: func(config: list<tuple<string, string>>);
+    export update: func(ev: event) -> bool;
+    export view: func() -> tree;
+    export popup: func() -> option<tree>;
+    export save-state: func() -> list<u8>;
+    export restore: func(state: list<u8>);
+}

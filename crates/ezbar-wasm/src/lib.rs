@@ -58,6 +58,23 @@ mod v2 {
     });
 }
 
+// RFC 0015: the v0.3.0 world (adds `host.exec`). Same version-window trick — `types`/`ui`/
+// `events` remap to v0.1.0's generated modules, so `Tree`/`Event` and the whole drive loop
+// stay shared; only `Plugin` + the `host` trait fork.
+mod v3 {
+    wasmtime::component::bindgen!({
+        world: "plugin",
+        path: "../../wit/since-v0.3.0",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "ezbar:plugin/types@0.3.0": crate::ezbar::plugin::types,
+            "ezbar:plugin/ui@0.3.0": crate::ezbar::plugin::ui,
+            "ezbar:plugin/events@0.3.0": crate::ezbar::plugin::events,
+        },
+    });
+}
+
 // `Tree` is re-exported at the bindgen root by the world's `use`.
 use ezbar::plugin::events::{FeedSample, PointerEvent, PointerKind};
 use ezbar::plugin::ui::Node;
@@ -132,6 +149,10 @@ struct Host {
     // `[modules.<id>].sway = true` — read-only sway state grant (RFC 0013). `sway-snapshot`
     // returns `Err` when unset (synchronous denial). v0.1.0 plugins never reach it (no import).
     granted_sway: bool,
+    // Programs the user granted via `[modules.<id>].exec` (RFC 0015; `"*"` = any, e.g. yolo).
+    // `exec` of an ungranted program returns `Err`. The dangerous tier — only v0.3.0 plugins
+    // can even import it.
+    granted_exec: Vec<String>,
 }
 
 /// A guest's `set-timeout` request (RFC 0011). `After(d)` = one `Event::Timer` in `d`;
@@ -270,6 +291,96 @@ impl v2::ezbar::plugin::host::Host for Host {
                 })
                 .collect(),
             title: snap.title,
+        })
+    }
+}
+
+// RFC 0015: the v0.3.0 host trait. `types`-based methods delegate to v1 (identical signatures);
+// `sway_snapshot` is re-built into v3's own host record (the `host` interface forks per
+// version); `exec` is the new capability.
+impl v3::ezbar::plugin::host::Host for Host {
+    async fn log(&mut self, msg: String) {
+        ezbar::plugin::host::Host::log(self, msg).await
+    }
+    async fn text_size(&mut self) -> f32 {
+        ezbar::plugin::host::Host::text_size(self).await
+    }
+    async fn fg(&mut self) -> ezbar::plugin::types::Paint {
+        ezbar::plugin::host::Host::fg(self).await
+    }
+    async fn set_timeout(&mut self, ms: u32) {
+        ezbar::plugin::host::Host::set_timeout(self, ms).await
+    }
+    async fn subscribe(&mut self, kinds: Vec<ezbar::plugin::types::EventKind>) {
+        ezbar::plugin::host::Host::subscribe(self, kinds).await
+    }
+    async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::http_get(self, url).await
+    }
+    async fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::read_file(self, path).await
+    }
+    async fn feed_subscribe(&mut self, feed: ezbar::plugin::types::FeedKind, min: u32) {
+        ezbar::plugin::host::Host::feed_subscribe(self, feed, min).await
+    }
+    async fn sway_snapshot(&mut self) -> Result<v3::ezbar::plugin::host::SwayState, String> {
+        if !self.granted_sway {
+            return Err("capability denied: sway not granted ([modules.<id>].sway)".into());
+        }
+        let Some(src) = SWAY_SOURCE.get() else {
+            return Err("sway source unavailable".into());
+        };
+        let snap = src();
+        Ok(v3::ezbar::plugin::host::SwayState {
+            workspaces: snap
+                .workspaces
+                .into_iter()
+                .map(|w| v3::ezbar::plugin::host::SwayWorkspace {
+                    name: w.name,
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: snap.title,
+        })
+    }
+    // RFC 0015: run an allow-listed program to completion (off-thread) and return its output.
+    // Gated by `granted_exec` (`"*"` = any, e.g. yolo). The *dangerous tier* — only ever
+    // reachable via an explicit grant. Bounded by the guest call's WALL timeout.
+    async fn exec(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<v3::ezbar::plugin::host::ExecOut, String> {
+        if !self.granted_exec.iter().any(|g| g == "*" || g == &program) {
+            return Err(format!(
+                "capability denied: exec '{program}' not granted ([modules.<id>].exec)"
+            ));
+        }
+        let prog = program.clone();
+        let out = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            let mut child = Command::new(&prog)
+                .args(&args)
+                .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("spawn '{prog}': {e}"))?;
+            if let (Some(mut si), Some(bytes)) = (child.stdin.take(), stdin) {
+                let _ = si.write_all(&bytes);
+            }
+            child.wait_with_output().map_err(|e| format!("wait '{prog}': {e}"))
+        })
+        .await
+        .map_err(|e| format!("exec join: {e}"))??;
+        Ok(v3::ezbar::plugin::host::ExecOut {
+            code: out.status.code().unwrap_or(-1),
+            stdout: out.stdout,
+            stderr: out.stderr,
         })
     }
 }
@@ -528,6 +639,7 @@ struct Reactor {
     engine: Engine,
     linker: Linker<Host>,    // v0.1.0 host interface
     linker_v2: Linker<Host>, // v0.2.0 host interface (RFC 0013 version window)
+    linker_v3: Linker<Host>, // v0.3.0 host interface (RFC 0015: + exec)
     client: reqwest::Client,
     rt: Handle,
     // Shared feed hubs, keyed by metric (RFC 0012). One sampler task per active kind fans a
@@ -706,6 +818,10 @@ impl Reactor {
         add_to_linker_async(&mut linker_v2).expect("ezbar-wasm: wasi async linker (v2)");
         v2::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v2, |h: &mut Host| h)
             .expect("ezbar-wasm: plugin linker (v2)");
+        let mut linker_v3: Linker<Host> = Linker::new(&engine);
+        add_to_linker_async(&mut linker_v3).expect("ezbar-wasm: wasi async linker (v3)");
+        v3::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v3, |h: &mut Host| h)
+            .expect("ezbar-wasm: plugin linker (v3)");
         // ONE async client shared by every plugin (Arc-cheap clone into each Host).
         let client = reqwest::Client::builder()
             .user_agent("ezbar-wasm")
@@ -715,6 +831,7 @@ impl Reactor {
             engine,
             linker,
             linker_v2,
+            linker_v3,
             client,
             rt,
             feeds: Mutex::new(HashMap::new()),
@@ -823,6 +940,7 @@ impl Reactor {
         grants_feeds: Vec<String>,
         grant_sway: bool,
         grants_fs: Vec<FsGrant>,
+        grants_exec: Vec<String>,
         token: u64,
         slot: Slot,
         input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -836,6 +954,7 @@ impl Reactor {
                     grants_feeds,
                     grant_sway,
                     grants_fs,
+                    grants_exec,
                     token,
                     slot,
                     input,
@@ -856,6 +975,7 @@ impl Reactor {
         grants_feeds: Vec<String>,
         grant_sway: bool,
         grants_fs: Vec<FsGrant>,
+        grants_exec: Vec<String>,
         token: u64,
         slot: Slot,
         mut input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -882,6 +1002,7 @@ impl Reactor {
                 granted_feeds: grants_feeds,
                 feed_requests: Vec::new(),
                 granted_sway: grant_sway,
+                granted_exec: grants_exec,
             },
         );
         store.limiter(|h| &mut h.limits);
@@ -900,6 +1021,12 @@ impl Reactor {
         // matching world, and wrap it in `DrivenPlugin` so the rest of the loop is version-blind.
         let version = plugin_version(&self.engine, &component);
         let instantiated = match version {
+            3 => tokio::time::timeout(
+                WALL,
+                v3::Plugin::instantiate_async(&mut store, &component, &self.linker_v3),
+            )
+            .await
+            .map(|r| r.map(DrivenPlugin::V3)),
             2 => tokio::time::timeout(
                 WALL,
                 v2::Plugin::instantiate_async(&mut store, &component, &self.linker_v2),
@@ -1034,6 +1161,7 @@ impl Reactor {
 enum DrivenPlugin {
     V1(Plugin),
     V2(v2::Plugin),
+    V3(v3::Plugin),
 }
 
 impl DrivenPlugin {
@@ -1045,24 +1173,28 @@ impl DrivenPlugin {
         match self {
             DrivenPlugin::V1(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V2(p) => p.call_init(store, cfg).await,
+            DrivenPlugin::V3(p) => p.call_init(store, cfg).await,
         }
     }
     async fn call_update(&self, store: &mut Store<Host>, ev: &Event) -> wasmtime::Result<bool> {
         match self {
             DrivenPlugin::V1(p) => p.call_update(store, ev).await,
             DrivenPlugin::V2(p) => p.call_update(store, ev).await,
+            DrivenPlugin::V3(p) => p.call_update(store, ev).await,
         }
     }
     async fn call_view(&self, store: &mut Store<Host>) -> wasmtime::Result<Tree> {
         match self {
             DrivenPlugin::V1(p) => p.call_view(store).await,
             DrivenPlugin::V2(p) => p.call_view(store).await,
+            DrivenPlugin::V3(p) => p.call_view(store).await,
         }
     }
     async fn call_popup(&self, store: &mut Store<Host>) -> wasmtime::Result<Option<Tree>> {
         match self {
             DrivenPlugin::V1(p) => p.call_popup(store).await,
             DrivenPlugin::V2(p) => p.call_popup(store).await,
+            DrivenPlugin::V3(p) => p.call_popup(store).await,
         }
     }
 }
@@ -1072,6 +1204,9 @@ impl DrivenPlugin {
 /// version simply won't link against either linker and is disabled at instantiate.
 fn plugin_version(engine: &Engine, component: &Component) -> u8 {
     for (name, _) in component.component_type().imports(engine) {
+        if name.starts_with("ezbar:plugin/host@0.3") {
+            return 3;
+        }
         if name.starts_with("ezbar:plugin/host@0.2") {
             return 2;
         }
@@ -1343,6 +1478,7 @@ impl WasmModule {
         grants_feeds: Vec<String>,
         grant_sway: bool,
         grants_fs: Vec<FsGrant>,
+        grants_exec: Vec<String>,
     ) -> Self {
         let slot: Slot = Arc::new(Shared {
             slots: Mutex::new(Slots::default()),
@@ -1356,6 +1492,7 @@ impl WasmModule {
             grants_feeds,
             grant_sway,
             grants_fs,
+            grants_exec,
             instance, // feed-subscription token
             slot.clone(),
             rx,

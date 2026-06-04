@@ -7,12 +7,13 @@
 use crate::{Align, GraphKind, Icon, Paint, Plugin, Render, Token, WireNode};
 use core::cell::RefCell;
 
-// The SDK targets the latest WIT (v0.2.0, RFC 0013) — a superset of v0.1.0, so plugins built
-// with it gain `sway_snapshot` while everything else is unchanged. The host's version-window
-// loads such a plugin against its v0.2.0 linker; older prebuilt v0.1.0 plugins still load too.
+// The SDK targets the latest WIT (v0.3.0, RFC 0015) — a superset of v0.2.0/v0.1.0, so plugins
+// built with it gain `exec` (and `sway_snapshot`) while everything else is unchanged. The
+// host's version-window loads such a plugin against its v0.3.0 linker; older prebuilt v0.1.0/
+// v0.2.0 plugins still load too.
 wit_bindgen::generate!({
     world: "plugin",
-    path: "../../wit/since-v0.2.0",
+    path: "../../wit/since-v0.3.0",
 });
 
 use ezbar::plugin as p;
@@ -56,6 +57,19 @@ impl crate::Ctx for HostCtx {
                 })
                 .collect(),
             title: s.title,
+        })
+    }
+    fn exec(
+        &mut self,
+        program: &str,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Result<crate::ExecOutput, String> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        p::host::exec(program, &args, stdin).map(|o| crate::ExecOutput {
+            code: o.code,
+            stdout: o.stdout,
+            stderr: o.stderr,
         })
     }
 }

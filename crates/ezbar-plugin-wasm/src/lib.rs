@@ -345,6 +345,22 @@ pub struct SwayState {
     pub title: String,
 }
 
+/// The result of [`Ctx::exec`] (RFC 0015): a finished program's exit code + output.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ExecOutput {
+    /// process exit code (`-1` if it was killed by a signal)
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl ExecOutput {
+    /// `stdout` as a trimmed UTF-8 string (lossy) — the common case for a CLI's output.
+    pub fn stdout_str(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).trim().to_string()
+    }
+}
+
 /// Host services available inside `update` — capability-gated (RFC 0006 §3,§5).
 /// The host performs the call; an ungranted one returns an error.
 pub trait Ctx {
@@ -391,6 +407,13 @@ pub trait Ctx {
     /// in `update` (e.g. on your `Event::Timer`) and render from the result; sway state is a
     /// snapshot, not a stream.
     fn sway_snapshot(&mut self) -> Result<SwayState, String>;
+    /// Run an allow-listed `program` with `args` (and optional `stdin`) to completion, the
+    /// **`exec` capability** (RFC 0015). Gated by `[modules.<id>].exec = ["kubectl", …]`
+    /// (`"*"` = any, or `[plugins] yolo`); returns `Err` if the program isn't granted, or
+    /// couldn't be spawned. Like [`http_get`](Ctx::http_get), keep it on the timer path — the
+    /// guest is parked while the command runs.
+    fn exec(&mut self, program: &str, args: &[&str], stdin: Option<&[u8]>)
+        -> Result<ExecOutput, String>;
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are

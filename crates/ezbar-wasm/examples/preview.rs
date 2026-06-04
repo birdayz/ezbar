@@ -36,6 +36,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let mut grants_feeds: Vec<String> = Vec::new();
     let mut grant_sway = false;
     let mut grants_fs: Vec<ezbar_wasm::FsGrant> = Vec::new();
+    let mut grants_exec: Vec<String> = Vec::new();
     let mut config: Vec<(String, String)> = Vec::new();
     let mut check = false;
 
@@ -67,6 +68,10 @@ fn main() -> ezbar_plugin::iced::Result {
                     grants_fs.push(ezbar_wasm::FsGrant { host_path, guest_path, write });
                 }
                 None => fail("--fs needs <hostpath>[:<guestmount>][:rw]"),
+            },
+            "--exec" => match args.next() {
+                Some(prog) => grants_exec.push(prog),
+                None => fail("--exec needs a program, e.g. --exec echo"),
             },
             "--set" => match args.next() {
                 Some(kv) => match kv.split_once('=') {
@@ -139,6 +144,7 @@ fn main() -> ezbar_plugin::iced::Result {
         grants_feeds,
         grant_sway,
         grants_fs,
+        grants_exec,
     );
 
     // Headless smoke test: drive the plugin briefly and report what it rendered.

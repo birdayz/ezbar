@@ -53,10 +53,10 @@ fn plugin_yolo() -> bool {
     PLUGIN_YOLO.load(Ordering::Relaxed)
 }
 
-/// The full-capability grant set for yolo mode: any host, any feed, sway, and `/` read-write.
-/// `"*"` wildcards are understood by the reactor's per-call checks; the fs grant preopens the
-/// whole filesystem (still bounded by the OS user's own permissions).
-fn yolo_grants() -> (Vec<String>, Vec<String>, bool, Vec<ezbar_wasm::FsGrant>) {
+/// The full-capability grant set for yolo mode: any host, any feed, sway, `/` read-write, and
+/// any program. `"*"` wildcards are understood by the reactor's per-call checks; the fs grant
+/// preopens the whole filesystem (still bounded by the OS user's own permissions).
+fn yolo_grants() -> Grants {
     (
         vec!["*".to_string()],
         vec!["*".to_string()],
@@ -66,8 +66,18 @@ fn yolo_grants() -> (Vec<String>, Vec<String>, bool, Vec<ezbar_wasm::FsGrant>) {
             guest_path: "/".to_string(),
             write: true,
         }],
+        vec!["*".to_string()],
     )
 }
+
+/// The five capability grant lists handed to a WASM plugin: network, feeds, sway, fs, exec.
+type Grants = (
+    Vec<String>,
+    Vec<String>,
+    bool,
+    Vec<ezbar_wasm::FsGrant>,
+    Vec<String>,
+);
 
 /// Discovered WASM plugins, by placement id (RFC 0006). Populated once at startup.
 static PLUGINS: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
@@ -114,6 +124,12 @@ fn feed_grants(cfg: &toml::Value) -> Vec<String> {
 /// `{ path = "~/dir", mode = "r"|"rw", at = "/mount" }`. `path` is `~`-expanded; `mode`
 /// defaults to read-only; `at` (the guest mount point) defaults to `/<basename>`. The WASM
 /// tier preopens these into the guest's WASI filesystem (the fs capability tier).
+/// Granted programs for a plugin, from `[modules.<id>].exec` (a string or array of program
+/// names; `"*"` = any) — RFC 0015's exec capability tier. Only v0.3.0 plugins can call it.
+fn exec_grants(cfg: &toml::Value) -> Vec<String> {
+    string_or_array(cfg, "exec")
+}
+
 fn fs_grants(cfg: &toml::Value) -> Vec<ezbar_wasm::FsGrant> {
     let Some(arr) = cfg.get("fs").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -356,17 +372,18 @@ pub fn build(
             // RFC 0014 Phase A: bind the capability grant to the artifact's *content hash*,
             // not its id. A binary the user never consented to (a same-named swap) inherits
             // nothing — it runs fully sandboxed until re-approved with `ezbar grant <id>`.
-            let (net, feeds, sway, fs) = if plugin_yolo() {
+            let (net, feeds, sway, fs, exec) = if plugin_yolo() {
                 // Yolo: full caps, no per-module grants, no hash-consent. (Still wasm-sandboxed.)
                 yolo_grants()
             } else {
                 match crate::grants::decide(other, &path) {
                 crate::grants::Decision::Granted => {
-                    let g = (
+                    let g: Grants = (
                         network_grants(cfg),                                       // `[modules.<id>].network`
                         feed_grants(cfg),                                          // `.feeds` (RFC 0012)
                         cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // `.sway` (RFC 0013)
-                        fs_grants(cfg),                                            // `.fs` (the fs tier)
+                        fs_grants(cfg),                                            // `.fs` (RFC 0015)
+                        exec_grants(cfg),                                          // `.exec` (RFC 0015)
                     );
                     // RFC 0014 Phase A: if the plugin's embedded `ezbar:manifest` DECLARES a
                     // capability the user didn't grant, say so — an ungranted-and-therefore-
@@ -375,7 +392,9 @@ pub fn build(
                     g
                 }
                 // The on-disk bytes don't match the consented hash — withhold every cap.
-                crate::grants::Decision::Withheld => (Vec::new(), Vec::new(), false, Vec::new()),
+                crate::grants::Decision::Withheld => {
+                    (Vec::new(), Vec::new(), false, Vec::new(), Vec::new())
+                }
                 }
             };
             let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
@@ -388,6 +407,7 @@ pub fn build(
                 feeds,
                 sway,
                 fs,
+                exec,
             ));
             m
         }),

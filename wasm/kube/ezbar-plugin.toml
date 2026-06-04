@@ -1,0 +1,11 @@
+# ezbar plugin manifest (see `ezbar package`). `exec` is the DANGEROUS tier (RFC 0015): the
+# user must grant it by hand (or via `[plugins] yolo`) — `ezbar add` won't auto-activate it.
+id = "kube"
+name = "Kubernetes Context"
+version = "0.1.0"
+wit = "0.3.0"
+publisher = "birdayz"
+description = "The current kubectl context (red on prod), run via the exec capability."
+
+[capabilities]
+exec = ["kubectl"]
