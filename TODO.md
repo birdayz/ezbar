@@ -46,11 +46,14 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   **Phase A SHIPPED.** **A) DONE:** the **hash-keyed grant fix** (`src/grants.rs`, the security
   core — see CRIT below) + the **`ezbar:manifest` reader** (`ezbar_wasm::manifest`: parse the
   declared caps + warn on declared-but-ungranted; verified against a real component). **B)
-  TODO — producer:** a `cargo ezbar package` that builds → appends `ezbar:manifest` (via
-  `wasm-encoder`; `wasm-tools` 1.251 dropped `custom-section`) → emits `{id}.wasm` + sha256 +
-  the `plugins/<id>/<v>.toml` entry. Until plugins actually *carry* a manifest, the host's
-  declared-vs-granted check stays a warning (not enforcement) and the consent key stays
-  `sha256(wasm)`. **C) TODO — registry:** git-backed per-plugin-versioned index +
+  producer core DONE:** `ezbar package <plugin.wasm> [sidecar] [-o out]` embeds the sidecar
+  `ezbar-plugin.toml` as the `ezbar:manifest` section (`manifest::inject` — a dependency-free
+  top-level custom-section append, since `wasm-tools` 1.251 dropped `custom-section`), writes
+  the artifact, and prints the `plugins/<id>/<v>.toml` entry with `sha256` over the shipped
+  bytes (verified e2e: valid component, sha matches). The wasm *build* stays the author's job
+  (cargo/tinygo). Until plugins are republished through it, the declared-vs-granted check stays
+  a warning (not enforcement) and the consent key stays `sha256(wasm)`. **C) TODO — registry:**
+  git-backed per-plugin-versioned index +
   `install`/`update`/`list`/`remove`/`search` (TOFU publisher-pin, prebuilt+sha256, **print**
   the grant block, WIT-window negotiation). The network effect no other bar has.
 
