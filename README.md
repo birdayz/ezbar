@@ -190,7 +190,8 @@ nothing (it runs sandboxed until you re-approve). The whole lifecycle is a few c
 ```sh
 ezbar search <term> --registry <dir|git-url>   # discover plugins in a registry
 ezbar add <id> --registry <dir|git-url>   # resolve newest in-window version → verify sha256 → install → print grant block
-ezbar list                                # installed plugins + consent state + declared caps
+ezbar update [<id>]                       # re-install newer versions (skips already-latest; remembers each plugin's source)
+ezbar list                                # installed plugins: version, consent state, declared caps
 ezbar inspect plugin.wasm                 # what it declares + the exact [modules.<id>] block to paste
 ezbar grant <id>                          # approve its current bytes (re-run after a legit rebuild/update)
 ezbar remove <id>                         # uninstall (.wasm + consent + pin — never your config.toml)

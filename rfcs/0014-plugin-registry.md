@@ -206,11 +206,13 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
   (`publishers.toml`) refuses a known id served under a different publisher. **Security model
   complete:** hash-keyed grants + `sha256` verify + WIT-window negotiation + publisher-pin.
   Artifacts resolve **either** co-located in the clone **or** by downloading the entry's
-  `artifact = "https://…"` release URL (sha256-verified either way), and **`ezbar search
-  [<term>]`** lists matching registry plugins. **Remaining (minor):** `update` is deferred —
-  re-running `ezbar add <id>` already installs the newest in-window version; a version-tracking
-  `update`/`update --all` (skip when already latest) needs the installed version recorded,
-  which is incremental polish best done once a populated hosted registry exists.
+  `artifact = "https://…"` release URL (sha256-verified either way); **`ezbar search [<term>]`**
+  does discovery; and **`ezbar update [<id>]`** re-installs newer versions (an `installed.toml`
+  records each plugin's version + source registry, so update skips already-latest and `list`
+  shows the version). **The consumer CLI matches the RFC in full: search · add · update · list ·
+  remove** (+ inspect/grant/package). The only thing left is the *hosted registry repo itself* —
+  a publish decision; the client works against it the day it exists (any git URL or release-URL
+  artifact).
 
 ## 9. Open questions — resolved
 1. Manifest transport → embedded section (load-time enforce) **and** index entry (pre-download
