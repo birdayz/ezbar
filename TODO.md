@@ -144,9 +144,12 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 
 ## Testing & docs
 
-- [ ] **MED** — **Integration/runtime tests.** Unit tests cover the parser; the live
-  wiring (file-watch reload keeps the active preset, module set rebuilds on placement
-  change, multi-instance routing) has none — exactly where the v1 bugs hid.
+- [~] **MED** — **Integration/runtime tests — started.** The **placement resolver**
+  (`desired_module_specs`) is now covered: default set (workspaces leads, clock end-cap),
+  per-key dedup, explicit-zone override of defaults, and chrome (`switcher`) never resolving
+  as a module. **Remaining:** the live-wiring loops (file-watch reload keeps the active
+  preset, module set rebuilds on placement change, multi-instance routing) — these need
+  test seams around the iced `update`/reconcile, not just pure functions.
 - [ ] **LOW** — Per-module config reference (a table of every `[modules.<id>]` key).
 - [ ] **LOW** — A GIF of the live `▾` switcher cycling presets for the README /
   r/unixporn post (a still doesn't convey "no restart").

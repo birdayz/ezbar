@@ -1967,6 +1967,49 @@ fn config_stream() -> impl Stream<Item = Message> {
 mod tests {
     use super::*;
 
+    fn keys(cfg: &Config) -> Vec<String> {
+        desired_module_specs(cfg).into_iter().map(|s| s.key).collect()
+    }
+
+    #[test]
+    fn default_placement_resolves_expected_module_set() {
+        let cfg = config::parse_str("").unwrap();
+        let ks = keys(&cfg);
+        // left zone defaults to workspaces (leads); clock anchors the far-right end-cap.
+        assert_eq!(ks.first().map(String::as_str), Some("workspaces"));
+        assert_eq!(ks.last().map(String::as_str), Some("clock"));
+        // host chrome (the ▾ switcher) is never resolved as a module…
+        assert!(!ks.iter().any(|k| k == "switcher"));
+        // …and every resolved spec IS a real module (no chrome leaks through).
+        assert!(desired_module_specs(&cfg)
+            .iter()
+            .all(|s| modules::is_module(&s.type_id)));
+    }
+
+    #[test]
+    fn duplicate_keys_are_deduped() {
+        // the same key placed twice yields exactly one instance (reconcile identity).
+        let cfg = config::parse_str("left = [\"cpu\", \"cpu\"]").unwrap();
+        assert_eq!(keys(&cfg).iter().filter(|k| *k == "cpu").count(), 1);
+    }
+
+    #[test]
+    fn explicit_left_zone_overrides_the_default() {
+        // an explicit left zone replaces the workspaces default, in order.
+        let cfg = config::parse_str("left = [\"clock\", \"cpu\"]").unwrap();
+        let ks = keys(&cfg);
+        assert_eq!(ks.first().map(String::as_str), Some("clock"));
+        assert!(ks.iter().any(|k| k == "cpu"));
+        assert!(!ks.iter().any(|k| k == "workspaces")); // default no longer injected
+    }
+
+    #[test]
+    fn non_module_chrome_in_a_zone_is_skipped() {
+        // placing the switcher explicitly must not produce a module spec for it.
+        let cfg = config::parse_str("center = [\"switcher\"]").unwrap();
+        assert!(!keys(&cfg).iter().any(|k| k == "switcher"));
+    }
+
     #[test]
     fn stable_id_is_deterministic_and_distinct() {
         // Same key → same id across calls (so a reconcile matches instances).
