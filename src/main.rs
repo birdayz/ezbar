@@ -30,6 +30,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod install;
 mod ipc;
+mod package;
 
 /// Default right-zone placement when `right` is unconfigured — grouped into a few
 /// semantic clusters that render as separate sub-islands (RFC 0005). The gaps between
@@ -76,6 +77,34 @@ fn main() -> iced_layershell::Result {
                 Err(e) => {
                     eprintln!("ezbar: {e}");
                     std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some("package") => {
+            // RFC 0014 Phase B producer: embed ezbar:manifest + print the registry entry.
+            // `ezbar package <plugin.wasm> [sidecar.toml] [-o out.wasm]`
+            let a: Vec<String> = std::env::args().skip(2).collect();
+            let positional: Vec<&String> = a.iter().take_while(|s| *s != "-o").collect();
+            let out = a.iter().position(|s| s == "-o").and_then(|i| a.get(i + 1));
+            match positional.first() {
+                Some(wasm) => {
+                    let res = package::run(
+                        std::path::Path::new(wasm),
+                        positional.get(1).map(|s| std::path::Path::new(s.as_str())),
+                        out.map(|s| std::path::Path::new(s.as_str())),
+                    );
+                    match res {
+                        Ok(entry) => println!("{entry}"),
+                        Err(e) => {
+                            eprintln!("ezbar package: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("ezbar package: usage: ezbar package <plugin.wasm> [ezbar-plugin.toml] [-o out.wasm]");
+                    std::process::exit(2);
                 }
             }
             return Ok(());
@@ -167,6 +196,7 @@ fn print_help() {
          ezbar              run the bar (default)\n    \
          ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
          ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \
+         ezbar package …    embed ezbar:manifest into a built plugin + print its registry entry\n    \
          ezbar --version    print the version\n    \
          ezbar --help       print this help\n\n\
          EZBAR_CHILD=1 ezbar   run a single foreground instance (no respawn)"

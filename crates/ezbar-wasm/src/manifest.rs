@@ -75,6 +75,40 @@ pub fn read_file(path: &Path) -> Option<Manifest> {
     read(&std::fs::read(path).ok()?)
 }
 
+/// Append an `ezbar:manifest` custom section carrying `toml_body` to `wasm` (the Phase B
+/// producer step). A top-level custom section is valid anywhere in a module/component, so a
+/// plain append works for any well-formed input (the result reads back via [`read`] and
+/// validates as a component). Symmetric with [`read`]; dependency-free (no `wasm-encoder`,
+/// and `wasm-tools` 1.251 no longer has `custom-section`).
+pub fn inject(wasm: &[u8], toml_body: &[u8]) -> Vec<u8> {
+    let name = SECTION.as_bytes();
+    let mut payload = leb128(name.len()); // name length …
+    payload.extend_from_slice(name); // … name …
+    payload.extend_from_slice(toml_body); // … data
+    let mut out = Vec::with_capacity(wasm.len() + payload.len() + 6);
+    out.extend_from_slice(wasm);
+    out.push(0x00); // custom section id
+    out.extend_from_slice(&leb128(payload.len())); // section size
+    out.extend_from_slice(&payload);
+    out
+}
+
+/// Unsigned LEB128 — the wasm integer encoding for section sizes / name lengths.
+fn leb128(mut n: usize) -> Vec<u8> {
+    let mut b = Vec::new();
+    loop {
+        let mut byte = (n & 0x7f) as u8;
+        n >>= 7;
+        if n != 0 {
+            byte |= 0x80;
+        }
+        b.push(byte);
+        if n == 0 {
+            return b;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +159,32 @@ mod tests {
         assert_eq!(read(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]), None); // bare module
         assert_eq!(read(&wasm_with_section("producers", b"x")), None); // unrelated section
         assert_eq!(read(b"not wasm at all"), None); // garbage → None, no panic
+    }
+
+    #[test]
+    fn inject_then_read_round_trips() {
+        let base = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]; // bare module
+        let out = inject(&base, b"network = [\"api.x.com\"]\nsway = true");
+        let m = read(&out).expect("injected manifest reads back");
+        assert_eq!(m.network, ["api.x.com"]);
+        assert!(m.sway);
+    }
+
+    #[test]
+    fn inject_handles_multibyte_leb128_sizes() {
+        // a body > 127 bytes forces a 2-byte LEB128 section size — make sure framing still
+        // parses (a naive single-byte size would corrupt the section).
+        let host = "h".repeat(200);
+        let body = format!("network = [\"{host}\"]");
+        let out = inject(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00], body.as_bytes());
+        assert_eq!(read(&out).unwrap().network, [host]);
+    }
+
+    #[test]
+    fn leb128_encoding() {
+        assert_eq!(leb128(0), [0x00]);
+        assert_eq!(leb128(127), [0x7f]);
+        assert_eq!(leb128(128), [0x80, 0x01]);
+        assert_eq!(leb128(300), [0xac, 0x02]);
     }
 }
