@@ -23,17 +23,18 @@ pub struct Memory {
     text: String,
     hist: History,
     show_graph: bool,
-    graph_line: Option<String>,
+    gcfg: crate::modules::GraphCfg,
 }
 
 impl Memory {
     pub fn new(instance: u64, cfg: &toml::Value) -> Self {
+        let gcfg = crate::modules::graph_cfg(cfg, 20);
         Memory {
             instance,
             text: " --".to_string(),
-            hist: History::new(20),
+            hist: History::new(gcfg.samples),
             show_graph: false,
-            graph_line: crate::modules::graph_line_color(cfg),
+            gcfg,
         }
     }
 }
@@ -73,10 +74,12 @@ impl Module for Memory {
             let g = canvas(Graph {
                 values: self.hist.ordered(),
                 kind: GraphKind::Memory,
-                line_color: ctx.graph_paint(self.graph_line.as_deref()),
+                line_color: ctx.graph_paint(self.gcfg.line_color.as_deref()),
+                line_width: self.gcfg.line_width,
+                fill: self.gcfg.fill,
             })
-            .width(Length::Fixed(48.0))
-            .height(Length::Fixed(16.0));
+            .width(Length::Fixed(self.gcfg.width))
+            .height(Length::Fixed(self.gcfg.height));
             row(vec![lbl.into(), g.into()])
                 .spacing(4)
                 .align_y(Vertical::Center)

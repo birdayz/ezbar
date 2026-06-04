@@ -1394,11 +1394,11 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
                 .into()
         }
         LNode::Icon { id, color, size } => id.view(*size, paint_color(color, ctx)),
-        LNode::Graph { values, kind, line } => canvas(Graph {
-            values: values.clone(),
-            kind: *kind,
-            line_color: Some(paint_color(line, ctx)),
-        })
+        LNode::Graph { values, kind, line } => canvas(Graph::new(
+            values.clone(),
+            *kind,
+            Some(paint_color(line, ctx)),
+        ))
         .width(Length::Fixed(48.0))
         .height(Length::Fixed(16.0))
         .into(),

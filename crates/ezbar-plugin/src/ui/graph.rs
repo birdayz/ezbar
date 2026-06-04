@@ -24,6 +24,25 @@ pub struct Graph {
     /// `Some(c)` paints the whole line `c` (a `[modules.<id>.graph].line_color`
     /// override); `None` uses the per-value threshold colour (green→red by load).
     pub line_color: Option<Color>,
+    /// Stroke width of the trace (`[modules.<id>.graph].line_width`, default 1.5).
+    pub line_width: f32,
+    /// Whether to draw the gradient area fill under the trace
+    /// (`[modules.<id>.graph].fill`, default true). Ping never fills.
+    pub fill: bool,
+}
+
+impl Graph {
+    /// The canonical sparkline defaults (1.5 px line, filled) — used where a caller
+    /// doesn't theme the graph (the WASM reactor, tests), so they need not know the knobs.
+    pub fn new(values: Vec<f64>, kind: GraphKind, line_color: Option<Color>) -> Self {
+        Graph {
+            values,
+            kind,
+            line_color,
+            line_width: 1.5,
+            fill: true,
+        }
+    }
 }
 
 impl Graph {
@@ -117,12 +136,12 @@ fn temp_range(temps: &[f64]) -> Option<(f64, f64)> {
     }
 }
 
-fn stroke_segment(frame: &mut Frame, a: Point, b: Point, color: Color) {
+fn stroke_segment(frame: &mut Frame, a: Point, b: Point, color: Color, width: f32) {
     let path = Path::new(|p| {
         p.move_to(a);
         p.line_to(b);
     });
-    frame.stroke(&path, Stroke::default().with_width(1.5).with_color(color));
+    frame.stroke(&path, Stroke::default().with_width(width).with_color(color));
 }
 
 /// Fill the area under a polyline with a vertical gradient so a sparkline reads as a
@@ -190,12 +209,14 @@ impl Graph {
         }
         let max_val = pts.iter().map(|p| p.2).fold(min, f64::max);
         let xy: Vec<(f32, f32)> = pts.iter().map(|p| (p.0, p.1)).collect();
-        fill_under(frame, &xy, h, self.seg_color(color, max_val));
+        if self.fill {
+            fill_under(frame, &xy, h, self.seg_color(color, max_val));
+        }
         for seg in pts.windows(2) {
             let (px, py, pv) = seg[0];
             let (x, y, v) = seg[1];
             let c = self.seg_color(color, if pv > v { pv } else { v });
-            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
+            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c, self.line_width);
         }
     }
 
@@ -221,12 +242,14 @@ impl Graph {
         }
         let max_t_val = pts.iter().map(|p| p.2).fold(min_t, f64::max);
         let xy: Vec<(f32, f32)> = pts.iter().map(|p| (p.0, p.1)).collect();
-        fill_under(frame, &xy, h, self.seg_color(temperature_color, max_t_val));
+        if self.fill {
+            fill_under(frame, &xy, h, self.seg_color(temperature_color, max_t_val));
+        }
         for seg in pts.windows(2) {
             let (px, py, pt) = seg[0];
             let (x, y, t) = seg[1];
             let c = self.seg_color(temperature_color, if pt > t { pt } else { t });
-            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
+            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c, self.line_width);
         }
     }
 
@@ -272,7 +295,7 @@ impl Graph {
                 if let Some((px, py, pp)) = prev {
                     let seg = if pp > p { pp } else { p };
                     let c = self.seg_color(ping_color, seg);
-                    stroke_segment(frame, Point::new(px, py), Point::new(x, y), c);
+                    stroke_segment(frame, Point::new(px, py), Point::new(x, y), c, self.line_width);
                 }
                 prev = Some((x, y, p));
             } else {
@@ -821,11 +844,7 @@ mod tests {
     #[test]
     fn override_color_beats_threshold() {
         let accent = Color::from_rgb(0.8, 0.65, 0.97);
-        let g = Graph {
-            values: vec![10.0, 90.0],
-            kind: GraphKind::Cpu,
-            line_color: Some(accent),
-        };
+        let g = Graph::new(vec![10.0, 90.0], GraphKind::Cpu, Some(accent));
         // a fixed line_color paints every segment, ignoring the load threshold.
         assert_eq!(g.seg_color(cpu_color, 10.0), accent);
         assert_eq!(g.seg_color(cpu_color, 90.0), accent);

@@ -73,12 +73,13 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 
 ## Config & theming (RFC 0002)
 
-- [ ] **MED** — **Graph knobs mostly not config-exposed.** `[modules.<id>.graph]`:
-  `line_color` is **done** (per-widget `threshold`/token/hex via `Ctx::graph_paint`,
-  default green→red) — but `samples` · `height` · `line_width` · `fill = {gradient, alpha}`
-  · `smooth` are still hardcoded (48/16/`GraphKind`). RFC headline + the r/unixporn reviewer
-  flagged the set. (`modules/{cpu,memory,temperature,ping}.rs`, `ezbar_plugin::ui::graph`,
-  `config.rs`)
+- [~] **MED** — **Graph knobs — mostly DONE.** `[modules.<id>.graph]` now exposes
+  `samples` · `width` · `height` · `line_width` · `fill` (+ the pre-existing `line_color`),
+  resolved by `modules::graph_cfg` and clamped to sane bounds; defaults preserve the prior
+  look exactly (per-module sample caps, 48×16, 1.5 px, filled). The `Graph` widget gained
+  `line_width`/`fill`; a `Graph::new` keeps the reactor/tests on defaults. **Remaining:**
+  `smooth` (Catmull-Rom on the metric sparklines) — deferred as a riskier rendering-character
+  change. (`modules/{mod,cpu,memory,temperature,ping}.rs`, `ezbar_plugin::ui::graph`)
 - [x] **HIGH** — **`[theme.workspaces]` per-state colours were parsed but unused → DROPPED.**
   The chip is fully themed by the global `[theme]` tokens (`accent`/`fg`/`fg_dim`/`urgent`)
   plus `[modules.workspaces].style`, so the parallel `focused/occupied/empty/urgent/colors/
@@ -88,8 +89,8 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 - [ ] **MED** — **Inline markup unimplemented.** RFC specs a themed `[c=token]…[/c]` /
   `[b]…[/b]` subset for `window_title`/`custom`; not built. (`config.rs`, `modules/
   window_title.rs`)
-- [ ] **MED** — Document `[theme.workspaces].colors[]` / `special[]` semantics (or
-  remove); currently undocumented and unused.
+- [x] **MED** — `[theme.workspaces].colors[]` / `special[]` — **removed** (were
+  undocumented + unused; dropped with the other dead `WorkspaceTheme` fields).
 - [ ] **LOW** — `[bar].radius` on the **solid** bar surface (margin/float shipped;
   rounding the solid slab needs the transparent-surface + rounded-container path).
 - [ ] **LOW** — Per-output config (per-output `scale`/`height`/outputs) — deferred.

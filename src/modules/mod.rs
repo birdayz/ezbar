@@ -137,6 +137,50 @@ pub(crate) fn graph_line_color(cfg: &toml::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Resolved `[modules.<id>.graph]` knobs for a metric module's sparkline (RFC 0002).
+/// Every field has a sane default so an unconfigured graph looks exactly as before.
+pub(crate) struct GraphCfg {
+    pub samples: usize,  // history length (x-resolution)
+    pub width: f32,      // canvas width px
+    pub height: f32,     // canvas height px
+    pub line_width: f32, // trace stroke px
+    pub fill: bool,      // gradient area fill under the trace
+    pub line_color: Option<String>,
+}
+
+/// Parse `[modules.<id>.graph]` into a [`GraphCfg`]. `default_samples` is the module's own
+/// history default (cpu 30, memory 20, …) so an unset `samples` preserves current behaviour.
+/// Numeric values are read as float-or-int and clamped to sane bounds (a fat-fingered
+/// `line_width = 999` can't blow out the bar).
+pub(crate) fn graph_cfg(cfg: &toml::Value, default_samples: usize) -> GraphCfg {
+    let g = cfg.get("graph");
+    let num = |k: &str, d: f32| {
+        g.and_then(|g| g.get(k))
+            .and_then(|v| {
+                v.as_float()
+                    .map(|f| f as f32)
+                    .or_else(|| v.as_integer().map(|i| i as f32))
+            })
+            .unwrap_or(d)
+    };
+    let samples = g
+        .and_then(|g| g.get("samples"))
+        .and_then(|v| v.as_integer())
+        .map(|i| i.clamp(2, 2048) as usize)
+        .unwrap_or(default_samples);
+    GraphCfg {
+        samples,
+        width: num("width", 48.0).clamp(8.0, 400.0),
+        height: num("height", 16.0).clamp(6.0, 200.0),
+        line_width: num("line_width", 1.5).clamp(0.5, 8.0),
+        fill: g
+            .and_then(|g| g.get("fill"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        line_color: graph_line_color(cfg),
+    }
+}
+
 /// Construct a built-in module by its placement `id` (RFC 0001 factory). `cfg` is
 /// the `[modules.<id>]` table. `rt` is the bar's runtime handle, used only by WASM
 /// plugins (the reactor drives their tasks on it — RFC 0008). Returns `None` for ids
@@ -182,5 +226,51 @@ pub fn build(
             ));
             m
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tbl(s: &str) -> toml::Value {
+        s.parse::<toml::Value>().unwrap()
+    }
+
+    #[test]
+    fn graph_cfg_defaults_preserve_behaviour() {
+        let g = graph_cfg(&tbl(""), 30);
+        assert_eq!(g.samples, 30); // the module's own default is used when unset
+        assert_eq!(g.width, 48.0);
+        assert_eq!(g.height, 16.0);
+        assert_eq!(g.line_width, 1.5);
+        assert!(g.fill);
+        assert!(g.line_color.is_none());
+    }
+
+    #[test]
+    fn graph_cfg_parses_each_knob() {
+        let g = graph_cfg(
+            &tbl(
+                "[graph]\nsamples = 80\nwidth = 64\nheight = 24\n\
+                 line_width = 2.5\nfill = false\nline_color = \"accent\"",
+            ),
+            30,
+        );
+        assert_eq!(g.samples, 80);
+        assert_eq!(g.width, 64.0);
+        assert_eq!(g.height, 24.0);
+        assert_eq!(g.line_width, 2.5);
+        assert!(!g.fill);
+        assert_eq!(g.line_color.as_deref(), Some("accent"));
+    }
+
+    #[test]
+    fn graph_cfg_clamps_absurd_values() {
+        // a fat-fingered config can't blow out the bar
+        let c = graph_cfg(&tbl("[graph]\nline_width = 999\nheight = 0\nsamples = 1"), 30);
+        assert_eq!(c.line_width, 8.0);
+        assert_eq!(c.height, 6.0);
+        assert_eq!(c.samples, 2);
     }
 }

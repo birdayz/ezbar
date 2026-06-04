@@ -23,17 +23,18 @@ pub struct Temperature {
     text: String,
     hist: History,
     show_graph: bool,
-    graph_line: Option<String>,
+    gcfg: crate::modules::GraphCfg,
 }
 
 impl Temperature {
     pub fn new(instance: u64, cfg: &toml::Value) -> Self {
+        let gcfg = crate::modules::graph_cfg(cfg, 60);
         Temperature {
             instance,
             text: " --".to_string(),
-            hist: History::new(60),
+            hist: History::new(gcfg.samples),
             show_graph: true,
-            graph_line: crate::modules::graph_line_color(cfg),
+            gcfg,
         }
     }
 }
@@ -73,10 +74,12 @@ impl Module for Temperature {
             let g = canvas(Graph {
                 values: self.hist.ordered(),
                 kind: GraphKind::Temperature,
-                line_color: ctx.graph_paint(self.graph_line.as_deref()),
+                line_color: ctx.graph_paint(self.gcfg.line_color.as_deref()),
+                line_width: self.gcfg.line_width,
+                fill: self.gcfg.fill,
             })
-            .width(Length::Fixed(48.0))
-            .height(Length::Fixed(16.0));
+            .width(Length::Fixed(self.gcfg.width))
+            .height(Length::Fixed(self.gcfg.height));
             row(vec![lbl.into(), g.into()])
                 .spacing(4)
                 .align_y(Vertical::Center)
