@@ -97,9 +97,19 @@ pub trait Plugin {                                       // + a `Default` impl
 - **`view`/`popup` are pure + synchronous** — no I/O, no host calls. Build the
   description and return. The host calls `view` only when `update` returned
   `true`, so do your work in `update`.
-- **`update` gets a `Ctx`** with the gated host services: `ctx.http_get(url)`
-  (real HTTP — see *Capabilities*), `ctx.log(msg)`. It runs off the GUI thread,
-  so a blocking fetch is fine. Drive ticks via `Event::Timer`.
+- **`update` gets a `Ctx`** with the gated host services. It runs off the GUI thread,
+  so a blocking call is fine:
+  - `ctx.http_get(url)` — real HTTP, gated by `network` (see *Capabilities*).
+  - `ctx.log(msg)` — a line to the bar's log.
+  - `ctx.set_timeout(ms)` — **control your own wake cadence** (RFC 0011). One-shot: ask
+    for the next `Event::Timer` in `ms`; re-arm each tick to keep polling, `0` cancels
+    (a purely reactive plugin then costs zero). Never called ⇒ a legacy ~2 s heartbeat.
+  - `ctx.feed_subscribe(Feed::Cpu, 1000)` — **subscribe to a host system metric** (cpu/
+    memory/temperature/battery/net, RFC 0012); the host then delivers `Event::Feed { feed,
+    value }`. Gated by `feeds`. Lets a sandboxed plugin draw a cpu graph with no `/proc`.
+  - `ctx.sway_snapshot()` — **read-only sway state** (workspace list + focused title,
+    RFC 0013); a *pull* call returning `Result<SwayState, String>`. Gated by `sway`.
+  - Drive plain ticks via `Event::Timer`; handle `Event::Feed`/`Event::Pointer` likewise.
 - **Hover popups are free:** implement `popup()` and the runtime hovers the
   **whole chip** for you — opens the popup on enter, closes on leave, and
   content-sizes the surface (chart, text list, or a mix). You do **not** need a
@@ -158,10 +168,23 @@ lat = "52.52"                          # any [modules.<id>] keys reach your load
 ```
 
 Without that line, `ctx.http_get` returns `Err("capability denied: …")` (sandboxed
-by default). The grant is enforced where it matters: an ungranted host import is
-**absent from the wasm linker**, and the host checks the URL's host against the
-grant before dialing. There is **no `exec`** — a plugin that needs a subprocess is
-a `custom` script, not a sandboxed plugin.
+by default). The host checks the URL's host against the grant before dialing
+(case-insensitive, port-agnostic). There is **no `exec`** — a plugin that needs a
+subprocess is a `custom` script, not a sandboxed plugin.
+
+The other capabilities are granted the same way, keyed by your plugin id:
+
+```toml
+[modules.sysgraph]
+feeds = ["cpu", "net"]   # ctx.feed_subscribe(...) for these kinds (cpu/memory/temperature/battery/net)
+
+[modules.wintitle]
+sway = true              # ctx.sway_snapshot() — read-only workspace list + focused title
+```
+
+An ungranted `feed_subscribe` is silently never delivered (fire-and-forget — don't
+busy-wait on it); an ungranted `sway_snapshot()` returns `Err` (synchronous denial,
+like `http_get`). All read-only — no capability lets a plugin *drive* the bar or sway.
 
 > **Planned (not wired yet):** a per-plugin `ezbar-plugin.toml` manifest that
 > *declares* what the plugin needs (`[[capabilities]] kind = "network"`) so the
