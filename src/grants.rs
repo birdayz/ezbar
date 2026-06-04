@@ -230,7 +230,7 @@ pub fn inspect(wasm_path: &Path, id: &str) -> Result<String, String> {
     );
     match ezbar_wasm::manifest::read(&bytes) {
         Some(m) => {
-            let caps = describe(&m);
+            let caps = cap_summary(&m);
             out.push_str(&format!("declares: {caps}\n\n"));
             out.push_str("# paste into ~/.config/ezbar/config.toml to grant it:\n");
             out.push_str(&grant_block(id, &m));
@@ -248,9 +248,36 @@ pub fn inspect(wasm_path: &Path, id: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Read-only consent state for `id` against its on-disk bytes — for `ezbar list` (does NOT
+/// trust-on-first-use record, unlike [`decide`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsentState {
+    /// Recorded consent matches the on-disk bytes.
+    Consented,
+    /// A consent exists but the bytes changed since — capabilities are withheld until re-grant.
+    Changed,
+    /// Never recorded (a first load would TOFU it).
+    Unseen,
+    /// The artifact couldn't be read.
+    Unreadable,
+}
+
+/// Report `id`'s consent state without mutating `grants.toml` (read-only; for `ezbar list`).
+pub fn consent_state(id: &str, wasm_path: &Path) -> ConsentState {
+    let Ok(bytes) = std::fs::read(wasm_path) else {
+        return ConsentState::Unreadable;
+    };
+    let current = sha256_hex(&bytes);
+    match recorded(id) {
+        None => ConsentState::Unseen,
+        Some(h) if h.eq_ignore_ascii_case(&current) => ConsentState::Consented,
+        Some(_) => ConsentState::Changed,
+    }
+}
+
 /// A one-line human summary of the declared capabilities ("network: a, b · sway"), or
 /// "no capabilities" when it asks for nothing.
-fn describe(m: &ezbar_wasm::manifest::Manifest) -> String {
+pub fn cap_summary(m: &ezbar_wasm::manifest::Manifest) -> String {
     let mut parts = Vec::new();
     if !m.network.is_empty() {
         parts.push(format!("network: {}", m.network.join(", ")));

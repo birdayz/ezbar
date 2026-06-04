@@ -125,6 +125,32 @@ pub fn add(id: &str, registry: &Path) -> Result<String, String> {
     ))
 }
 
+/// `ezbar list` — the installed plugins, each with its short content hash, consent state,
+/// and declared capabilities. Read-only (never records consent). A management view so a user
+/// can see what's installed and what still needs `ezbar grant`.
+pub fn list() -> Result<String, String> {
+    use ezbar::grants::ConsentState::*;
+    let dir = ezbar::config::plugins_dir().ok_or("no config dir (set HOME or XDG_CONFIG_HOME)")?;
+    let plugins = ezbar_wasm::discover(&dir);
+    if plugins.is_empty() {
+        return Ok(format!("no plugins in {}", dir.display()));
+    }
+    let mut out = String::new();
+    for (id, path) in plugins {
+        let state = match ezbar::grants::consent_state(&id, &path) {
+            Consented => "consented",
+            Changed => "CHANGED — caps withheld (ezbar grant)",
+            Unseen => "not yet consented",
+            Unreadable => "unreadable",
+        };
+        let caps = ezbar_wasm::manifest::read_file(&path)
+            .map(|m| ezbar::grants::cap_summary(&m))
+            .unwrap_or_else(|| "no manifest".to_string());
+        out.push_str(&format!("{id:<16} {state:<38} {caps}\n"));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

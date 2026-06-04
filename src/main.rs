@@ -110,6 +110,16 @@ fn main() -> iced_layershell::Result {
             }
             return Ok(());
         }
+        Some("list") => {
+            match registry::list() {
+                Ok(s) => print!("{s}"),
+                Err(e) => {
+                    eprintln!("ezbar list: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
         Some("add") => {
             // RFC 0014 Phase C (local): install a plugin from a registry directory.
             // `ezbar add <id> [--registry <dir>]` (else $EZBAR_REGISTRY).
@@ -251,6 +261,7 @@ fn print_help() {
          USAGE:\n    \
          ezbar              run the bar (default)\n    \
          ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
+         ezbar list         list installed plugins + their consent state + declared caps\n    \
          ezbar add <id>     install a plugin from a registry dir (--registry <dir> or $EZBAR_REGISTRY)\n    \
          ezbar inspect <f>  show what a plugin .wasm declares + the [modules.<id>] block to paste\n    \
          ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \
