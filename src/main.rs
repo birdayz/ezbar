@@ -31,6 +31,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod install;
 mod ipc;
 mod package;
+mod registry;
 
 /// Default right-zone placement when `right` is unconfigured — grouped into a few
 /// semantic clusters that render as separate sub-islands (RFC 0005). The gaps between
@@ -104,6 +105,39 @@ fn main() -> iced_layershell::Result {
                 }
                 None => {
                     eprintln!("ezbar package: usage: ezbar package <plugin.wasm> [ezbar-plugin.toml] [-o out.wasm]");
+                    std::process::exit(2);
+                }
+            }
+            return Ok(());
+        }
+        Some("add") => {
+            // RFC 0014 Phase C (local): install a plugin from a registry directory.
+            // `ezbar add <id> [--registry <dir>]` (else $EZBAR_REGISTRY).
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let registry = args
+                .iter()
+                .position(|a| a == "--registry" || a == "-r")
+                .and_then(|i| args.get(i + 1).cloned())
+                .or_else(|| std::env::var("EZBAR_REGISTRY").ok());
+            let id = args.iter().find(|a| !a.starts_with('-')).cloned();
+            match (id, registry) {
+                (Some(id), Some(reg)) => match registry::add(&id, std::path::Path::new(&reg)) {
+                    Ok(msg) => print!("{msg}"),
+                    Err(e) => {
+                        eprintln!("ezbar add: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                (None, _) => {
+                    eprintln!("ezbar add: usage: ezbar add <id> [--registry <dir>]");
+                    std::process::exit(2);
+                }
+                (Some(_), None) => {
+                    eprintln!(
+                        "ezbar add: no registry — pass --registry <dir> or set EZBAR_REGISTRY \
+                         (the hosted registry isn't available yet; a local directory works: \
+                         <dir>/plugins/<id>/<version>.toml + <version>.wasm)"
+                    );
                     std::process::exit(2);
                 }
             }
@@ -217,6 +251,7 @@ fn print_help() {
          USAGE:\n    \
          ezbar              run the bar (default)\n    \
          ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
+         ezbar add <id>     install a plugin from a registry dir (--registry <dir> or $EZBAR_REGISTRY)\n    \
          ezbar inspect <f>  show what a plugin .wasm declares + the [modules.<id>] block to paste\n    \
          ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \
          ezbar package …    embed ezbar:manifest into a built plugin + print its registry entry\n    \
