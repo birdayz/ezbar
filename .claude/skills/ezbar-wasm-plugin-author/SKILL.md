@@ -180,11 +180,20 @@ feeds = ["cpu", "net"]   # ctx.feed_subscribe(...) for these kinds (cpu/memory/t
 
 [modules.wintitle]
 sway = true              # ctx.sway_snapshot() — read-only workspace list + focused title
+
+[modules.notes]          # the fs tier (RFC 0015): preopen dirs into your guest, use std::fs
+fs = [{ path = "~/notes", at = "/notes", mode = "rw" }]   # mode: r (default) | rw
+# exec = ["kubectl"]     # run allow-listed programs — landing (RFC 0015)
 ```
 
 An ungranted `feed_subscribe` is silently never delivered (fire-and-forget — don't
 busy-wait on it); an ungranted `sway_snapshot()` returns `Err` (synchronous denial,
-like `http_get`). All read-only — no capability lets a plugin *drive* the bar or sway.
+like `http_get`). With `fs`, you use **normal `std::fs`** against the guest mount (`/notes`
+above) and WASI jails you there — an ungranted/escaping path just fails like any missing file.
+
+`fs` (write) and `exec` are a **dangerous tier**: a user must grant them by hand (`ezbar add`
+won't auto-activate them), or flip `[plugins] yolo = true` to grant every plugin everything.
+Either way the *resource* sandbox (cpu/mem/epoch) still holds.
 
 ### Declare what you need — `ezbar-plugin.toml` + `ezbar package`
 

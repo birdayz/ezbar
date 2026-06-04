@@ -180,9 +180,21 @@ Design: [RFC 0001](rfcs/0001-pluggable-modules.md).
 
 **2 · Sandboxed WASM plugins.** Ship a widget anyone can run *safely*. It compiles to a
 `wasm32-wasip2` component, runs in a wasmtime sandbox, hot-reloads, and can only do
-**read-only, user-granted** things — `network` (an HTTP-GET host allow-list), `feeds`
-(cpu/memory/temperature/battery/net), `sway` (workspace list + focused title). **No
-filesystem, no exec, no driving the bar or sway.**
+**user-granted, fine-grained** things — default-deny, scoped per `[modules.<id>]`:
+
+| cap | grant | what it allows |
+|-----|-------|----------------|
+| `network` | `["api.example.com", "*"]` | HTTP-GET to allow-listed hosts (`*` = any) |
+| `feeds` | `["cpu", "*"]` | host-sampled cpu/memory/temperature/battery/net |
+| `sway` | `true` | read-only workspace list + focused title |
+| `fs` | `[{ path = "~/notes", mode = "rw" }]` | preopened dirs (WASI-jailed; `r`/`rw`) |
+| `exec` | `["kubectl"]` | run allow-listed programs *(landing — RFC 0015)* |
+
+Or flip **`[plugins] yolo = true`** to grant every plugin everything ("I trust my plugins,"
+like Claude Code's bypass). Even in yolo the **resource sandbox holds** (cpu/mem/epoch) — a
+plugin can read your files but can't hang or OOM the bar. `fs`/`exec` are a *dangerous tier*:
+never silently activated by `ezbar add` — you grant them by hand (or yolo). Design:
+[RFC 0015](rfcs/0015-capability-tiers.md).
 
 Consent is bound to the plugin's **content hash**, not its name — a swapped binary inherits
 nothing (it runs sandboxed until you re-approve). The whole lifecycle is a few commands:
