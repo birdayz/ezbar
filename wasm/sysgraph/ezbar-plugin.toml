@@ -1,0 +1,11 @@
+# ezbar plugin manifest (see `ezbar package`). `feeds` is a host-sampled metric capability
+# (RFC 0012) — the plugin draws a live CPU graph with no /proc access of its own.
+id = "sysgraph"
+name = "System Graph"
+version = "0.1.0"
+wit = "0.1.0"
+publisher = "birdayz"
+description = "A live CPU-load sparkline, drawn from the host-sampled cpu feed (no /proc access)."
+
+[capabilities]
+feeds = ["cpu"]

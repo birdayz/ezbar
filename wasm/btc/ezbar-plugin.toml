@@ -1,8 +1,11 @@
+# ezbar plugin manifest (see `ezbar package`). Capabilities are granted by the user in
+# [modules.btc]; this only declares what the plugin needs. (RFC 0014 format.)
 id = "btc"
 name = "Crypto Ticker"
 version = "0.1.0"
-# api_version is injected at build time — never hand-write it
+wit = "0.1.0"
+publisher = "birdayz"
+description = "Bitcoin spot price, polled from Coinbase."
 
-[[capabilities]]
-kind = "network"          # Coinbase public spot-price API
-host = "api.coinbase.com"
+[capabilities]
+network = ["api.coinbase.com"]

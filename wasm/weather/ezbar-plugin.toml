@@ -1,0 +1,12 @@
+# ezbar plugin manifest — `ezbar package weather.wasm` embeds this as the ezbar:manifest
+# section and prints the registry entry. The host reads the [capabilities] at load and warns
+# if you place this plugin without granting them in [modules.weather].
+id = "weather"
+name = "Weather"
+version = "0.1.0"
+wit = "0.1.0"
+publisher = "birdayz"
+description = "Current conditions + an hourly/daily forecast hover panel (open-meteo, wttr.in fallback)."
+
+[capabilities]
+network = ["api.open-meteo.com", "wttr.in"]

@@ -336,19 +336,20 @@ range" goes:
 
 ### 5. Capabilities & trust — designed in, enforced by linker absence
 
-- **Declared in the manifest**, pattern-matched (Zed's `*`/`**` matcher):
+- **Declared in the manifest.** *(Historical sketch — superseded by the shipped format in
+  [RFC 0014 §4](0014-plugin-registry.md): a flat `[capabilities]` table with
+  `network`/`feeds`/`sway` keys, embedded as the `ezbar:manifest` section by `ezbar package`.
+  See `wasm/weather/ezbar-plugin.toml` for a real one.)*
   ```toml
-  # ezbar-plugin.toml — hashed together with the .wasm for grants
-  id = "weather"; name = "Weather"; version = "0.1.0"
-  # api_version is injected at build time — never hand-written
-
-  [[capabilities]]
-  kind = "network"; host = "api.open-meteo.com"
-  [[capabilities]]
-  kind = "bar-state"; feeds = ["cpu", "mem"]
+  # ezbar-plugin.toml (RFC 0014 format)
+  id = "weather"; name = "Weather"; version = "0.1.0"; wit = "0.1.0"
+  [capabilities]
+  network = ["api.open-meteo.com", "wttr.in"]
+  feeds = []          # cpu / memory / temperature / battery / net (RFC 0012)
+  sway = false        # read-only workspace list + title (RFC 0013)
   ```
-  Kinds (v1): `network { host }`, `read-file { path }`, `bar-state { feeds }`.
-  (No `exec`/`clipboard`/`notify` in v1.)
+  The closed, read-only capability set (no `exec`/write/clipboard) is enforced per-call
+  against the hash-keyed grant.
 - **Enforcement is linker absence first, argument-matching second.** An
   ungranted capability means its host import is **not added to the linker**;
   a granted-but-scoped one (e.g. `network { host = "x" }`) additionally has its

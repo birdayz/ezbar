@@ -1,0 +1,12 @@
+# ezbar plugin manifest (see `ezbar package`). `sway` is the read-only sway capability
+# (RFC 0013) — the plugin reads the workspace list + focused title, nothing more. Needs the
+# v0.2.0 WIT (the first version bump), so `wit = "0.2.0"`.
+id = "wintitle"
+name = "Window Title"
+version = "0.1.0"
+wit = "0.2.0"
+publisher = "birdayz"
+description = "The focused window's title, read over the sandboxed read-only sway capability."
+
+[capabilities]
+sway = true

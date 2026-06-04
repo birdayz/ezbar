@@ -1,0 +1,11 @@
+# ezbar plugin manifest (see `ezbar package`). Capabilities are granted by the user in
+# [modules.quakes]; this only declares what the plugin needs.
+id = "quakes"
+name = "Earthquakes"
+version = "0.1.0"
+wit = "0.1.0"
+publisher = "birdayz"
+description = "Recent significant earthquakes from the USGS feed, with a details panel."
+
+[capabilities]
+network = ["earthquake.usgs.gov"]
