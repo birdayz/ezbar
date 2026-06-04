@@ -1512,13 +1512,27 @@ impl Bar {
         group: &[Placed],
         widgets: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        match self.pill_hover(group) {
-            Some((instance, enter, leave)) => mouse_area(widgets)
+        // Hover-open a display popup, or click-open an interactive one (mutually exclusive).
+        if let Some((instance, enter, leave)) = self.pill_hover(group) {
+            return mouse_area(widgets)
                 .on_enter(Message::ModuleMsg { instance, msg: enter })
                 .on_exit(Message::ModuleMsg { instance, msg: leave })
-                .into(),
-            None => widgets,
+                .into();
         }
+        if let Some((instance, click)) = self.pill_click(group) {
+            return mouse_area(widgets)
+                .on_press(Message::ModuleMsg { instance, msg: click })
+                .into();
+        }
+        widgets
+    }
+
+    /// Like [`pill_hover`](Self::pill_hover) but for a single module that opts into whole-pill
+    /// **click**-to-open (an interactive popup) via [`Module::click_message`].
+    fn pill_click(&self, group: &[Placed]) -> Option<(u64, ModMsg)> {
+        let [only] = group else { return None };
+        let entry = self.modules.iter().find(|e| e.name == only.key)?;
+        Some((entry.id, entry.module.click_message()?))
     }
 
     fn bar_view(&self) -> Element<'_, Message> {

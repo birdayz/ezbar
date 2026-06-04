@@ -1423,10 +1423,20 @@ fn hash64(bytes: &[u8]) -> u64 {
 
 // ── the bar Module ───────────────────────────────────────────────────────────
 
+/// A popup is "interactive" when its lifted tree contains a `mouse-area` (a clickable row) —
+/// then the host opens it on click (sticky) instead of hover, so the user can move into it and
+/// click without it closing. A plain display popup (text/graph only) stays hover-driven.
+fn popup_is_interactive(l: &Lifted) -> bool {
+    l.nodes.iter().any(|n| matches!(n, LNode::MouseArea { .. }))
+}
+
 enum Msg {
     Tick,
     Hover,
     Leave,
+    /// Left-click on the pill — open the (sticky) popup for an *interactive* plugin popup
+    /// (one whose tree has `mouse-area`s, e.g. a picker), vs `Hover` for a display popup.
+    Click,
     /// A pointer event on one of the plugin's `mouse-area`s (RFC 0009), forwarded to the
     /// drive task and delivered to the guest as `Event::Pointer`.
     Pointer(PointerEvent),
@@ -1545,6 +1555,9 @@ impl Module for WasmModule {
             // (the host doesn't auto-close — the module drives both, like calendar).
             Some(Msg::Hover) => Response::request(HostRequest::OpenPopup(PopupMode::Hover)),
             Some(Msg::Leave) => Response::request(HostRequest::ClosePopup),
+            // Left-click opens a STICKY popup (an interactive picker) — closes on re-click
+            // (the host toggles) or when another popup opens, NOT on mouse-leave.
+            Some(Msg::Click) => Response::request(HostRequest::OpenPopup(PopupMode::Click)),
             // Forward a pointer event to the drive task (non-blocking). Scrolls are
             // coalesced into `pending_scroll` and flushed as one message, so a scroll
             // flood never fills the channel and evicts a queued `press` (RFC 0009 §3.4).
@@ -1607,11 +1620,25 @@ impl Module for WasmModule {
     }
 
     fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
-        // Claim the whole pill as the hover surface — but only when there's a popup
-        // to open (no point hovering a chip with nothing behind it).
+        // Hover-open the whole pill — but only for a DISPLAY popup (no interactive nodes).
+        // An interactive popup (a picker) opens on click instead (`click_message`), so it
+        // doesn't close the instant you move off the chip to click a row.
         let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let has_popup = s.popup.as_ref().is_some_and(|l| !l.nodes.is_empty());
-        has_popup.then(|| (ModMsg::new(Msg::Hover), ModMsg::new(Msg::Leave)))
+        let display = s
+            .popup
+            .as_ref()
+            .is_some_and(|l| !l.nodes.is_empty() && !popup_is_interactive(l));
+        display.then(|| (ModMsg::new(Msg::Hover), ModMsg::new(Msg::Leave)))
+    }
+
+    fn click_message(&self) -> Option<ModMsg> {
+        // Click-open the whole pill for an INTERACTIVE popup (its tree has `mouse-area`s).
+        let s = self.slot.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let interactive = s
+            .popup
+            .as_ref()
+            .is_some_and(|l| !l.nodes.is_empty() && popup_is_interactive(l));
+        interactive.then(|| ModMsg::new(Msg::Click))
     }
 
     fn popup(&self, ctx: &Ctx) -> Option<Element<'_, ModMsg>> {

@@ -1,75 +1,104 @@
-//! ezbar WASM plugin: `kube` — the current kubectl context, run with `ctx.exec` over the
-//! **exec capability** (RFC 0015). The motivating example: a kubectl widget *can* be a
-//! sandboxed plugin once it may run an allow-listed program. Red on a `prod*` context.
+//! ezbar WASM plugin: `kube` — an **interactive** kubectl-context widget, the full motivating
+//! example (RFC 0015). The chip shows the current context (red on prod). **Left-click** the
+//! chip to open a sticky picker; **left-click a context** to switch to it
+//! (`kubectl config use-context`) — both over the sandboxed `exec` capability.
 //!
 //! ```toml
 //! [modules.kube]
-//! exec = ["kubectl"]            # the dangerous tier — grant it explicitly
-//! # prog = "kubectl"            # optional: override the program / args (default below)
-//! # args = "config current-context"
+//! exec = ["kubectl"]      # the dangerous tier — grant it explicitly (or `[plugins] yolo`)
 //! ```
 
 use ezbar_plugin_wasm::prelude::*;
 
+#[derive(Default)]
 struct Kube {
-    prog: String,
-    args: Vec<String>,
-    ctx_name: String,
+    current: String,
+    contexts: Vec<String>,
 }
 
-impl Default for Kube {
-    fn default() -> Self {
-        Kube {
-            prog: "kubectl".into(),
-            args: vec!["config".into(), "current-context".into()],
-            ctx_name: String::new(),
+impl Kube {
+    fn refresh(&mut self, ctx: &mut dyn Ctx) {
+        if let Ok(o) = ctx.exec("kubectl", &["config", "current-context"], None) {
+            if o.code == 0 {
+                self.current = o.stdout_str();
+            }
+        }
+        if let Ok(o) = ctx.exec("kubectl", &["config", "get-contexts", "-o", "name"], None) {
+            if o.code == 0 {
+                self.contexts = o
+                    .stdout_str()
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
         }
     }
 }
 
 impl Plugin for Kube {
-    fn load(&mut self, config: Vec<(String, String)>) {
-        for (k, v) in &config {
-            match k.as_str() {
-                "prog" => self.prog = v.clone(),
-                "args" => self.args = v.split_whitespace().map(String::from).collect(),
-                _ => {}
-            }
-        }
-    }
-
     fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
-        let Event::Timer = ev else { return false };
-        let argv: Vec<&str> = self.args.iter().map(String::as_str).collect();
-        let new = match ctx.exec(&self.prog, &argv, None) {
-            Ok(o) if o.code == 0 => o.stdout_str().chars().take(40).collect(),
-            Ok(o) => format!("err {}", o.code),
-            Err(e) => {
-                ctx.log(&format!("kube: {e}")); // ungranted / not installed → blank chip
-                String::new()
+        match ev {
+            Event::Timer => {
+                self.refresh(ctx);
+                ctx.set_timeout(5000); // re-poll context + list at ~0.2 Hz
+                true
             }
-        };
-        let changed = new != self.ctx_name;
-        self.ctx_name = new;
-        ctx.set_timeout(5000); // re-poll the context at ~0.2 Hz
-        changed
+            // a picker row was clicked → switch to that context, then refresh the chip
+            Event::Pointer { id, kind: PointerKind::Press, .. } => {
+                let Some(target) = id.strip_prefix("use:") else {
+                    return false;
+                };
+                let target = target.to_string();
+                let _ = ctx.exec("kubectl", &["config", "use-context", &target], None);
+                self.refresh(ctx);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn view(&self) -> Render {
-        if self.ctx_name.is_empty() {
-            return text("\u{2014}").color(Token::FgDim); // em dash: no context / denied
-        }
+        let label = if self.current.is_empty() {
+            "\u{2014}".to_string()
+        } else {
+            self.current.clone()
+        };
         // production contexts go red so you notice before you `kubectl delete` the wrong thing.
-        let color = if self.ctx_name.contains("prod") {
+        let color = if self.current.contains("prod") {
             Token::Urgent
+        } else if self.current.is_empty() {
+            Token::FgDim
         } else {
             Token::Fg
         };
         row([
             Icon::Kubernetes.view(14.0, Token::Accent),
-            text(self.ctx_name.clone()).color(color),
+            text(label).color(color),
         ])
         .spacing(6.0)
+    }
+
+    fn popup(&self) -> Option<Render> {
+        if self.contexts.is_empty() {
+            return None; // nothing to pick → no interactive popup
+        }
+        let rows: Vec<Render> = self
+            .contexts
+            .iter()
+            .map(|c| {
+                let active = *c == self.current;
+                let label = text(if active {
+                    format!("\u{2713} {c}") // ✓ current
+                } else {
+                    format!("   {c}")
+                })
+                .color(if active { Token::Accent } else { Token::Fg });
+                // each row is a click target → makes the popup "interactive" (click-to-open)
+                mouse_area(format!("use:{c}"), container(label))
+            })
+            .collect();
+        Some(column(rows).spacing(3.0))
     }
 }
 

@@ -237,6 +237,14 @@ pub trait Module: Send {
         None
     }
 
+    /// If this module wants the whole pill to be a **left-click** target that opens a *sticky*
+    /// popup (an interactive picker, vs a hover preview), return the message to emit on press.
+    /// The host wraps the pill in `mouse_area().on_press(..)`. Mutually exclusive with
+    /// [`hover_messages`](Module::hover_messages) — click *or* hover, not both.
+    fn click_message(&self) -> Option<ModMsg> {
+        None
+    }
+
     /// Adopt a changed config live, or ask to be rebuilt (RFC 0002/0004 reconcile).
     /// Called by the host when an instance's resolved config changed but its `key`
     /// is the same. The default rebuilds the instance (dropping in-instance state);
