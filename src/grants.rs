@@ -193,6 +193,81 @@ pub fn grant_cli(id: &str) -> Result<String, String> {
     }
 }
 
+/// Format the `[modules.<id>]` grant block a user pastes into `config.toml` to grant a
+/// plugin the capabilities its manifest declares (RFC 0014 — **print, never auto-write**;
+/// `config.toml` is the user's). Only declared (non-empty) capabilities are emitted, so a
+/// plugin that asks for nothing yields just the header.
+pub fn grant_block(id: &str, m: &ezbar_wasm::manifest::Manifest) -> String {
+    let join = |xs: &[String]| {
+        xs.iter()
+            .map(|x| format!("{x:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut s = format!("[modules.{id}]\n");
+    if !m.network.is_empty() {
+        s.push_str(&format!("network = [{}]\n", join(&m.network)));
+    }
+    if !m.feeds.is_empty() {
+        s.push_str(&format!("feeds = [{}]\n", join(&m.feeds)));
+    }
+    if m.sway {
+        s.push_str("sway = true\n");
+    }
+    s
+}
+
+/// `ezbar inspect <plugin.wasm>` — show what a plugin declares + the exact config to grant
+/// it, without installing or running anything. The security decision stays the user's: we
+/// print the hash (so they can match it to a source) and the grant block (to paste), and
+/// point at `ezbar grant` to consent. `id` is the placement id (the `.wasm` stem).
+pub fn inspect(wasm_path: &Path, id: &str) -> Result<String, String> {
+    let bytes = std::fs::read(wasm_path).map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
+    let hash = sha256_hex(&bytes);
+    let mut out = format!(
+        "plugin '{id}'  ({})\n  sha256: {hash}\n\n",
+        wasm_path.display()
+    );
+    match ezbar_wasm::manifest::read(&bytes) {
+        Some(m) => {
+            let caps = describe(&m);
+            out.push_str(&format!("declares: {caps}\n\n"));
+            out.push_str("# paste into ~/.config/ezbar/config.toml to grant it:\n");
+            out.push_str(&grant_block(id, &m));
+            out.push_str(&format!(
+                "\n# then approve these exact bytes:\n#   ezbar grant {id}\n"
+            ));
+        }
+        None => {
+            out.push_str(&format!(
+                "declares: nothing (no ezbar:manifest) — grant capabilities manually in\n\
+                 [modules.{id}] (network/feeds/sway) if it needs them; see the plugin's docs.\n"
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// A one-line human summary of the declared capabilities ("network: a, b · sway"), or
+/// "no capabilities" when it asks for nothing.
+fn describe(m: &ezbar_wasm::manifest::Manifest) -> String {
+    let mut parts = Vec::new();
+    if !m.network.is_empty() {
+        parts.push(format!("network: {}", m.network.join(", ")));
+    }
+    if !m.feeds.is_empty() {
+        parts.push(format!("feeds: {}", m.feeds.join(", ")));
+    }
+    if m.sway {
+        parts.push("sway (read-only)".to_string());
+    }
+    if parts.is_empty() {
+        "no capabilities".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
 /// Write `contents` to `path` atomically: sibling temp file, then rename over the
 /// target (mirrors `install::write_atomic` — a crash mid-write leaves the old file).
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -225,6 +300,23 @@ mod tests {
     #[test]
     fn different_bytes_hash_differently() {
         assert_ne!(sha256_hex(b"benign.wasm"), sha256_hex(b"hostile.wasm"));
+    }
+
+    #[test]
+    fn grant_block_emits_only_declared_caps() {
+        use ezbar_wasm::manifest::Manifest;
+        let m = Manifest {
+            network: vec!["api.open-meteo.com".into(), "wttr.in".into()],
+            feeds: vec![],
+            sway: true,
+        };
+        let block = grant_block("weather", &m);
+        assert_eq!(
+            block,
+            "[modules.weather]\nnetwork = [\"api.open-meteo.com\", \"wttr.in\"]\nsway = true\n"
+        );
+        // a plugin that declares nothing → just the header (nothing to grant)
+        assert_eq!(grant_block("x", &Manifest::default()), "[modules.x]\n");
     }
 
     #[test]

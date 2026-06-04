@@ -109,6 +109,28 @@ fn main() -> iced_layershell::Result {
             }
             return Ok(());
         }
+        Some("inspect") => {
+            // RFC 0014: show what a plugin declares + the grant block to paste (no install,
+            // no run). `ezbar inspect <plugin.wasm>`.
+            match std::env::args().nth(2) {
+                Some(path) => {
+                    let p = std::path::Path::new(&path);
+                    let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or("plugin");
+                    match ezbar::grants::inspect(p, id) {
+                        Ok(report) => print!("{report}"),
+                        Err(e) => {
+                            eprintln!("ezbar inspect: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("ezbar inspect: usage: ezbar inspect <plugin.wasm>");
+                    std::process::exit(2);
+                }
+            }
+            return Ok(());
+        }
         Some("grant") => {
             // Record explicit consent for a plugin's current bytes (RFC 0014 Phase A) —
             // the re-approval path after a legitimate rebuild/update changed its hash.
@@ -195,6 +217,7 @@ fn print_help() {
          USAGE:\n    \
          ezbar              run the bar (default)\n    \
          ezbar install      add ezbar to your sway config (idempotent, never edits existing lines)\n    \
+         ezbar inspect <f>  show what a plugin .wasm declares + the [modules.<id>] block to paste\n    \
          ezbar grant <id>   approve a plugin's current bytes for its configured capabilities\n    \
          ezbar package …    embed ezbar:manifest into a built plugin + print its registry entry\n    \
          ezbar --version    print the version\n    \
