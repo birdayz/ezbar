@@ -173,14 +173,19 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
   **move enforcement from id-keyed config to `hash(wasm ‖ manifest)` consent** (fixes the current
   confused-deputy) with a `grants.toml` + a load-time refuse-and-explain. Warn on declared-vs-
   consented mismatch. No registry yet. **This is the load-bearing, security-relevant PR.**
-  - **Status — the hash-keyed grant core is SHIPPED** (the confused-deputy is closed). `src/grants.rs`
-    keys consent on the artifact **content hash** in a host-owned `grants.toml` (`id -> sha256(wasm)`),
-    TOFU on first sight, **withholds every capability** on a hash mismatch (plugin still runs
-    sandboxed), with `ezbar grant <id>` for explicit re-consent; `build()` gates the grant args
-    through `grants::decide()`, the reactor is untouched (it enforces what it's handed). **Deferred to
-    Phase B (coupled to the producer tool):** the embedded `ezbar:manifest` reader, the
-    domain-separated `hash(wasm ‖ manifest)` key, and the "declared caps ≤ consented caps" check —
-    they need the `wasm-tools custom-section` emit step on both Rust and TinyGo guests, which is §7.
+  - **Status — Phase A SHIPPED.** (1) The hash-keyed grant core (the confused-deputy is closed):
+    `src/grants.rs` keys consent on the artifact **content hash** in a host-owned `grants.toml`
+    (`id -> sha256(wasm)`), TOFU on first sight, **withholds every capability** on a hash mismatch
+    (plugin still runs sandboxed), with `ezbar grant <id>` for explicit re-consent; `build()` gates
+    the grant args through `grants::decide()`, the reactor is untouched (it enforces what it's
+    handed). (2) The **`ezbar:manifest` reader** (`ezbar_wasm::manifest`): the host parses a
+    plugin's optional top-level `ezbar:manifest` custom section (a declaration of needed
+    network/feeds/sway) and **warns on declared-but-ungranted** caps so an inert widget explains
+    itself — verified end-to-end against a real component. **Deferred to Phase B (coupled to the
+    producer tool):** the domain-separated `hash(wasm ‖ manifest)` key and "declared ≤ consented"
+    *enforcement* (vs. today's warning) — both need the manifest **emitted** into real plugins.
+    Note: `wasm-tools` 1.251 dropped its `custom-section` subcommand, so the producer (§7) appends
+    the section via `wasm-encoder` rather than the CLI the RFC first assumed.
 - **Phase B — `cargo ezbar package`** (§7): the producer tool.
 - **Phase C — the registry + `ezbar install`/`list`/`remove`/`search`/`update`** (§4/§5): the thin
   consumer layer, TOFU pin, print-the-block, WIT-window version negotiation.
