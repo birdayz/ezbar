@@ -1513,14 +1513,19 @@ impl Bar {
         widgets: Element<'a, Message>,
     ) -> Element<'a, Message> {
         // Hover-open a display popup, or click-open an interactive one (mutually exclusive).
+        // Either way the whole pill is an interactive target → show the hand cursor, not the
+        // compositor default (which read as a text I-beam on the popup picker).
+        use iced::mouse::Interaction::Pointer;
         if let Some((instance, enter, leave)) = self.pill_hover(group) {
             return mouse_area(widgets)
+                .interaction(Pointer)
                 .on_enter(Message::ModuleMsg { instance, msg: enter })
                 .on_exit(Message::ModuleMsg { instance, msg: leave })
                 .into();
         }
         if let Some((instance, click)) = self.pill_click(group) {
             return mouse_area(widgets)
+                .interaction(Pointer)
                 .on_press(Message::ModuleMsg { instance, msg: click })
                 .into();
         }
@@ -1791,6 +1796,11 @@ impl Bar {
         self.theme = self.config.theme_tokens();
         // Apply [plugins] yolo BEFORE reconciling — module (re)builds read it.
         modules::set_yolo(self.config.plugins.yolo);
+        // Re-discover WASM plugins so a freshly dropped-in `.wasm` is picked up on reload,
+        // not only at startup (the reconcile below then builds it).
+        if let Some(dir) = config::plugins_dir() {
+            modules::register_wasm_plugins(&dir);
+        }
         // Modules reconcile by key (idempotent: unchanged in ⇒ no churn out).
         let modules = self.reconcile_modules();
         // `[bar].outputs` may have changed — add/drop surfaces to match.

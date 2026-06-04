@@ -27,7 +27,7 @@ pub mod workspaces;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use ezbar_plugin::Module;
 
@@ -80,30 +80,39 @@ type Grants = (
 );
 
 /// Discovered WASM plugins, by placement id (RFC 0006). Populated once at startup.
-static PLUGINS: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+/// Discovered WASM plugins, by id. A re-settable `RwLock` (not a one-shot `OnceLock`) so a
+/// `.wasm` dropped into the plugins dir is picked up on the next config reload, not only at
+/// startup — [`register_wasm_plugins`] re-discovers, and reconcile rebuilds the module set.
+static PLUGINS: OnceLock<RwLock<HashMap<String, PathBuf>>> = OnceLock::new();
 
-/// Discover WASM plugins in `dir` and register them so their ids become placeable
-/// like any built-in module. Call once at startup.
+fn plugins() -> &'static RwLock<HashMap<String, PathBuf>> {
+    PLUGINS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// (Re)discover WASM plugins in `dir` so their ids become placeable like any built-in. Called
+/// at startup AND on every config reload, so dropping a new `.wasm` in is picked up live (the
+/// following reconcile builds it). Logs only when the set actually changes (not every reload).
 pub fn register_wasm_plugins(dir: &Path) {
     let map: HashMap<String, PathBuf> = ezbar_wasm::discover(dir).into_iter().collect();
-    if !map.is_empty() {
+    let changed = {
+        let cur = plugins().read().unwrap_or_else(|e| e.into_inner());
+        cur.len() != map.len() || map.keys().any(|k| !cur.contains_key(k))
+    };
+    if changed && !map.is_empty() {
         let mut ids: Vec<_> = map.keys().cloned().collect();
         ids.sort();
         log::info!("ezbar: {} wasm plugin(s): {ids:?}", map.len());
     }
-    let _ = PLUGINS.set(map);
+    *plugins().write().unwrap_or_else(|e| e.into_inner()) = map;
 }
 
 fn wasm_plugin_path(id: &str) -> Option<PathBuf> {
-    PLUGINS.get().and_then(|m| m.get(id)).cloned()
+    plugins().read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
 }
 
 /// Ids of all registered wasm plugins, sorted — for default placement injection.
 pub fn wasm_plugin_ids() -> Vec<String> {
-    let mut ids: Vec<String> = PLUGINS
-        .get()
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
+    let mut ids: Vec<String> = plugins().read().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
     ids.sort();
     ids
 }

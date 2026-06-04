@@ -1838,6 +1838,8 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
             };
             let scroll_id = id.clone();
             mouse_area(inner)
+                // a clickable region shows the hand cursor, not the default/I-beam (RFC 0009).
+                .interaction(ezbar_plugin::iced::mouse::Interaction::Pointer)
                 .on_press(ptr(PointerKind::Press, 0.0))
                 .on_right_press(ptr(PointerKind::RightPress, 0.0))
                 .on_enter(ptr(PointerKind::Enter, 0.0))
