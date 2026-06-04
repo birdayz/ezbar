@@ -69,8 +69,28 @@ gofmt -w . >/dev/null; go vet . || true
 tinygo build -target=wasip2 -o "$name.wasm" --wit-package ../../wit --wit-world plugin-guest .
 echo "built $(pwd)/$name.wasm"
 echo "preview: (cd ../../.. && cargo run -p ezbar-wasm --example preview -- go/examples/$name/$name.wasm --check)"
+echo "package: ezbar package $name.wasm   # embed ezbar-plugin.toml + print the registry entry"
 EOF
 chmod +x "$dir/build.sh"
+
+# ezbar-plugin.toml — the capability manifest (RFC 0014). Fill in what your plugin needs,
+# then `ezbar package $name.wasm` embeds it + prints the registry entry to publish.
+cat > "$dir/ezbar-plugin.toml" <<EOF
+# ezbar plugin manifest — declares the capabilities your plugin needs (RFC 0014).
+# After ./build.sh, run: ezbar package $name.wasm
+id = "$name"
+name = "$ty"
+version = "0.1.0"
+wit = "0.1.0"          # bump to "0.2.0" if you use ctx.sway_snapshot()
+# publisher = "your-handle"
+description = "TODO: one line."
+
+[capabilities]
+# Grant only what you actually call; the host enforces these per-call, sandboxed.
+# network = ["api.example.com"]   # for ctx.http_get (host allow-list)
+# feeds   = ["cpu"]               # cpu/memory/temperature/battery/net (ctx.feed_subscribe)
+# sway    = false                 # read-only workspace list + title (ctx.sway_snapshot)
+EOF
 
 cat > "$dir/README.md" <<EOF
 # $name — an ezbar Go/TinyGo plugin
