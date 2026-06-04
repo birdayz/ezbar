@@ -31,9 +31,14 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   `set_timeout` on the Rust `Ctx` (Go already had it) with an identical loud docstring, and
   migrated weather/btc/quakes off the 2 s poll (they were hammering open-meteo/Coinbase/USGS
   at 0.5 Hz) onto real cadences with error backoff.
-- [ ] **Safe host capabilities** so the powerful widgets *can* be plugins (RFC 0007
-  showed they can't today): host-computed **feeds** (cpu/mem/temp/net) + **read-only
-  sway IPC** (workspaces/title). The sandbox stays a sandbox.
+- [~] **Safe host capabilities** so the powerful widgets *can* be plugins (RFC 0007
+  showed they can't today). **Host-computed feeds: DONE** (RFC 0012) — a sandboxed plugin
+  subscribes to `cpu/memory/temperature/battery/net` via `feed-subscribe`, the host samples
+  once and fans out to all subscribers (idle = zero), capability-gated by
+  `[modules.<id>].feeds`. The `sysgraph` example draws a live CPU graph with no `/proc`
+  access — the thing RFC 0007 said was impossible. **Still TODO: read-only sway IPC**
+  (workspaces/title) — needs a new `since-v0.2.0` WIT (not in the frozen surface), so it's
+  its own RFC. The sandbox stays a sandbox.
 
 ### P2 — ecosystem
 - [ ] **Plugin registry + `ezbar install <plugin>`** with a capability **manifest** the

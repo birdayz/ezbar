@@ -49,7 +49,31 @@ type Ctx interface {
 	// are floored to 100ms. A plugin that never calls this keeps a legacy ~2s
 	// heartbeat (the zero-config default).
 	SetTimeout(ms uint32)
+	// FeedSubscribe subscribes to a host-sampled system feed; the host then delivers
+	// EvFeed {Feed, Value} no faster than minPeriodMs (clamped to >= 1s).
+	//
+	// Capability-gated: only feeds the user granted in [modules.<id>].feeds are
+	// delivered (names are lowercase-exact: cpu, memory, temperature, battery, net).
+	// Fire-and-forget: this returns nothing and gives NO delivery
+	// guarantee — an ungranted feed, or a deferred one (FeedPing has no target in v1),
+	// is silently never delivered (the host logs which kind). Do not busy-wait on a
+	// feed that may never arrive; just render whatever samples you get. Re-subscribing
+	// is idempotent (it only updates the period), so calling it once on your first
+	// EvTimer is the norm. (Unlike HTTPGet, which returns an error on a denied
+	// capability, the frozen feed-subscribe ABI has no result and can't signal denial.)
+	FeedSubscribe(feed FeedKind, minPeriodMs uint32)
 }
+
+// The host-sampled system feeds (aliases of the generated enum), for FeedSubscribe.
+// FeedPing is accepted but unsupported in v1 (no target in the ABI).
+const (
+	FeedCPU         = types.FeedKindCPU
+	FeedMemory      = types.FeedKindMemory
+	FeedTemperature = types.FeedKindTemperature
+	FeedPing        = types.FeedKindPing
+	FeedBattery     = types.FeedKindBattery
+	FeedNet         = types.FeedKindNet
+)
 
 // Plugin is the thing you implement. Only View is required; embed [Base] for
 // no-op defaults of the rest, and override what you need.
@@ -114,6 +138,9 @@ type hostCtx struct{}
 
 func (hostCtx) Log(msg string)       { host.Log(msg) }
 func (hostCtx) SetTimeout(ms uint32) { host.SetTimeout(ms) }
+func (hostCtx) FeedSubscribe(feed FeedKind, minPeriodMs uint32) {
+	host.FeedSubscribe(feed, minPeriodMs)
+}
 func (hostCtx) HTTPGet(url string) ([]byte, error) {
 	res := host.HTTPGet(url)
 	if res.IsErr() {

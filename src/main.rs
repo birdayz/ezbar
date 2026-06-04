@@ -19,6 +19,7 @@ use ezbar::sources::volume;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Reconfigure, ThemeTokens};
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 // jemalloc as the global allocator. glibc malloc hoards freed pages in per-thread
 // arenas and only hands the top back via `malloc_trim`, so the bar's per-frame
@@ -177,6 +178,76 @@ fn acquire_singleton() -> Result<(), ()> {
     Ok(()) // singleton guard is Linux-only; elsewhere just proceed
 }
 
+/// Install the metric sampler the WASM reactor fans out to subscribers (RFC 0012). Maps each
+/// `FeedKind` to a current value using the bar's own `/proc`/sysfs readers. `Ping` is deferred
+/// (the parameterless feed has no target). The closure runs on the reactor's blocking pool
+/// (the cpu read blocks ~100 ms), so reading `/proc` here is fine.
+fn install_feed_sampler() {
+    use ezbar::sources::{battery, system};
+    use ezbar_wasm::FeedKind;
+    // net is a *rate*, derived from counter deltas — keep the previous total across calls.
+    let net_prev: Arc<Mutex<Option<(std::time::Instant, u64)>>> = Arc::new(Mutex::new(None));
+    ezbar_wasm::set_feed_sampler(Arc::new(move |kind| match kind {
+        FeedKind::Cpu => Some(system::extract_cpu_usage_value(&system::get_cpu_usage())),
+        FeedKind::Memory => Some(system::extract_memory_usage_value(&system::get_memory_usage())),
+        FeedKind::Temperature => {
+            Some(system::extract_temperature_value(&system::get_cpu_temperature()))
+        }
+        FeedKind::Battery => battery_percent(&battery::get_battery_status()),
+        FeedKind::Net => net_rate(&net_prev),
+        FeedKind::Ping => None, // deferred — no target in the v0.1 ABI (RFC 0012 §6)
+    }));
+}
+
+/// Leading "NN%" of `get_battery_status()` ("NN% [time]" or "--") as a percentage.
+fn battery_percent(status: &str) -> Option<f64> {
+    status.split('%').next()?.trim().parse::<f64>().ok()
+}
+
+/// Total non-loopback throughput in bytes/s (down+up), derived from `/proc/net/dev` counter
+/// deltas. Returns `None` on the first read (priming `prev`) and whenever the gap is too long
+/// or the counter went backwards (interface reset / sampler respawn) — so a subscriber never
+/// sees a garbage spike from a stale `dt` (RFC 0012 §3).
+fn net_rate(prev: &Mutex<Option<(std::time::Instant, u64)>>) -> Option<f64> {
+    let total = net_total_bytes()?;
+    let now = std::time::Instant::now();
+    let mut g = prev.lock().unwrap_or_else(|e| e.into_inner());
+    let rate = match *g {
+        Some((t0, b0)) => {
+            let dt = now.duration_since(t0).as_secs_f64();
+            if dt <= 0.0 || dt > 5.0 || total < b0 {
+                None // stale/respawn/reset → re-prime, emit nothing this tick
+            } else {
+                Some((total - b0) as f64 / dt)
+            }
+        }
+        None => None, // first read just primes prev
+    };
+    *g = Some((now, total));
+    rate
+}
+
+/// Sum rx+tx byte counters across non-loopback interfaces (`/proc/net/dev`). By design this
+/// is *all* non-`lo` traffic — physical, VPN (`tailscale0`), and bridges (`docker0`) included
+/// — so the `net` feed is a whole-machine throughput gauge, not a per-interface one.
+fn net_total_bytes() -> Option<u64> {
+    let data = std::fs::read_to_string("/proc/net/dev").ok()?;
+    let mut total = 0u64;
+    for line in data.lines().skip(2) {
+        if let Some((name, rest)) = line.split_once(':') {
+            if name.trim() == "lo" {
+                continue;
+            }
+            let cols: Vec<&str> = rest.split_whitespace().collect();
+            if cols.len() >= 9 {
+                total += cols[0].parse::<u64>().unwrap_or(0); // rx bytes
+                total += cols[8].parse::<u64>().unwrap_or(0); // tx bytes
+            }
+        }
+    }
+    Some(total)
+}
+
 fn run_bar() -> iced_layershell::Result {
     // Memory: glibc hoards freed heap in its arenas instead of returning it to the
     // OS, so the startup churn (wgpu + wasmtime warmup) strands a few hundred MB of
@@ -200,6 +271,10 @@ fn run_bar() -> iced_layershell::Result {
     if let Some(dir) = config::plugins_dir() {
         modules::register_wasm_plugins(&dir);
     }
+    // Wire the bar's metric readers into the WASM reactor so a sandboxed plugin can draw a
+    // cpu/mem/temp/battery/net graph via `feed-subscribe` (RFC 0012). The reactor lives below
+    // us in the dep graph and can't read `/proc`; it calls this closure on its blocking pool.
+    install_feed_sampler();
     let name = cfg
         .bar
         .font

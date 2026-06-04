@@ -350,6 +350,20 @@ pub trait Ctx {
     /// A plugin that *never* calls this keeps a legacy ~2 s heartbeat (the zero-config
     /// default), so a trivial poller Just Works without arming anything.
     fn set_timeout(&mut self, ms: u32);
+    /// Subscribe to a host-sampled system [`Feed`]; the host then delivers
+    /// [`Event::Feed`] `{ feed, value }` no faster than `min_period_ms` (clamped to ≥ 1 s).
+    ///
+    /// **Capability-gated:** only feeds the user granted in `[modules.<id>].feeds` are
+    /// delivered (the names are lowercase-exact: `cpu`, `memory`, `temperature`,
+    /// `battery`, `net`). **Fire-and-forget:** this returns nothing and gives **no delivery
+    /// guarantee** — an ungranted feed, or a deferred one (`Feed::Ping` has no target in
+    /// v1), is silently never delivered (the host logs which kind). Do not busy-wait on a
+    /// feed that may never arrive; just render whatever samples you do get. Re-subscribing
+    /// is idempotent (it only updates the period), so calling it once on your first
+    /// `Event::Timer` is the norm. (Unlike [`http_get`](Ctx::http_get), which returns
+    /// `Err` on a denied capability, the frozen `feed-subscribe` ABI has no result and
+    /// can't signal denial synchronously.)
+    fn feed_subscribe(&mut self, feed: Feed, min_period_ms: u32);
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are

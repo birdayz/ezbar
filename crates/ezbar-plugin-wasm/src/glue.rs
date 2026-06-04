@@ -37,6 +37,22 @@ impl crate::Ctx for HostCtx {
     fn set_timeout(&mut self, ms: u32) {
         p::host::set_timeout(ms);
     }
+    fn feed_subscribe(&mut self, feed: crate::Feed, min_period_ms: u32) {
+        p::host::feed_subscribe(feed_kind(feed), min_period_ms);
+    }
+}
+
+fn feed_kind(f: crate::Feed) -> p::types::FeedKind {
+    use crate::Feed as F;
+    use p::types::FeedKind as W;
+    match f {
+        F::Cpu => W::Cpu,
+        F::Memory => W::Memory,
+        F::Temperature => W::Temperature,
+        F::Ping => W::Ping,
+        F::Battery => W::Battery,
+        F::Net => W::Net,
+    }
 }
 
 struct Component;

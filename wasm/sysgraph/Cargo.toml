@@ -1,0 +1,18 @@
+[package]
+name = "sysgraph"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar WASM plugin: a live CPU graph drawn from a host-computed feed (RFC 0012)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+
+# keep the .wasm small
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

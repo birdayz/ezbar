@@ -10,6 +10,7 @@
 //! store. A trap/OOM/timeout disables that one plugin; the reactor and bar are
 //! untouched.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -38,9 +39,13 @@ wasmtime::component::bindgen!({
 });
 
 // `Tree` is re-exported at the bindgen root by the world's `use`.
-use ezbar::plugin::events::{PointerEvent, PointerKind};
+use ezbar::plugin::events::{FeedSample, PointerEvent, PointerKind};
 use ezbar::plugin::ui::Node;
 use ezbar_plugin::iced::mouse::ScrollDelta;
+
+/// The system metric a plugin can subscribe to (RFC 0012). Re-exported so the bar can write
+/// the injected [`set_feed_sampler`] closure against it.
+pub use ezbar::plugin::types::FeedKind;
 
 // resource bounds (RFC 0006 §1a / RFC 0008: fixed constants)
 const EPOCH_TICK: Duration = Duration::from_millis(10);
@@ -64,6 +69,10 @@ const MIN_INTERVAL: Duration = Duration::from_millis(16);
 // Cap on a guest-controlled `mouse-area` hit id: the lifted arena lives outside the
 // store's memory limit, so bound it (same spirit as MAX_NODES).
 const MAX_ID_LEN: usize = 64;
+// Feed sampling cadence (RFC 0012): the host samples each subscribed metric once per `BASE`
+// and fans the value out to every subscriber. A plugin's `min-period-ms` throttles delivery
+// per-subscriber but can't go below this — a 48px sparkline never needs faster than 1 Hz.
+const BASE: Duration = Duration::from_secs(1);
 
 // ── host store data + the gated import interface ─────────────────────────────
 
@@ -80,6 +89,12 @@ struct Host {
     // call and drained by the drive loop right after the call returns (RFC 0011). No
     // lock/Arc: the `Host` *is* the store data, mutated only on the owning fiber.
     timer_request: Option<TimerRequest>,
+    // Feed kinds the user granted via `[modules.<id>].feeds` (RFC 0012). An ungranted
+    // `feed-subscribe` is logged and dropped — the sandbox stays a sandbox.
+    granted_feeds: Vec<String>,
+    // Pending `feed-subscribe` requests (a guest may subscribe to several in one call),
+    // drained by the drive loop after the call to register with the shared feed hub.
+    feed_requests: Vec<(FeedKind, u32)>,
 }
 
 /// A guest's `set-timeout` request (RFC 0011). `After(d)` = one `Event::Timer` in `d`;
@@ -120,6 +135,19 @@ impl ezbar::plugin::host::Host for Host {
         });
     }
     async fn subscribe(&mut self, _kinds: Vec<ezbar::plugin::types::EventKind>) {}
+    async fn feed_subscribe(&mut self, feed: FeedKind, min: u32) {
+        // Capability check (RFC 0012): only deliver feeds the user granted. Fire-and-forget
+        // — the frozen WIT has no result, so an ungranted feed is logged and silently never
+        // delivered (the plugin can't tell; documented in the SDK contract).
+        if self.granted_feeds.iter().any(|g| g == feed_kind_name(feed)) {
+            self.feed_requests.push((feed, min));
+        } else {
+            log::info!(
+                "ezbar-wasm: feed '{}' not granted ([modules.<id>].feeds) — ignored",
+                feed_kind_name(feed)
+            );
+        }
+    }
     async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
         let h = url.split("://").nth(1).unwrap_or(&url);
         let h = h.split('/').next().unwrap_or(h);
@@ -147,7 +175,6 @@ impl ezbar::plugin::host::Host for Host {
     async fn read_file(&mut self, _path: String) -> Result<Vec<u8>, String> {
         Err("capability denied: read-file not granted".into())
     }
-    async fn feed_subscribe(&mut self, _feed: ezbar::plugin::types::FeedKind, _min: u32) {}
 }
 
 impl ezbar::plugin::types::Host for Host {}
@@ -409,6 +436,65 @@ struct Reactor {
     linker: Linker<Host>,
     client: reqwest::Client,
     rt: Handle,
+    // Shared feed hubs, keyed by metric (RFC 0012). One sampler task per active kind fans a
+    // single sample out to every subscriber; the entry is removed when its last subscriber
+    // leaves. Keyed by a small index so we don't depend on `FeedKind: Hash`.
+    feeds: Mutex<HashMap<u8, FeedHub>>,
+}
+
+/// One active metric's fan-out: its subscribers. The sampler task isn't held — it
+/// self-terminates (removes its own hub) within one `BASE` of the last unsubscribe, so a
+/// detached handle is all we need.
+struct FeedHub {
+    subs: Vec<Sub>,
+}
+
+/// One plugin's subscription to a feed. `token` (the plugin's instance id) keys the upsert
+/// so re-subscribing each tick doesn't pile up duplicate `Sub`s. `last_sent` throttles
+/// delivery to the guest's requested `min_period` (`None` = never sent → deliver next tick).
+struct Sub {
+    token: u64,
+    tx: tokio::sync::mpsc::Sender<FeedSample>,
+    min_period: Duration,
+    last_sent: Option<tokio::time::Instant>,
+}
+
+/// The bar-injected metric sampler (RFC 0012 §3): the reactor lives *below* the bar in the
+/// dependency graph and can't read `/proc`, so the bar hands down a closure that maps a
+/// `FeedKind` to its current value (a rate for `net`, a % for `cpu`, …). `None` = unavailable
+/// (and `Ping` is deferred → always `None`). Called on the blocking pool.
+pub type FeedSampler = dyn Fn(FeedKind) -> Option<f64> + Send + Sync + 'static;
+
+static FEED_SAMPLER: OnceLock<Arc<FeedSampler>> = OnceLock::new();
+
+/// Install the metric sampler. The bar calls this once at startup, before loading plugins,
+/// with a closure over its own `/proc`/sysfs readers (RFC 0012 §3). First write wins.
+pub fn set_feed_sampler(f: Arc<FeedSampler>) {
+    let _ = FEED_SAMPLER.set(f);
+}
+
+/// Stable index for a feed kind — the `feeds` map key (avoids needing `FeedKind: Hash`).
+fn feed_index(k: FeedKind) -> u8 {
+    match k {
+        FeedKind::Cpu => 0,
+        FeedKind::Memory => 1,
+        FeedKind::Temperature => 2,
+        FeedKind::Ping => 3,
+        FeedKind::Battery => 4,
+        FeedKind::Net => 5,
+    }
+}
+
+/// The grant/config name for a feed kind (matches `[modules.<id>].feeds = [...]`).
+fn feed_kind_name(k: FeedKind) -> &'static str {
+    match k {
+        FeedKind::Cpu => "cpu",
+        FeedKind::Memory => "memory",
+        FeedKind::Temperature => "temperature",
+        FeedKind::Ping => "ping",
+        FeedKind::Battery => "battery",
+        FeedKind::Net => "net",
+    }
 }
 
 /// Per-plugin wake cadence (RFC 0011). `Heartbeat` is the legacy auto-renewing 2 s poll for
@@ -442,6 +528,31 @@ fn fold_timer(state: &mut Timer, req: Option<TimerRequest>) {
         Some(TimerRequest::Cancel) => *state = Timer::Idle,
         None => {}
     }
+}
+
+/// Drain the `feed-subscribe`s the guest issued during the call just finished and register
+/// each with the shared hub (RFC 0012 §4.3). Requests are already grant-filtered by the
+/// `feed_subscribe` import; `min-period-ms` is clamped to `>= BASE` here. Called after every
+/// guest call, exactly like `fold_timer`.
+fn register_feeds(
+    reactor: &'static Reactor,
+    token: u64,
+    feed_tx: &tokio::sync::mpsc::Sender<FeedSample>,
+    store: &mut Store<Host>,
+) {
+    let reqs: Vec<(FeedKind, u32)> = store.data_mut().feed_requests.drain(..).collect();
+    for (kind, min) in reqs {
+        let min_period = Duration::from_millis((min as u64).max(BASE.as_millis() as u64));
+        reactor.subscribe_feed(kind, token, min_period, feed_tx.clone());
+    }
+}
+
+/// What woke a plugin's drive loop this iteration. The feed arm (RFC 0012) sits between the
+/// pointer input and the timer in the `select!` so a feed (≤1/s) never delays a click.
+enum Wake {
+    Pointer(PointerEvent),
+    Timer,
+    Feed(FeedSample),
 }
 
 static REACTOR: OnceLock<Reactor> = OnceLock::new();
@@ -479,30 +590,132 @@ impl Reactor {
             linker,
             client,
             rt,
+            feeds: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Spawn a green-thread driver for one plugin on the shared runtime.
+    /// Register `tx` as a subscriber to `kind` (RFC 0012 §4.2). Upsert by `token`: a plugin
+    /// that re-subscribes each tick updates its period, never adds a duplicate `Sub`. Spawns
+    /// the kind's sampler task on the first subscriber. Runs entirely under the `feeds` lock,
+    /// so it can't race the sampler's atomic self-removal.
+    fn subscribe_feed(
+        &'static self,
+        kind: FeedKind,
+        token: u64,
+        min_period: Duration,
+        tx: tokio::sync::mpsc::Sender<FeedSample>,
+    ) {
+        let key = feed_index(kind);
+        let mut feeds = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
+        match feeds.get_mut(&key) {
+            Some(hub) => {
+                if let Some(sub) = hub.subs.iter_mut().find(|s| s.token == token) {
+                    sub.min_period = min_period; // re-subscribe → just update the cadence
+                } else {
+                    hub.subs.push(Sub { token, tx, min_period, last_sent: None });
+                }
+            }
+            None => {
+                self.spawn_sampler(kind);
+                let subs = vec![Sub { token, tx, min_period, last_sent: None }];
+                feeds.insert(key, FeedHub { subs });
+            }
+        }
+    }
+
+    /// The per-kind sampler: every `BASE`, sample once *outside* the lock (the cpu read
+    /// blocks ~100ms), then under one lock acquisition fan the value out and atomically
+    /// self-remove if no subscribers remain (RFC 0012 §4.2 — closes the teardown race).
+    /// Detached — the task ends itself when its hub empties.
+    fn spawn_sampler(&'static self, kind: FeedKind) {
+        let key = feed_index(kind);
+        self.rt.spawn(async move {
+            loop {
+                tokio::time::sleep(BASE).await;
+                // Sample on the blocking pool, holding no lock. If the bar never installed a
+                // sampler, disable this feed (remove + exit) rather than spin.
+                let Some(sampler) = FEED_SAMPLER.get().cloned() else {
+                    log::warn!("ezbar-wasm: no feed sampler installed — disabling feed");
+                    self.feeds
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&key);
+                    return;
+                };
+                let value = tokio::task::spawn_blocking(move || sampler(kind))
+                    .await
+                    .ok()
+                    .flatten();
+
+                // One critical section: fan-out (non-blocking `try_send`) + prune + the
+                // emptiness-test-and-remove. Sharing the lock with `subscribe_feed` is what
+                // makes teardown race-free.
+                let mut feeds = self.feeds.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(hub) = feeds.get_mut(&key) else {
+                    return; // already removed elsewhere
+                };
+                if let Some(v) = value {
+                    let now = tokio::time::Instant::now();
+                    hub.subs.retain_mut(|sub| {
+                        let due = sub
+                            .last_sent
+                            .is_none_or(|t| now.duration_since(t) >= sub.min_period);
+                        if !due {
+                            return true; // throttled — keep, deliver a later tick
+                        }
+                        match sub.tx.try_send(FeedSample { feed: kind, value: v }) {
+                            Ok(()) => {
+                                sub.last_sent = Some(now);
+                                true
+                            }
+                            // Alive but behind (drive loop parked in a guest call): drop the
+                            // *sample*, keep the sub — a gauge wants freshest-or-nothing.
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                            // Receiver gone (plugin torn down): drop the sub.
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                        }
+                    });
+                }
+                if hub.subs.is_empty() {
+                    feeds.remove(&key); // atomic with the emptiness test — no respawn window
+                    return;
+                }
+            }
+        }); // detached — self-terminates when the hub empties
+    }
+
+    /// Spawn a green-thread driver for one plugin on the shared runtime. `token` (the
+    /// plugin's instance id) keys its feed subscriptions; `grants_feeds` are the granted
+    /// metric kinds (RFC 0012).
+    #[allow(clippy::too_many_arguments)]
     fn add_plugin(
         &'static self,
         path: PathBuf,
         config: Vec<(String, String)>,
         grants: Vec<String>,
+        grants_feeds: Vec<String>,
+        token: u64,
         slot: Slot,
         input: tokio::sync::mpsc::Receiver<PointerEvent>,
     ) -> tokio::task::JoinHandle<()> {
         self.rt.spawn(async move {
-            if let Err(e) = self.drive(path.clone(), config, grants, slot, input).await {
+            if let Err(e) = self
+                .drive(path.clone(), config, grants, grants_feeds, token, slot, input)
+                .await
+            {
                 log::warn!("ezbar-wasm: plugin {path:?} stopped: {e:#}");
             }
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn drive(
         &'static self,
         path: PathBuf,
         config: Vec<(String, String)>,
         grants: Vec<String>,
+        grants_feeds: Vec<String>,
+        token: u64,
         slot: Slot,
         mut input: tokio::sync::mpsc::Receiver<PointerEvent>,
     ) -> Result<()> {
@@ -524,9 +737,15 @@ impl Reactor {
                 granted_network: grants,
                 client: self.client.clone(),
                 timer_request: None,
+                granted_feeds: grants_feeds,
+                feed_requests: Vec::new(),
             },
         );
         store.limiter(|h| &mut h.limits);
+        // Feed delivery channel (RFC 0012): depth 1 so a slow plugin drops stale samples
+        // (drop-newest) rather than queueing them; the drive loop owns `feed_tx` and clones
+        // it into each subscription, so `feed_rx` never closes while the loop runs.
+        let (feed_tx, mut feed_rx) = tokio::sync::mpsc::channel::<FeedSample>(1);
         // CPU bound: cooperative epoch-yield (smoothing) + the wall-clock `timeout`
         // below (the real backstop). A yielding guest never self-traps.
         store.epoch_deadline_async_yield_and_update(DEADLINE_TICKS);
@@ -566,13 +785,16 @@ impl Reactor {
         // `init` could already have armed one (a future SDK with a ctx in `load`) — fold it.
         let mut timer = Timer::Heartbeat;
         fold_timer(&mut timer, store.data_mut().timer_request.take());
+        register_feeds(self, token, &feed_tx, &mut store);
         // Bootstrap: one immediate `Event::Timer` so the chip paints at t≈0 instead of after a
-        // full heartbeat, and a poller arms its real cadence from the first tick. Explicit — it
-        // does NOT consume a one-shot, so a legacy plugin stays on `Heartbeat`.
+        // full heartbeat, and a poller arms its real cadence (and feed subscriptions) from the
+        // first tick. Explicit — it does NOT consume a one-shot, so a legacy plugin stays on
+        // `Heartbeat`.
         if !step(&mut store, &plugin, &slot, &Event::Timer).await {
             return Ok(()); // trapped on the first tick — disabled
         }
         fold_timer(&mut timer, store.data_mut().timer_request.take());
+        register_feeds(self, token, &feed_tx, &mut store);
 
         // Drive loop: a (coalesced) pointer event when one arrives, else a timer tick when the
         // plugin's cadence elapses (`set-timeout`, or the legacy heartbeat). `carry` holds a
@@ -580,19 +802,25 @@ impl Reactor {
         // click is never reordered across a scroll batch.
         let mut carry: Option<PointerEvent> = None;
         loop {
-            let next = match carry.take() {
-                Some(c) => Some(c),
+            let wake = match carry.take() {
+                Some(c) => Wake::Pointer(c),
                 None => tokio::select! {
                     biased;
                     ev = input.recv() => match ev {
-                        Some(e) => Some(e),
+                        Some(e) => Wake::Pointer(e),
                         None => return Ok(()), // all senders gone (module dropped) → stop
                     },
-                    _ = sleep_for(timer) => None, // cadence elapsed → a timer tick
+                    // Feed sample (RFC 0012) — after input, before the timer, so a ≤1/s feed
+                    // never delays a click. `None` is unreachable (the loop holds `feed_tx`).
+                    sample = feed_rx.recv() => match sample {
+                        Some(s) => Wake::Feed(s),
+                        None => return Ok(()),
+                    },
+                    _ = sleep_for(timer) => Wake::Timer, // cadence elapsed → a timer tick
                 },
             };
-            let event = match next {
-                None => {
+            let event = match wake {
+                Wake::Timer => {
                     // One-shot consumed on fire: an explicit `At` drops to `Idle` until the
                     // guest re-arms in `update`; the legacy `Heartbeat` auto-renews.
                     if let Timer::At(_) = timer {
@@ -600,7 +828,8 @@ impl Reactor {
                     }
                     Event::Timer
                 }
-                Some(first) if matches!(first.kind, PointerKind::Scroll) => {
+                Wake::Feed(sample) => Event::Feed(sample),
+                Wake::Pointer(first) if matches!(first.kind, PointerKind::Scroll) => {
                     // Coalesce the leading run of consecutive scrolls (lossless sum); a
                     // non-scroll flushes the run and is carried to the next iteration.
                     let mut delta = first.delta;
@@ -620,15 +849,17 @@ impl Reactor {
                         delta,
                     })
                 }
-                Some(first) => Event::Pointer(first),
+                Wake::Pointer(first) => Event::Pointer(first),
             };
             let is_pointer = matches!(event, Event::Pointer(_));
             if !step(&mut store, &plugin, &slot, &event).await {
                 return Ok(()); // trap/timeout — store dropped here, on this worker
             }
             // Fold any `set-timeout` the guest issued during this step into the cadence
-            // (re-arms a one-shot; `None` leaves a heartbeat or a pending `At` untouched).
+            // (re-arms a one-shot; `None` leaves a heartbeat or a pending `At` untouched),
+            // and register any `feed-subscribe`s it issued.
             fold_timer(&mut timer, store.data_mut().timer_request.take());
+            register_feeds(self, token, &feed_tx, &mut store);
             if is_pointer {
                 // Cadence gate: a yield + min gap between pointer-driven calls so input
                 // can't pin a worker (the real fairness bound — RFC 0009 §3.4).
@@ -809,7 +1040,9 @@ impl WasmModule {
     /// Load `path` as a plugin with the placement `id`, driven on the reactor that
     /// runs on `rt` (the bar's existing runtime `Handle`, threaded in explicitly —
     /// RFC 0008 §3.1). `config` is the `[modules.<id>]` table flattened to string
-    /// pairs; `grants` are the granted network hosts (capabilities).
+    /// pairs; `grants` are the granted network hosts, `grants_feeds` the granted system
+    /// metric feeds (RFC 0012). `instance` doubles as the feed-subscription token.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rt: Handle,
         instance: u64,
@@ -817,13 +1050,22 @@ impl WasmModule {
         path: PathBuf,
         config: Vec<(String, String)>,
         grants: Vec<String>,
+        grants_feeds: Vec<String>,
     ) -> Self {
         let slot: Slot = Arc::new(Shared {
             slots: Mutex::new(Slots::default()),
             version: AtomicU64::new(0),
         });
         let (input, rx) = tokio::sync::mpsc::channel(32);
-        let task = reactor(&rt).add_plugin(path, config, grants, slot.clone(), rx);
+        let task = reactor(&rt).add_plugin(
+            path,
+            config,
+            grants,
+            grants_feeds,
+            instance, // feed-subscription token
+            slot.clone(),
+            rx,
+        );
         WasmModule {
             id: id.into(),
             instance,

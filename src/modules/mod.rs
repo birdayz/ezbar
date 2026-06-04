@@ -60,7 +60,18 @@ pub fn wasm_plugin_ids() -> Vec<String> {
 /// Granted network hosts for a plugin, from `[modules.<id>].network` (a string
 /// or array of host names) — the capability the WASM tier enforces (RFC 0006 §5).
 fn network_grants(cfg: &toml::Value) -> Vec<String> {
-    match cfg.get("network") {
+    string_or_array(cfg, "network")
+}
+
+/// Granted system-metric feeds for a plugin, from `[modules.<id>].feeds` (a string
+/// or array of feed names: cpu/memory/temperature/battery/net) — RFC 0012's capability.
+fn feed_grants(cfg: &toml::Value) -> Vec<String> {
+    string_or_array(cfg, "feeds")
+}
+
+/// A `[modules.<id>].<key>` value that is either a single string or an array of strings.
+fn string_or_array(cfg: &toml::Value, key: &str) -> Vec<String> {
+    match cfg.get(key) {
         Some(toml::Value::String(s)) => vec![s.clone()],
         Some(toml::Value::Array(a)) => a
             .iter()
@@ -167,6 +178,7 @@ pub fn build(
                 path,
                 flatten_cfg(cfg),
                 network_grants(cfg), // granted by `[modules.<id>].network`
+                feed_grants(cfg),    // granted by `[modules.<id>].feeds` (RFC 0012)
             ));
             m
         }),
