@@ -1308,6 +1308,26 @@ impl Bar {
         Some((entry.id, enter, leave))
     }
 
+    /// Wrap a group's rendered `widgets` in the whole-pill hover `mouse_area` when the
+    /// group is a single module that opted into it (`hover_messages`). This is the hover
+    /// surface WASM plugins rely on — their `view` emits no `mouse_area` of its own, so
+    /// without this wrap they get NO hover at all. Used by BOTH the islands and solid
+    /// right-cluster builders so hover behaves identically in every bar style (the solid
+    /// branch silently lacked this, killing hover for WASM plugins outside islands mode).
+    fn with_pill_hover<'a>(
+        &self,
+        group: &[Placed],
+        widgets: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        match self.pill_hover(group) {
+            Some((instance, enter, leave)) => mouse_area(widgets)
+                .on_enter(Message::ModuleMsg { instance, msg: enter })
+                .on_exit(Message::ModuleMsg { instance, msg: leave })
+                .into(),
+            None => widgets,
+        }
+    }
+
     fn bar_view(&self) -> Element<'_, Message> {
         // Placement drives which widgets render and in what order; an empty zone falls
         // back to the shipped default. The right zone is GROUPED (RFC 0005): each group
@@ -1407,19 +1427,7 @@ impl Bar {
                 // Whole-pill hover: when the group is a single opted-in module, the
                 // whole cell — float and all, up to the screen edge — is its hover
                 // surface. The mouse_area sits OUTSIDE the padding (RFC 0001 popups).
-                right_pills.push(match self.pill_hover(g) {
-                    Some((instance, enter, leave)) => mouse_area(cell)
-                        .on_enter(Message::ModuleMsg {
-                            instance,
-                            msg: enter,
-                        })
-                        .on_exit(Message::ModuleMsg {
-                            instance,
-                            msg: leave,
-                        })
-                        .into(),
-                    None => cell.into(),
-                });
+                right_pills.push(self.with_pill_hover(g, cell.into()));
             }
             let right_cluster = row(right_pills).align_y(Vertical::Center);
             container(
@@ -1465,7 +1473,11 @@ impl Bar {
                         .into(),
                     );
                 }
-                run.push(self.build_widgets(g));
+                // Same whole-pill hover wrapping as the islands branch — without this the
+                // solid bar gave WASM plugins (whose `view` self-wires no hover) NO hover
+                // surface at all, so their popups never opened (built-ins like `stock` were
+                // unaffected because they wrap their own `mouse_area`).
+                run.push(self.with_pill_hover(g, self.build_widgets(g)));
             }
             let right_inner: Element<Message> = row(run).align_y(Vertical::Center).into();
             let left_c = container(ws_row)
