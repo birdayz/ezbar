@@ -116,8 +116,10 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 - [ ] **LOW** — `ezbar msg volume` pokes the source directly, so the on-bar % lags up to
   one poll. Route to the volume module instead. (`main.rs:VolumeAdjust`)
 - [ ] **LOW** — `clock` **weather**, sway **submap** module — RFC Tier-A leftovers.
-- [ ] **LOW** — `ipc_stream` does `remove_file`+`bind` unconditionally; a second manual
-  `ezbar` launch steals the socket from a live instance. Probe-before-unlink.
+- [x] **LOW** — `ipc_stream` **probe-before-unlink** — DONE. It now `connect()`s to an
+  existing socket first; a live listener is left alone (the instance runs without IPC
+  instead of hijacking it), and only a dead/stale socket is unlinked + rebound. Stops a
+  second `ezbar` launch from silently stealing `ezbar msg` routing from the running bar.
 - [ ] **LOW** — Module instance ids restart at 1 on rebuild (harmless per review, but
   identity isn't stable across reorders).
 

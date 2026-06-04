@@ -700,7 +700,26 @@ fn ipc_stream() -> impl Stream<Item = Message> {
         50,
         |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
             let path = ipc::socket_path();
-            let _ = std::fs::remove_file(&path); // clear any stale socket
+            // Probe before unlinking: if a live instance is already listening, DON'T take
+            // the socket over — the old unconditional remove+bind silently hijacked IPC from
+            // a running bar (a second `ezbar` launch stole `ezbar msg` routing). Only clear a
+            // socket nothing answers on (a stale leftover from a crash); otherwise run without
+            // IPC and leave the live instance owning it.
+            if path.exists() {
+                match std::os::unix::net::UnixStream::connect(&path) {
+                    Ok(_) => {
+                        log::warn!(
+                            "ipc: {} already has a live listener — another ezbar is running; \
+                             this instance runs without IPC rather than hijack it",
+                            path.display()
+                        );
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&path); // stale socket — safe to clear
+                    }
+                }
+            }
             let listener = match tokio::net::UnixListener::bind(&path) {
                 Ok(l) => l,
                 Err(e) => {
