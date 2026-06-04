@@ -52,7 +52,9 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
 
 ### Backlog from the reactor reviews (non-blocking)
 - [ ] Wire `save_state`/`restore` across clean reloads, or drop them from the frozen WIT.
-- [ ] Cache eviction sweep (`.cwasm` grows unbounded on plugin rebuilds).
+- [x] Cache eviction sweep — **DONE**. After publishing a fresh `.cwasm` (a plugin rebuilt),
+  evict the oldest beyond a 24-artifact cap (`sweep_cache`), so the cache can't grow one
+  ~MB file per rebuild forever. Self-healing: an evicted-but-active artifact recompiles once.
 - [ ] Capability matcher: normalize host/port/case (no naive string equality).
 
 ### Anti-goals (the Linus part)

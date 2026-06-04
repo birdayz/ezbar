@@ -975,9 +975,38 @@ fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
         ));
         if std::fs::write(&tmp, &serialized).is_ok() {
             let _ = std::fs::rename(&tmp, &cached); // atomic publish — readers see whole files
+            sweep_cache(&dir); // a fresh compile = a plugin rebuilt; bound the accumulated artifacts
         }
     }
     Ok(component)
+}
+
+/// Cap on cached `.cwasm` artifacts. Each plugin *rebuild* changes the wasm's content hash,
+/// so it publishes a NEW artifact and orphans the old — left unbounded the cache grows one
+/// (~MB) file per rebuild forever. After publishing, evict the oldest beyond this cap. If an
+/// artifact still in use is ever evicted (only if `MAX` newer ones exist), it just recompiles
+/// once on the next load and re-publishes — self-healing.
+const MAX_CACHED_ARTIFACTS: usize = 24;
+
+/// Delete the oldest `.cwasm` files (by mtime) so the cache holds at most
+/// [`MAX_CACHED_ARTIFACTS`]. Best-effort — any I/O error is ignored.
+fn sweep_cache(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut arts: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("cwasm"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if arts.len() <= MAX_CACHED_ARTIFACTS {
+        return;
+    }
+    arts.sort_by_key(|(mtime, _)| *mtime); // oldest first
+    let evict = arts.len() - MAX_CACHED_ARTIFACTS;
+    for (_, p) in arts.into_iter().take(evict) {
+        let _ = std::fs::remove_file(&p);
+    }
 }
 
 /// `$XDG_CACHE_HOME/ezbar/wasm` (or `~/.cache/...`). `None` if neither is set — we then
