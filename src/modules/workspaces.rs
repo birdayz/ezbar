@@ -41,6 +41,8 @@ enum Msg {
     /// A redraw tick while a fade runs (only when `animate` is on) — a state no-op that
     /// just re-`view`s so the interpolation advances. Dropped once every pill settles.
     Tick,
+    /// 0.5 Hz toggle that pulses urgent workspaces (only armed while one is urgent).
+    Blink,
 }
 
 pub struct Workspaces {
@@ -57,6 +59,9 @@ pub struct Workspaces {
     /// evicted on every update). Each pill animates independently so the cross-fade reads
     /// as a *moving* highlight, not a synchronized blink. Unused while `animate` is off.
     anim: HashMap<String, Animation<bool>>,
+    /// On-beat of the urgent pulse (toggled by `Msg::Blink`). Only matters while a
+    /// workspace is urgent; an unurgent bar never arms the timer, so this stays put.
+    blink_on: bool,
 }
 
 impl Workspaces {
@@ -76,6 +81,7 @@ impl Workspaces {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             anim: HashMap::new(),
+            blink_on: true,
         }
     }
 }
@@ -95,20 +101,26 @@ impl Module for Workspaces {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        let ws = ezbar_plugin::sub::keyed(self.instance, ws_sub);
+        let mut subs = vec![ezbar_plugin::sub::keyed(self.instance, ws_sub)];
         // Drive redraws while a fade runs — but with `time::every`, NOT `window::frames()`:
         // the frame-callback path corrupts layershell's pointer seat (`mouse hasn't entered`)
         // and kills hover. A plain timer ticks `view` without touching that path. Gated on
         // `animate` so the default bar has zero extra redraws and a known-safe hover.
         if self.animate && self.anim.values().any(|a| a.is_animating(Instant::now())) {
-            Subscription::batch([
-                ws,
+            subs.push(
                 ezbar_plugin::iced::time::every(Duration::from_millis(16))
                     .map(|_| ModMsg::new(Msg::Tick)),
-            ])
-        } else {
-            ws
+            );
         }
+        // Pulse urgent workspaces at 0.5 Hz — gated like `calendar`'s blink so a calm bar
+        // arms no timer (zero churn); the timer appears/disappears as urgency toggles.
+        if self.list.iter().any(|w| w.urgent) {
+            subs.push(
+                ezbar_plugin::iced::time::every(Duration::from_millis(500))
+                    .map(|_| ModMsg::new(Msg::Blink)),
+            );
+        }
+        Subscription::batch(subs)
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
@@ -136,6 +148,7 @@ impl Module for Workspaces {
                     sway::run_command("workspace next_on_output");
                 }
             }
+            Some(Msg::Blink) => self.blink_on = !self.blink_on,
             Some(Msg::Tick) | None => {}
         }
         Response::none()
@@ -172,7 +185,7 @@ impl Module for Workspaces {
                 } else {
                     0.0
                 };
-                chip(w, self.style, ctx, cell_w, chip_h, t)
+                chip(w, self.style, ctx, cell_w, chip_h, t, self.blink_on)
             })
             .collect();
 
@@ -214,6 +227,18 @@ fn ws_sub(_id: &u64) -> impl Stream<Item = ModMsg> {
 /// per pill (the resting state's), so a focus fade only recolors and never reflows.
 type Paint = (Color, f32, Color, Color);
 
+/// The urgent colour for this frame: full on the blink's on-beat, alpha-dimmed on the
+/// off-beat so an urgent workspace visibly pulses. A non-urgent pill is untouched (and
+/// the timer only runs while something is urgent, so a calm bar never calls this with a
+/// changing `blink_on`).
+fn urgent_pulse(urg: Color, urgent: bool, blink_on: bool) -> Color {
+    if urgent && !blink_on {
+        Color { a: urg.a * 0.4, ..urg }
+    } else {
+        urg
+    }
+}
+
 /// Linear rgba lerp — `Animation<bool>` only interpolates `f32`, so the view drives a
 /// scalar `t` and lerps each color channel by hand (RFC 0010 §2).
 fn lerp(a: Color, b: Color, t: f32) -> Color {
@@ -235,11 +260,14 @@ fn chip<'a>(
     cell_w: f32,
     chip_h: f32,
     t: f32,
+    blink_on: bool,
 ) -> Element<'a, ModMsg> {
     let accent = ctx.accent();
     let fg = ctx.fg();
     let dim = ctx.fg_dim();
-    let urg = ctx.urgent();
+    // Every urgent paint below is built from `urg`, so pulsing it here makes the whole
+    // urgent pill throb on the blink's off-beat (restored from the pre-module bar).
+    let urg = urgent_pulse(ctx.urgent(), w.urgent, blink_on);
     let base = ctx.bg(); // dark text on a bright fill — now available via the ABI
     let fs = ctx.theme.text_size;
     let radius: f32 = 0.0; // square identity
@@ -359,4 +387,23 @@ fn chip<'a>(
     mouse_area(inner)
         .on_press(ModMsg::new(Msg::Switch(w.name.clone())))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::urgent_pulse;
+    use ezbar_plugin::iced::Color;
+
+    #[test]
+    fn pulse_only_dims_urgent_on_the_off_beat() {
+        let red = Color::from_rgba(1.0, 0.0, 0.0, 1.0);
+        // not urgent → untouched on either beat
+        assert_eq!(urgent_pulse(red, false, true), red);
+        assert_eq!(urgent_pulse(red, false, false), red);
+        // urgent on-beat → full colour; off-beat → alpha dimmed, hue preserved
+        assert_eq!(urgent_pulse(red, true, true), red);
+        let off = urgent_pulse(red, true, false);
+        assert!(off.a < red.a && off.a > 0.0); // dimmed but still visible
+        assert_eq!((off.r, off.g, off.b), (red.r, red.g, red.b)); // pulses alpha, not hue
+    }
 }
