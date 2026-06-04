@@ -51,10 +51,16 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   push→**pull**). Completes "safe capabilities": a plugin reads the workspace list + focused
   title via a `sway-snapshot() -> result<sway-state, string>` host call, capability-gated by
   `[modules.<id>].sway`. Forces the **first WIT version bump** (`since-v0.2.0`) + the
-  frozen-version-window infra (RFC 0006 §4). Implement in **two phases**: (1) the version
-  window — dual bindgen, `enum DrivenPlugin`, `ezbar:api-version` detection, prove v0.1.0
-  weather + a v0.2.0 plugin co-load on one binary; (2) sway-read as a thin pull consumer +
-  `wintitle`/`wsplugin` dogfoods. Read-only (no `run_command`) is hard out of scope.
+  frozen-version-window infra (RFC 0006 §4). Two phases:
+  - [x] **Phase 1 — the version window — DONE.** `wit/since-v0.2.0` (pure copy + version
+    bump); dual `bindgen!` with `types`/`ui`/`events` **remapped** to v0.1.0 (so `Tree`/`Event`
+    and the whole drive loop/`lift`/render are shared — only `Plugin` + the `host` trait fork);
+    `linker_v2`; `enum DrivenPlugin{V1,V2}`; version detection by introspecting the component's
+    imported `ezbar:plugin/host@x.y`; v2 `host` impl delegates to v1 (v1 untouched). **Verified:
+    v0.1.0 weather (78 popup nodes, unchanged) AND a v0.2.0 plugin both co-load on one binary.**
+  - [ ] **Phase 2 — sway-read** as a thin pull consumer: add `host.sway-snapshot()` to the
+    v0.2.0 WIT, `set_sway_source` in `main.rs`, `Ctx::sway_snapshot()` in both SDKs, the
+    `wintitle`/`wsplugin` dogfoods. Read-only (no `run_command`) is hard out of scope.
 
 ### Ongoing — reliability (table stakes)
 - [ ] **Multi-monitor / hotplug / sway-reload hardening** + a regression harness for

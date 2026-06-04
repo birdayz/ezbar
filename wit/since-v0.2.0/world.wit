@@ -1,0 +1,130 @@
+// ezbar WASM plugin interface — v0.2.0 (RFC 0006 / RFC 0013).
+//
+// **Phase 1 of RFC 0013: a PURE COPY of v0.1.0** (only the package version differs), so the
+// host can stand up + prove the frozen-version-window — v0.1.0 plugins and v0.2.0 plugins
+// co-load on one binary — before any new surface lands. Phase 2 adds `host.sway-snapshot`.
+//
+// NOT yet frozen (still being shaped in Phase 2). Once v0.2.0 ships it freezes like v0.1.0:
+// never edit a shipped `since-vX` dir; a new version is a copy + edit. The host compiles the
+// supported window of versions (RFC 0006 §4); both the host (`wasmtime…bindgen!`) and the
+// SDK (`wit-bindgen`) generate from this.
+
+package ezbar:plugin@0.2.0;
+
+// ── shared types ──────────────────────────────────────────────────────────
+interface types {
+    // A colour the host resolves: a semantic theme token, or a literal rgba.
+    // Plugins describe intent; the host owns the final palette (RFC 0006 §2).
+    record rgba8 { r: u8, g: u8, b: u8, a: u8 }
+    enum theme-token { fg, fg-dim, accent, ok, warn, urgent, bg }
+    variant paint { token(theme-token), rgba(rgba8) }
+
+    enum align { start, center, end }
+
+    // The host-rendered icon set (our embedded SVGs). Extended additively only.
+    enum icon-id {
+        cpu, memory, temperature, ping,
+        volume-high, volume-medium, volume-mute,
+        battery, battery-charging, battery-warning,
+        bot, github, spotify, kubernetes,
+        clock, calendar, disk, net, ip, updates, keyboard,
+        cloud, sun, moon, alert, dot,
+        // weather conditions (additive — appended only, never reordered)
+        cloud-sun, cloud-moon, cloud-fog, cloud-drizzle, cloud-rain, cloud-rain-wind,
+        cloud-snow, cloud-hail, cloud-lightning, droplets, wind, sunrise, sunset, snowflake,
+    }
+    enum graph-kind { cpu, memory, temperature, ping, generic }
+
+    enum feed-kind { cpu, memory, temperature, ping, battery, net }
+    enum event-kind { timer, pointer, feed, config }
+}
+
+// ── the bounded widget vocabulary (RFC 0006 §2/§2a) ─────────────────────────
+// NOT arbitrary iced: no canvas/shader/custom widgets. The host renders this
+// with real iced and enforces a node-count + depth cap incrementally during the
+// lift (RFC 0006 §1a/v2.1).
+interface ui {
+    use types.{paint, align, icon-id, graph-kind};
+
+    record text-node { content: string, color: paint, size: option<f32> }
+    record icon-node { id: icon-id, color: paint, size: f32 }
+    record graph-node { values: list<f64>, kind: graph-kind, line: paint }
+    // a high-fidelity smoothed gradient area chart (the stock-popup renderer)
+    record chart-node { values: list<f64>, line: paint, width: f32, height: f32 }
+    // child indices into the flat `nodes` arena of a `tree` (avoids recursive
+    // WIT variants and makes the host's incremental depth/count cap trivial).
+    record layout-node { children: list<u32>, spacing: f32, align: align }
+    record box-node { child: u32, padding: f32 }
+    record hit-node { child: u32, id: string }
+
+    variant node {
+        %text(text-node),
+        row(layout-node),
+        column(layout-node),
+        container(box-node),
+        mouse-area(hit-node),
+        icon(icon-node),
+        graph(graph-node),
+        chart(chart-node),
+        spacer(f32),
+    }
+    // A render is a flat arena of nodes; `root` indexes the top node. The host
+    // walks it iteratively with a hard cap on count and depth.
+    record tree { nodes: list<node>, root: u32 }
+}
+
+// ── host services the guest may import (RFC 0006 §3) ────────────────────────
+// Each gated host call is ONLY added to the linker when its capability was
+// granted; an ungranted call is absent, not a checked no-op (RFC 0006 §5).
+// Long-running calls (http/read-file) are async on the host and carry their own
+// timeout — epoch does not fire while a guest is parked in a host future.
+interface host {
+    use types.{paint, feed-kind, event-kind};
+
+    // always available
+    log: func(msg: string);
+    text-size: func() -> f32;
+    fg: func() -> paint;
+    set-timeout: func(ms: u32);
+    subscribe: func(kinds: list<event-kind>);
+
+    // gated by `network { host }`
+    http-get: func(url: string) -> result<list<u8>, string>;
+    // gated by `read-file { path }`
+    read-file: func(path: string) -> result<list<u8>, string>;
+    // gated by `bar-state { feeds }` — one host timer fans out to all subscribers
+    feed-subscribe: func(feed: feed-kind, min-period-ms: u32);
+}
+
+// ── events delivered to the guest ───────────────────────────────────────────
+interface events {
+    use types.{feed-kind};
+
+    enum pointer-kind { press, right-press, scroll, enter, leave }
+    record pointer-event { id: string, kind: pointer-kind, delta: f32 }
+    record feed-sample { feed: feed-kind, value: f64 }
+
+    variant event {
+        timer,
+        pointer(pointer-event),
+        feed(feed-sample),
+        config(list<tuple<string, string>>),
+    }
+}
+
+// ── the plugin world ────────────────────────────────────────────────────────
+world plugin {
+    import host;
+    use ui.{tree};
+    use events.{event};
+
+    export init: func(config: list<tuple<string, string>>);
+    // returns true if the chip needs re-rendering (Zellij's dirty bit)
+    export update: func(ev: event) -> bool;
+    // PURE + synchronous: no host imports, no await. Host-capped during lift.
+    export view: func() -> tree;
+    export popup: func() -> option<tree>;
+    // state hand-off across a CLEAN reload only (lost on a trap — RFC 0006 §1a)
+    export save-state: func() -> list<u8>;
+    export restore: func(state: list<u8>);
+}

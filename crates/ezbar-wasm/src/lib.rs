@@ -38,6 +38,26 @@ wasmtime::component::bindgen!({
     exports: { default: async },
 });
 
+// RFC 0013 Phase 1: the v0.2.0 bindgen, for the frozen-version-window. v0.2.0's
+// `types`/`ui`/`events` are byte-identical to v0.1.0 (a pure copy in Phase 1), so we **remap**
+// them to the v0.1.0-generated modules with `with:` — v2 plugins then produce the SAME
+// `Tree`/`Event`/`FeedSample` types, so `lift()`, the renderer, and the drive loop's event
+// path are shared verbatim. Only the world's `Plugin` (exports) and the `host` trait differ
+// per version (host is freshly generated so Phase 2 can add `sway-snapshot`).
+mod v2 {
+    wasmtime::component::bindgen!({
+        world: "plugin",
+        path: "../../wit/since-v0.2.0",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "ezbar:plugin/types@0.2.0": crate::ezbar::plugin::types,
+            "ezbar:plugin/ui@0.2.0": crate::ezbar::plugin::ui,
+            "ezbar:plugin/events@0.2.0": crate::ezbar::plugin::events,
+        },
+    });
+}
+
 // `Tree` is re-exported at the bindgen root by the world's `use`.
 use ezbar::plugin::events::{FeedSample, PointerEvent, PointerKind};
 use ezbar::plugin::ui::Node;
@@ -181,6 +201,37 @@ impl ezbar::plugin::host::Host for Host {
 impl ezbar::plugin::types::Host for Host {}
 impl ezbar::plugin::ui::Host for Host {}
 impl ezbar::plugin::events::Host for Host {}
+
+// RFC 0013 Phase 1: the v0.2.0 host trait. Its `types`/`ui`/`events` are remapped to v0.1.0's
+// (the `with:` above), so the method signatures are identical to v1's — and since v0.2.0 is a
+// pure copy in Phase 1, every method just **delegates** to the v1 impl. The v1 impl stays
+// untouched (so a v0.1.0 plugin like weather can't regress); Phase 2 adds `sway_snapshot` here.
+impl v2::ezbar::plugin::host::Host for Host {
+    async fn log(&mut self, msg: String) {
+        ezbar::plugin::host::Host::log(self, msg).await
+    }
+    async fn text_size(&mut self) -> f32 {
+        ezbar::plugin::host::Host::text_size(self).await
+    }
+    async fn fg(&mut self) -> ezbar::plugin::types::Paint {
+        ezbar::plugin::host::Host::fg(self).await
+    }
+    async fn set_timeout(&mut self, ms: u32) {
+        ezbar::plugin::host::Host::set_timeout(self, ms).await
+    }
+    async fn subscribe(&mut self, kinds: Vec<ezbar::plugin::types::EventKind>) {
+        ezbar::plugin::host::Host::subscribe(self, kinds).await
+    }
+    async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::http_get(self, url).await
+    }
+    async fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::read_file(self, path).await
+    }
+    async fn feed_subscribe(&mut self, feed: ezbar::plugin::types::FeedKind, min: u32) {
+        ezbar::plugin::host::Host::feed_subscribe(self, feed, min).await
+    }
+}
 
 // ── the lifted (Send) widget arena, decoupled from the wasmtime types ────────
 
@@ -434,7 +485,8 @@ type Slot = Arc<Shared>;
 
 struct Reactor {
     engine: Engine,
-    linker: Linker<Host>,
+    linker: Linker<Host>,    // v0.1.0 host interface
+    linker_v2: Linker<Host>, // v0.2.0 host interface (RFC 0013 version window)
     client: reqwest::Client,
     rt: Handle,
     // Shared feed hubs, keyed by metric (RFC 0012). One sampler task per active kind fans a
@@ -581,6 +633,12 @@ impl Reactor {
         add_to_linker_async(&mut linker).expect("ezbar-wasm: wasi async linker");
         Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker, |h: &mut Host| h)
             .expect("ezbar-wasm: plugin linker");
+        // v0.2.0 linker (RFC 0013): same wasi + the v0.2.0 host interface. Built once on the
+        // shared engine alongside the v0.1.0 linker; the reactor picks one per plugin by version.
+        let mut linker_v2: Linker<Host> = Linker::new(&engine);
+        add_to_linker_async(&mut linker_v2).expect("ezbar-wasm: wasi async linker (v2)");
+        v2::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v2, |h: &mut Host| h)
+            .expect("ezbar-wasm: plugin linker (v2)");
         // ONE async client shared by every plugin (Arc-cheap clone into each Host).
         let client = reqwest::Client::builder()
             .user_agent("ezbar-wasm")
@@ -589,6 +647,7 @@ impl Reactor {
         Reactor {
             engine,
             linker,
+            linker_v2,
             client,
             rt,
             feeds: Mutex::new(HashMap::new()),
@@ -754,13 +813,28 @@ impl Reactor {
         // guest that spins in `init` yields on epoch but never self-traps, so without
         // this the drive loop would never start and nothing could disable it.
         store.set_epoch_deadline(DEADLINE_TICKS);
-        let plugin = match tokio::time::timeout(
-            WALL,
-            Plugin::instantiate_async(&mut store, &component, &self.linker),
-        )
-        .await
-        {
-            Ok(Ok(p)) => p,
+        // RFC 0013: pick the linker matching the plugin's WIT version, instantiate the
+        // matching world, and wrap it in `DrivenPlugin` so the rest of the loop is version-blind.
+        let version = plugin_version(&self.engine, &component);
+        let instantiated = match version {
+            2 => tokio::time::timeout(
+                WALL,
+                v2::Plugin::instantiate_async(&mut store, &component, &self.linker_v2),
+            )
+            .await
+            .map(|r| r.map(DrivenPlugin::V2)),
+            _ => tokio::time::timeout(
+                WALL,
+                Plugin::instantiate_async(&mut store, &component, &self.linker),
+            )
+            .await
+            .map(|r| r.map(DrivenPlugin::V1)),
+        };
+        let plugin = match instantiated {
+            Ok(Ok(p)) => {
+                log::info!("ezbar-wasm: loaded plugin (WIT v0.{version}.0)");
+                p
+            }
             Ok(Err(e)) => {
                 log::warn!("ezbar-wasm: instantiate failed — disabling plugin: {e}");
                 return Ok(());
@@ -870,11 +944,63 @@ impl Reactor {
     }
 }
 
+/// A driven plugin, dispatching the 4 version-specific export calls over the WIT version it
+/// was built against (RFC 0013). Because v0.2.0's `ui`/`events` are remapped to v0.1.0's
+/// (the `with:` on the v2 bindgen), both arms share the SAME `Event`/`Tree` types — so the
+/// drive loop, `lift()`, and the renderer never branch on version; only these 4 calls do.
+enum DrivenPlugin {
+    V1(Plugin),
+    V2(v2::Plugin),
+}
+
+impl DrivenPlugin {
+    async fn call_init(
+        &self,
+        store: &mut Store<Host>,
+        cfg: &[(String, String)],
+    ) -> wasmtime::Result<()> {
+        match self {
+            DrivenPlugin::V1(p) => p.call_init(store, cfg).await,
+            DrivenPlugin::V2(p) => p.call_init(store, cfg).await,
+        }
+    }
+    async fn call_update(&self, store: &mut Store<Host>, ev: &Event) -> wasmtime::Result<bool> {
+        match self {
+            DrivenPlugin::V1(p) => p.call_update(store, ev).await,
+            DrivenPlugin::V2(p) => p.call_update(store, ev).await,
+        }
+    }
+    async fn call_view(&self, store: &mut Store<Host>) -> wasmtime::Result<Tree> {
+        match self {
+            DrivenPlugin::V1(p) => p.call_view(store).await,
+            DrivenPlugin::V2(p) => p.call_view(store).await,
+        }
+    }
+    async fn call_popup(&self, store: &mut Store<Host>) -> wasmtime::Result<Option<Tree>> {
+        match self {
+            DrivenPlugin::V1(p) => p.call_popup(store).await,
+            DrivenPlugin::V2(p) => p.call_popup(store).await,
+        }
+    }
+}
+
+/// Pick the WIT version a component was built against by introspecting its imported
+/// `ezbar:plugin/host@x.y` interface (RFC 0013 §3.2). Defaults to v1 — an out-of-window
+/// version simply won't link against either linker and is disabled at instantiate.
+fn plugin_version(engine: &Engine, component: &Component) -> u8 {
+    for (name, _) in component.component_type().imports(engine) {
+        if name.starts_with("ezbar:plugin/host@0.2") {
+            return 2;
+        }
+    }
+    1
+}
+
 /// One guest `update(event)` followed by a re-render into the slot if it went dirty.
 /// Returns `false` to disable the plugin (trap/timeout) — the caller then drops the
 /// `Store` on this worker, never re-entered. Every guest call re-arms the epoch deadline
 /// and is wrapped in the WALL backstop (RFC 0008 §3.4 / RFC 0009 implementer checklist).
-async fn step(store: &mut Store<Host>, plugin: &Plugin, slot: &Slot, event: &Event) -> bool {
+async fn step(store: &mut Store<Host>, plugin: &DrivenPlugin, slot: &Slot, event: &Event) -> bool {
     store.set_epoch_deadline(DEADLINE_TICKS);
     let dirty = match tokio::time::timeout(WALL, plugin.call_update(&mut *store, event)).await {
         Ok(Ok(d)) => d,
