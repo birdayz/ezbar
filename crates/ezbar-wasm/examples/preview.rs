@@ -33,6 +33,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let mut args = std::env::args().skip(1);
     let mut path: Option<PathBuf> = None;
     let mut grants: Vec<String> = Vec::new();
+    let mut grants_feeds: Vec<String> = Vec::new();
     let mut config: Vec<(String, String)> = Vec::new();
     let mut check = false;
 
@@ -41,6 +42,10 @@ fn main() -> ezbar_plugin::iced::Result {
             "--net" => match args.next() {
                 Some(host) => grants.push(host),
                 None => fail("--net needs a host, e.g. --net api.open-meteo.com"),
+            },
+            "--feed" => match args.next() {
+                Some(kind) => grants_feeds.push(kind),
+                None => fail("--feed needs a kind, e.g. --feed cpu"),
             },
             "--set" => match args.next() {
                 Some(kv) => match kv.split_once('=') {
@@ -82,7 +87,7 @@ fn main() -> ezbar_plugin::iced::Result {
         .enable_all()
         .build()
         .expect("preview: build tokio runtime");
-    let module = WasmModule::new(rt.handle().clone(), 0, id, path, config, grants);
+    let module = WasmModule::new(rt.handle().clone(), 0, id, path, config, grants, grants_feeds);
 
     // Headless smoke test: drive the plugin briefly and report what it rendered.
     if check {
