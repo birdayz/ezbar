@@ -1,8 +1,8 @@
 # ezbar
 
 A status bar for [Sway](https://swaywm.org). GPU-rendered with
-[iced](https://iced.rs) on `wlr-layer-shell` — no GTK, no config DSL, no IPC.
-Widgets are just Rust.
+[iced](https://iced.rs) on `wlr-layer-shell` — no GTK, no config DSL. Widgets are
+native Rust, or **sandboxed WASM** you install from a registry.
 
 ![ezbar — lilac islands (default)](assets/hero.png)
 
@@ -10,10 +10,23 @@ Widgets are just Rust.
 filled GPU sparklines, a dark base. Square, not rounded; dark, not busy. Drop in a
 [preset](#theme-it) to reskin the whole thing in seconds.*
 
-Workspaces, focused-window title, clock, CPU / temperature / memory / ping
-graphs, volume, battery, GitHub notifications, Google Calendar, Spotify, kubectl
-context, a stock ticker, and a live Claude-usage widget. Clicking, scrolling and
-hover popups all work; popups are real layer-shell surfaces, not overlays.
+## Highlights
+
+- **GPU-rendered, and it shows.** Filled sparklines, eased workspace cross-fades, live
+  graphs — drawn on the GPU via iced/wgpu, never pixmaps.
+- **A real plugin platform — two ways.** A widget is *just Rust* (one trait, no IPC, no
+  DSL). Or ship a **sandboxed WASM plugin**: it runs in a wasmtime sandbox, can only do
+  **read-only, user-granted** things, hot-reloads, and installs from a git-backed registry
+  with consent pinned to the binary's **content hash**. No other status bar has this.
+- **Live everything.** Theme, presets, and config reload instantly — no restart; reskin from
+  the on-bar `▾`.
+- **Real popups.** Hover/click panels are actual layer-shell surfaces, not floating overlays.
+- **One static binary.** No daemon zoo, no GTK; `config.toml` is plain TOML and fully optional.
+
+**Built-in widgets:** workspaces · window title · clock · CPU / temperature / memory / ping
+graphs · volume · battery · media (MPRIS) · GitHub · Google Calendar · Spotify · kubectl ·
+stock ticker · live Claude-usage · and a no-code `custom` command widget. Clicking, scrolling,
+and hover popups all work.
 
 ## Build
 
@@ -145,63 +158,70 @@ value can't blank a graph.
 |--------|--------|
 | cpu / temp / mem / ping | click the label to toggle its graph |
 | volume | click to mute, scroll to change |
+| media | click to play/pause, scroll to skip; hides when nothing's playing |
 | kubectl | left-click clears the context, right-click opens the picker |
 | calendar | click for today's meetings; blinks when one is imminent/ongoing |
 | github | click for the grouped list; click a row to open + mark read, right-click to dismiss, `[clear all]` to mark all |
 | spotify | click to play/pause (or authorize), scroll to skip; long titles marquee |
 
-## Write a widget
+## Plugins — two ways
 
-Widgets are pluggable **modules** — just iced, one trait, no IPC. Develop one in
-a normal window without launching the bar:
+**1 · Compile-in modules (Rust).** A widget is a `Module`: *just iced* — a `view`, an
+`update`, an optional background subscription and popup. No IPC, no DSL, no config schema.
+Develop one in a normal desktop window with the harness — no bar, no sway needed:
 
 ```bash
-cargo run -p ezbar-harness --example counter   # a complete starter plugin
+cargo run -p ezbar-harness --example counter   # a complete starter widget
 cargo run --example harness -- github          # preview a built-in module
 ```
 
-Guide: [`.claude/skills/ezbar-plugin-author/SKILL.md`](.claude/skills/ezbar-plugin-author/SKILL.md).
-Design: [`rfcs/0001-pluggable-modules.md`](rfcs/0001-pluggable-modules.md).
+Guide: [`ezbar-plugin-author`](.claude/skills/ezbar-plugin-author/SKILL.md) ·
+Design: [RFC 0001](rfcs/0001-pluggable-modules.md).
 
-## WASM plugins & capability safety
+**2 · Sandboxed WASM plugins.** Ship a widget anyone can run *safely*. It compiles to a
+`wasm32-wasip2` component, runs in a wasmtime sandbox, hot-reloads, and can only do
+**read-only, user-granted** things — `network` (an HTTP-GET host allow-list), `feeds`
+(cpu/memory/temperature/battery/net), `sway` (workspace list + focused title). **No
+filesystem, no exec, no driving the bar or sway.**
 
-Drop a `.wasm` (built against the [WASM SDK](.claude/skills/ezbar-wasm-plugin-author/SKILL.md))
-in `~/.config/ezbar/plugins/` and it's placeable by its filename. A plugin is sandboxed
-(wasmtime); the only things it can do are **read-only and user-granted** in
-`[modules.<id>]` — `network` (an HTTP-GET host allow-list), `feeds` (cpu/memory/…), and
-`sway` (read-only workspace/title). Nothing else: no fs, no exec, no driving the bar.
-
-Consent is bound to the plugin's **content hash**, not its name (RFC 0014), so a swapped
-binary can't inherit a grant:
+Consent is bound to the plugin's **content hash**, not its name — a swapped binary inherits
+nothing (it runs sandboxed until you re-approve). The whole lifecycle is a few commands:
 
 ```sh
-ezbar add <id> --registry <dir>   # install from a (local) registry: verify sha256 → install → print grant
-ezbar list                  # installed plugins + consent state + declared caps
-ezbar inspect my.wasm       # show what it declares + the exact [modules.<id>] block to paste
-ezbar grant <id>            # approve the plugin's current bytes (re-run after a rebuild/update)
-ezbar remove <id>           # uninstall (deletes the .wasm + consent record, never your config)
-ezbar package my.wasm       # author: embed an ezbar:manifest (declared caps) + print the registry entry
+ezbar add <id> --registry <dir|git-url>   # resolve newest in-window version → verify sha256 → install → print grant block
+ezbar list                                # installed plugins + consent state + declared caps
+ezbar inspect plugin.wasm                 # what it declares + the exact [modules.<id>] block to paste
+ezbar grant <id>                          # approve its current bytes (re-run after a legit rebuild/update)
+ezbar remove <id>                         # uninstall (.wasm + consent + pin — never your config.toml)
+ezbar package plugin.wasm                 # author: embed an ezbar:manifest + print the registry entry
 ```
 
-A plugin's embedded manifest only *declares* what it needs (`ezbar inspect` reads it and
-prints the grant block — it never writes your config); the host warns if a plugin declares
-a capability you didn't grant. Design: [`rfcs/0014-plugin-registry.md`](rfcs/0014-plugin-registry.md).
+A plugin may embed a manifest *declaring* what it needs; `ezbar inspect` reads it and prints
+the grant block to paste (it **never** writes your config), and the host warns if a plugin
+wants a capability you didn't grant. The registry is just `plugins/<id>/<version>.toml` index
+files in a git repo (host it anywhere — `--registry` takes a local dir *or* any git URL);
+installs are sha256-verified, WIT-version-negotiated, and TOFU publisher-pinned.
+Guide: [`ezbar-wasm-plugin-author`](.claude/skills/ezbar-wasm-plugin-author/SKILL.md) ·
+Design: [RFC 0014](rfcs/0014-plugin-registry.md).
 
 ## Layout
 
 ```
-src/              the bar: state, update, view, subscriptions, launcher
-src/sources/      one module per data source (off-thread I/O via spawn_blocking)
-src/modules/      pluggable widgets (RFC 0001)
-src/widgets/      canvas line-graphs
-crates/ezbar-plugin    the plugin SDK — the Module trait, stable API
-crates/ezbar-harness   standalone dev harness for modules
-examples/harness.rs    preview built-in modules
+src/                    the bar: state, update, view, subscriptions, launcher
+src/sources/            one module per data source (off-thread I/O via spawn_blocking)
+src/modules/            built-in widgets (RFC 0001) + the inline-markup renderer
+src/{grants,registry,   the CLI: capability consent + the plugin registry
+     package,install}.rs   (grant/inspect/add/list/remove/package/install)
+crates/ezbar-plugin       the module SDK — the Module trait, stable API
+crates/ezbar-harness      standalone dev harness for modules
+crates/ezbar-wasm         the wasmtime host — sandboxes + drives WASM plugins (the reactor)
+crates/ezbar-plugin-wasm  the WASM guest SDK — write a plugin in Rust (TinyGo too)
 ```
 
 Elm architecture: one `State`, one `Message`, `update`, `view`, and one
 `Subscription` stream per data source. Popups are extra layer-shell surfaces
-(the multi-window daemon pattern).
+(the multi-window daemon pattern). WASM plugins run on a single shared wasmtime
+reactor, capability-gated and epoch-bounded.
 
 ## License
 
