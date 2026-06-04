@@ -96,6 +96,27 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
         format!("no version of '{id}' supports this ezbar's WIT window {SUPPORTED_WIT:?} — upgrade ezbar")
     })?;
 
+    // TOFU publisher-pin (RFC 0014 §6): the first install pins the id's publisher; a later
+    // install offering the SAME id under a DIFFERENT publisher is refused (a registry-takeover
+    // guard, since a checksum only proves integrity, not authenticity). Unsigned entries (no
+    // publisher) skip it.
+    if !picked.publisher.is_empty() {
+        match check_publisher(pinned(id).as_deref(), &picked.publisher) {
+            PinCheck::Mismatch(p) => {
+                return Err(format!(
+                    "publisher changed for '{id}': pinned '{p}', registry now offers \
+                     '{}' — refusing (possible takeover). Delete its line in publishers.toml \
+                     to override.",
+                    picked.publisher
+                ))
+            }
+            PinCheck::Pin => {
+                let _ = pin(id, &picked.publisher);
+            }
+            PinCheck::Ok => {}
+        }
+    }
+
     let artifact = dir.join(format!("{}.wasm", picked.version));
     let bytes = std::fs::read(&artifact)
         .map_err(|e| format!("read artifact {}: {e}", artifact.display()))?;
@@ -124,6 +145,73 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
         picked.version,
         dest.display()
     ))
+}
+
+// ── TOFU publisher-pin (RFC 0014 §6) ────────────────────────────────────────
+/// The outcome of checking an offered publisher against the pinned one.
+#[derive(Debug, PartialEq, Eq)]
+enum PinCheck {
+    /// First sight of this id — pin `offered`.
+    Pin,
+    /// Pinned publisher matches — proceed.
+    Ok,
+    /// Pinned publisher differs (carries the *pinned* one) — refuse.
+    Mismatch(String),
+}
+
+/// Pure TOFU rule: unpinned ⇒ pin; same publisher ⇒ ok; different ⇒ mismatch.
+fn check_publisher(pinned: Option<&str>, offered: &str) -> PinCheck {
+    match pinned {
+        None => PinCheck::Pin,
+        Some(p) if p == offered => PinCheck::Ok,
+        Some(p) => PinCheck::Mismatch(p.to_string()),
+    }
+}
+
+/// `…/ezbar/publishers.toml` — the host-owned TOFU pin store (`id = "publisher"`).
+fn pins_path() -> Option<PathBuf> {
+    Some(ezbar::config::path()?.with_file_name("publishers.toml"))
+}
+
+fn load_pins() -> toml::value::Table {
+    pins_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|b| b.parse::<toml::Value>().ok())
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default()
+}
+
+fn save_pins(t: toml::value::Table) -> bool {
+    let Some(path) = pins_path() else { return false };
+    let body = format!(
+        "# ezbar registry publisher pins (TOFU) — host-owned. Delete a line to re-pin on the\n\
+         # next `ezbar add`.\n\n{}",
+        toml::to_string(&toml::Value::Table(t)).unwrap_or_default()
+    );
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("toml.ezbar-tmp");
+    std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_ok()
+}
+
+fn pinned(id: &str) -> Option<String> {
+    load_pins().get(id).and_then(|v| v.as_str()).map(String::from)
+}
+
+fn pin(id: &str, publisher: &str) -> bool {
+    let mut t = load_pins();
+    t.insert(id.to_string(), toml::Value::String(publisher.to_string()));
+    save_pins(t)
+}
+
+/// Drop `id`'s publisher pin (for `ezbar remove`). Returns whether a pin existed.
+fn unpin(id: &str) -> bool {
+    let mut t = load_pins();
+    if t.remove(id).is_none() {
+        return false;
+    }
+    save_pins(t)
 }
 
 /// Resolve a registry location to a local directory to read from: a filesystem path is used
@@ -215,11 +303,17 @@ pub fn remove(id: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no plugin '{id}' installed in {}", dir.display()))?;
     std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
     let forgot = ezbar::grants::forget(id);
+    let unpinned = unpin(id);
+    let cleaned = match (forgot, unpinned) {
+        (true, true) => " and its consent + publisher records",
+        (true, false) => " and its consent record",
+        (false, true) => " and its publisher pin",
+        (false, false) => "",
+    };
     Ok(format!(
-        "removed '{id}' ({}){}.\nezbar did NOT touch config.toml — you may want to delete its \
-         [modules.{id}] block yourself.",
-        path.display(),
-        if forgot { " and its consent record" } else { "" }
+        "removed '{id}' ({}){cleaned}.\nezbar did NOT touch config.toml — you may want to delete \
+         its [modules.{id}] block yourself.",
+        path.display()
     ))
 }
 
@@ -271,6 +365,17 @@ mod tests {
         // everything out of window → None (caller: "upgrade ezbar")
         let all_new = vec![entry("2.0.0", "0.3.0"), entry("3.0.0", "0.4.0")];
         assert!(pick_in_window(&all_new, SUPPORTED_WIT).is_none());
+    }
+
+    #[test]
+    fn publisher_tofu_pins_then_guards() {
+        assert_eq!(check_publisher(None, "birdayz"), PinCheck::Pin); // first sight → pin
+        assert_eq!(check_publisher(Some("birdayz"), "birdayz"), PinCheck::Ok); // same → ok
+        // a different publisher for a pinned id → refused (takeover guard)
+        assert_eq!(
+            check_publisher(Some("birdayz"), "attacker"),
+            PinCheck::Mismatch("birdayz".to_string())
+        );
     }
 
     #[test]
