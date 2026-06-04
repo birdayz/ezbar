@@ -113,8 +113,11 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   views (cpu/memory/temperature/ping).
 - [ ] **LOW** — Restore the workspaces **urgent blink** (dropped in the module port; the
   module would own a 500ms tick like `calendar`). (`modules/workspaces.rs`)
-- [ ] **LOW** — `ezbar msg volume` pokes the source directly, so the on-bar % lags up to
-  one poll. Route to the volume module instead. (`main.rs:VolumeAdjust`)
+- [x] **LOW** — `ezbar msg volume` **routes through the volume module** now — DONE. The
+  IPC/keybind path dispatches `ModuleMsg` to the volume instance (via `volume::adjust_msg`),
+  which changes the level and refreshes its displayed value in one `update` (no lag waiting
+  for the 1s poll). Falls back to poking the source directly only if no volume pill is
+  placed. (`main.rs:VolumeAdjust`, `modules/volume.rs`)
 - [ ] **LOW** — `clock` **weather**, sway **submap** module — RFC Tier-A leftovers.
 - [x] **LOW** — `ipc_stream` **probe-before-unlink** — DONE. It now `connect()`s to an
   existing socket first; a live listener is left alone (the instance runs without IPC

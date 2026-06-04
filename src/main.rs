@@ -817,19 +817,37 @@ impl Bar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::VolumeAdjust(dir) => Task::perform(
-                async move {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if dir == 0 {
-                            volume::toggle_mute();
-                        } else {
-                            volume::change_volume(dir);
-                        }
+            Message::VolumeAdjust(dir) => {
+                // Route into the volume module (it changes the level AND refreshes its on-bar
+                // value in one update — no lag waiting for its next 1s poll). Fall back to
+                // poking the source directly only if no volume module is placed (a headless
+                // keybind on a bar without the pill).
+                if let Some(instance) = self
+                    .modules
+                    .iter()
+                    .find(|e| !e.disabled && e.module.id() == "volume")
+                    .map(|e| e.id)
+                {
+                    Task::done(Message::ModuleMsg {
+                        instance,
+                        msg: modules::volume::adjust_msg(dir),
                     })
-                    .await;
-                },
-                |()| Message::Noop,
-            ),
+                } else {
+                    Task::perform(
+                        async move {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if dir == 0 {
+                                    volume::toggle_mute();
+                                } else {
+                                    volume::change_volume(dir);
+                                }
+                            })
+                            .await;
+                        },
+                        |()| Message::Noop,
+                    )
+                }
+            }
             Message::SelectPreset(name) => {
                 // Persist the choice (state file, never config.toml), then reload so
                 // the preset applies live through the theme path. Closes the popup.

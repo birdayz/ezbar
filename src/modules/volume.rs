@@ -22,6 +22,17 @@ pub struct Volume {
     data: VolumeData,
 }
 
+/// Build the [`ModMsg`] for an IPC/keybind volume command (`ezbar msg volume up|down|mute`),
+/// so the host can route it *through this module* — which changes the level **and** refreshes
+/// its displayed value in one `update`, instead of poking the source and lagging a poll.
+/// `dir`: `0` = mute toggle, `+1`/`-1` = up/down.
+pub fn adjust_msg(dir: i32) -> ModMsg {
+    match dir {
+        0 => ModMsg::new(Msg::Click),
+        d => ModMsg::new(Msg::Scroll(d)),
+    }
+}
+
 impl Volume {
     pub fn new(instance: u64) -> Self {
         Volume {
