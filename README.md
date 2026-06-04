@@ -70,6 +70,8 @@ EZBAR_CHILD=1 ./target/release/ezbar
 
 Everything lives under `~/.config/ezbar/` and is optional — a widget with no
 config just stays quiet. Nothing is hardcoded; no secrets ship in the binary.
+Every module's `[modules.<id>]` options are listed in
+[docs/config-reference.md](docs/config-reference.md).
 
 | Widget   | Reads from |
 |----------|------------|
@@ -77,7 +79,7 @@ config just stays quiet. Nothing is hardcoded; no secrets ship in the binary.
 | GitHub   | `$GH_TOKEN` / `$GITHUB_TOKEN` / `gh auth token`; optional `github_config.json` (`reasons`, `exclude_repos`) |
 | Spotify  | `spotify_config.json` (`client_id`, `client_secret`); or `$SPOTIFY_ACCESS_TOKEN` |
 | Stock    | `$EZBAR_STOCK_SYMBOL` (default `NQ=F`), `$EZBAR_STOCK_API_KEY` (optional) |
-| Ping     | target hardcoded to `8.8.8.8` |
+| Ping     | `[modules.ping].target` (default `8.8.8.8`) |
 
 ## Theme it
 

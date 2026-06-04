@@ -223,7 +223,10 @@ behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
   as a module. **Remaining:** the live-wiring loops (file-watch reload keeps the active
   preset, module set rebuilds on placement change, multi-instance routing) — these need
   test seams around the iced `update`/reconcile, not just pure functions.
-- [ ] **LOW** — Per-module config reference (a table of every `[modules.<id>]` key).
+- [x] **LOW** — Per-module config reference — DONE. `docs/config-reference.md` tabulates every
+  `[modules.<id>]` key + default for all built-ins, the shared `[graph]` sub-table, the WASM
+  capability grants, and the inline-markup tokens; linked from the README (which also no longer
+  claims ping's target is hardcoded).
 - [ ] **LOW** — A GIF of the live `▾` switcher cycling presets for the README /
   r/unixporn post (a still doesn't convey "no restart").
 - [x] **LOW** — RFC statuses updated: 0002/0003/0004/0005 → **Implemented** (were "Draft").
