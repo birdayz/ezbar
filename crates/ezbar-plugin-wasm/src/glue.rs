@@ -7,9 +7,12 @@
 use crate::{Align, GraphKind, Icon, Paint, Plugin, Render, Token, WireNode};
 use core::cell::RefCell;
 
+// The SDK targets the latest WIT (v0.2.0, RFC 0013) — a superset of v0.1.0, so plugins built
+// with it gain `sway_snapshot` while everything else is unchanged. The host's version-window
+// loads such a plugin against its v0.2.0 linker; older prebuilt v0.1.0 plugins still load too.
 wit_bindgen::generate!({
     world: "plugin",
-    path: "../../wit/since-v0.1.0",
+    path: "../../wit/since-v0.2.0",
 });
 
 use ezbar::plugin as p;
@@ -39,6 +42,21 @@ impl crate::Ctx for HostCtx {
     }
     fn feed_subscribe(&mut self, feed: crate::Feed, min_period_ms: u32) {
         p::host::feed_subscribe(feed_kind(feed), min_period_ms);
+    }
+    fn sway_snapshot(&mut self) -> Result<crate::SwayState, String> {
+        p::host::sway_snapshot().map(|s| crate::SwayState {
+            workspaces: s
+                .workspaces
+                .into_iter()
+                .map(|w| crate::SwayWorkspace {
+                    name: w.name,
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: s.title,
+        })
     }
 }
 

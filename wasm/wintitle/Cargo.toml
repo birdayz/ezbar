@@ -1,0 +1,18 @@
+[package]
+name = "wintitle"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar WASM plugin: the focused window title, read via the sway capability (RFC 0013)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+
+# keep the .wasm small
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

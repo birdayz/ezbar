@@ -54,6 +54,13 @@ fn bus() -> watch::Receiver<Arc<Snapshot>> {
     tx.subscribe()
 }
 
+/// The current sway snapshot — a cheap clone of the latest value the background service
+/// published (starts the service on first use). For the WASM read-only sway capability
+/// (RFC 0013): the bar injects this into the reactor as a pull source.
+pub fn snapshot() -> Arc<Snapshot> {
+    bus().borrow().clone()
+}
+
 /// Subscribe to events once, re-query the changed slice, publish a fresh snapshot.
 fn run_service(tx: &watch::Sender<Arc<Snapshot>>) -> swayipc::Fallible<()> {
     let mut q = Connection::new()?;

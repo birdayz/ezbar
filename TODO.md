@@ -58,9 +58,13 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
     `linker_v2`; `enum DrivenPlugin{V1,V2}`; version detection by introspecting the component's
     imported `ezbar:plugin/host@x.y`; v2 `host` impl delegates to v1 (v1 untouched). **Verified:
     v0.1.0 weather (78 popup nodes, unchanged) AND a v0.2.0 plugin both co-load on one binary.**
-  - [ ] **Phase 2 — sway-read** as a thin pull consumer: add `host.sway-snapshot()` to the
-    v0.2.0 WIT, `set_sway_source` in `main.rs`, `Ctx::sway_snapshot()` in both SDKs, the
-    `wintitle`/`wsplugin` dogfoods. Read-only (no `run_command`) is hard out of scope.
+  - [x] **Phase 2 — sway-read — DONE (Rust).** `host.sway-snapshot() -> result<sway-state,
+    string>` in the v0.2.0 WIT (records in `host`, not `types`, to keep the remap);
+    `set_sway_source` injection in `main.rs` over `sources::sway::snapshot()`; the v2
+    `sway_snapshot` host impl (gated by `[modules.<id>].sway`, synchronous `Err` denial);
+    `Ctx::sway_snapshot()` in the Rust SDK (bumped to v0.2.0); the **`wintitle`** dogfood
+    (v0.2.0) reads it and renders — verified, and weather (v0.1.0) unchanged. Read-only (no
+    `run_command`). **Follow-up:** Go-SDK parity (needs the v0.2.0 Go bindings regenerated).
 
 ### Ongoing — reliability (table stakes)
 - [ ] **Multi-monitor / hotplug / sway-reload hardening** + a regression harness for

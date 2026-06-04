@@ -94,6 +94,17 @@ interface host {
     read-file: func(path: string) -> result<list<u8>, string>;
     // gated by `bar-state { feeds }` — one host timer fans out to all subscribers
     feed-subscribe: func(feed: feed-kind, min-period-ms: u32);
+
+    // RFC 0013: read-only sway state (the workspace list + focused window title), gated by
+    // `bar-state { sway }` (`[modules.<id>].sway = true`). A PULL get-current (sway state is a
+    // snapshot, not a stream): call it in `update` and render from the result. `Err` if the
+    // capability is unset (synchronous denial, unlike fire-and-forget feeds). Read-only — there
+    // is deliberately no way to drive sway from a plugin. These records live in `host` (not
+    // `types`) so v0.2.0's `types` stays byte-identical to v0.1.0 for the host's version-window
+    // remap.
+    record sway-workspace { name: string, focused: bool, visible: bool, urgent: bool }
+    record sway-state { workspaces: list<sway-workspace>, title: string }
+    sway-snapshot: func() -> result<sway-state, string>;
 }
 
 // ── events delivered to the guest ───────────────────────────────────────────

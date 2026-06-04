@@ -1,8 +1,12 @@
 # RFC 0013: read-only sway state — the capability that needs the first WIT version bump
 
-- **Status:** **Accepted** (v2) — ACK'd by a systems reviewer (Torvalds) and a
-  platform/security reviewer after the fold-ins below (v1 was a soft-NAK from both on the same
-  point: **push delivery**). Cleared for implementation, **as two phases** (§8).
+- **Status:** **Implemented** (v2) — both phases shipped + verified via `preview --check`.
+  Phase 1 (the version-window): v0.1.0 weather (78 popup nodes, unchanged) and a v0.2.0 plugin
+  co-load on one binary. Phase 2 (sway-read, **pull**): the `wintitle` dogfood (a v0.2.0 plugin)
+  reads `ctx.sway_snapshot()` and renders. ACK'd by a systems (Torvalds) and a platform/security
+  reviewer (v1 was a soft-NAK from both on **push**; folded to pull below). **Follow-up:** Go-SDK
+  `SwaySnapshot` parity needs the v0.2.0 Go bindings regenerated (blocked by the tinygo/Go
+  version skew); the Rust SDK + dogfood are the proven path.
 - **Created:** 2026-06-04
 - **Target:** ezbar (Rust / wasmtime reactor + guest SDKs + the frozen WIT)
 - **Depends on:** RFC 0006 (WASM plugins + the **frozen-version-window** §4 this finally

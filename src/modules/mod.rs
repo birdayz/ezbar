@@ -246,6 +246,7 @@ pub fn build(
                 flatten_cfg(cfg),
                 network_grants(cfg), // granted by `[modules.<id>].network`
                 feed_grants(cfg),    // granted by `[modules.<id>].feeds` (RFC 0012)
+                cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // RFC 0013
             ));
             m
         }),

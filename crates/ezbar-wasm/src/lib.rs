@@ -115,6 +115,9 @@ struct Host {
     // Pending `feed-subscribe` requests (a guest may subscribe to several in one call),
     // drained by the drive loop after the call to register with the shared feed hub.
     feed_requests: Vec<(FeedKind, u32)>,
+    // `[modules.<id>].sway = true` — read-only sway state grant (RFC 0013). `sway-snapshot`
+    // returns `Err` when unset (synchronous denial). v0.1.0 plugins never reach it (no import).
+    granted_sway: bool,
 }
 
 /// A guest's `set-timeout` request (RFC 0011). `After(d)` = one `Event::Timer` in `d`;
@@ -230,6 +233,30 @@ impl v2::ezbar::plugin::host::Host for Host {
     }
     async fn feed_subscribe(&mut self, feed: ezbar::plugin::types::FeedKind, min: u32) {
         ezbar::plugin::host::Host::feed_subscribe(self, feed, min).await
+    }
+    // RFC 0013 Phase 2 — the only method that's NOT a v1 delegate (v1 has no sway). Read-only:
+    // gated by `[modules.<id>].sway`, returns the bar-injected snapshot (synchronous denial).
+    async fn sway_snapshot(&mut self) -> Result<v2::ezbar::plugin::host::SwayState, String> {
+        if !self.granted_sway {
+            return Err("capability denied: sway not granted ([modules.<id>].sway)".into());
+        }
+        let Some(src) = SWAY_SOURCE.get() else {
+            return Err("sway source unavailable".into());
+        };
+        let snap = src();
+        Ok(v2::ezbar::plugin::host::SwayState {
+            workspaces: snap
+                .workspaces
+                .into_iter()
+                .map(|w| v2::ezbar::plugin::host::SwayWorkspace {
+                    name: w.name,
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: snap.title,
+        })
     }
 }
 
@@ -526,6 +553,32 @@ pub fn set_feed_sampler(f: Arc<FeedSampler>) {
     let _ = FEED_SAMPLER.set(f);
 }
 
+/// One workspace as the bar reports it to a v0.2.0 plugin (RFC 0013 Phase 2).
+pub struct SwayWorkspaceInfo {
+    pub name: String,
+    pub focused: bool,
+    pub visible: bool,
+    pub urgent: bool,
+}
+
+/// The read-only sway snapshot the bar injects (RFC 0013): the workspace list + focused title.
+/// The reactor can't open a sway connection of its own (it's below the bar), so the bar hands
+/// down a closure over its existing `sources::sway` watch channel.
+pub struct SwaySnapshot {
+    pub workspaces: Vec<SwayWorkspaceInfo>,
+    pub title: String,
+}
+
+pub type SwaySource = dyn Fn() -> SwaySnapshot + Send + Sync + 'static;
+
+static SWAY_SOURCE: OnceLock<Arc<SwaySource>> = OnceLock::new();
+
+/// Install the sway-state source (RFC 0013 Phase 2). The bar calls this once at startup with a
+/// closure over its `sources::sway` snapshot; `host.sway-snapshot` reads it. First write wins.
+pub fn set_sway_source(f: Arc<SwaySource>) {
+    let _ = SWAY_SOURCE.set(f);
+}
+
 /// Stable index for a feed kind — the `feeds` map key (avoids needing `FeedKind: Hash`).
 fn feed_index(k: FeedKind) -> u8 {
     match k {
@@ -754,13 +807,23 @@ impl Reactor {
         config: Vec<(String, String)>,
         grants: Vec<String>,
         grants_feeds: Vec<String>,
+        grant_sway: bool,
         token: u64,
         slot: Slot,
         input: tokio::sync::mpsc::Receiver<PointerEvent>,
     ) -> tokio::task::JoinHandle<()> {
         self.rt.spawn(async move {
             if let Err(e) = self
-                .drive(path.clone(), config, grants, grants_feeds, token, slot, input)
+                .drive(
+                    path.clone(),
+                    config,
+                    grants,
+                    grants_feeds,
+                    grant_sway,
+                    token,
+                    slot,
+                    input,
+                )
                 .await
             {
                 log::warn!("ezbar-wasm: plugin {path:?} stopped: {e:#}");
@@ -775,6 +838,7 @@ impl Reactor {
         config: Vec<(String, String)>,
         grants: Vec<String>,
         grants_feeds: Vec<String>,
+        grant_sway: bool,
         token: u64,
         slot: Slot,
         mut input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -799,6 +863,7 @@ impl Reactor {
                 timer_request: None,
                 granted_feeds: grants_feeds,
                 feed_requests: Vec::new(),
+                granted_sway: grant_sway,
             },
         );
         store.limiter(|h| &mut h.limits);
@@ -1225,6 +1290,7 @@ impl WasmModule {
         config: Vec<(String, String)>,
         grants: Vec<String>,
         grants_feeds: Vec<String>,
+        grant_sway: bool,
     ) -> Self {
         let slot: Slot = Arc::new(Shared {
             slots: Mutex::new(Slots::default()),
@@ -1236,6 +1302,7 @@ impl WasmModule {
             config,
             grants,
             grants_feeds,
+            grant_sway,
             instance, // feed-subscription token
             slot.clone(),
             rx,

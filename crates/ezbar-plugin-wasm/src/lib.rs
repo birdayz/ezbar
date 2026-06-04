@@ -326,6 +326,25 @@ pub enum Feed {
     Net,
 }
 
+/// One workspace, as read via [`Ctx::sway_snapshot`] (RFC 0013).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwayWorkspace {
+    pub name: String,
+    /// the active workspace on the focused output
+    pub focused: bool,
+    /// visible on *some* output (focused, or active on another monitor)
+    pub visible: bool,
+    /// flagged urgent by a client
+    pub urgent: bool,
+}
+
+/// A read-only sway snapshot: the workspace list + the focused window title (RFC 0013).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SwayState {
+    pub workspaces: Vec<SwayWorkspace>,
+    pub title: String,
+}
+
 /// Host services available inside `update` — capability-gated (RFC 0006 §3,§5).
 /// The host performs the call; an ungranted one returns an error.
 pub trait Ctx {
@@ -364,6 +383,14 @@ pub trait Ctx {
     /// `Err` on a denied capability, the frozen `feed-subscribe` ABI has no result and
     /// can't signal denial synchronously.)
     fn feed_subscribe(&mut self, feed: Feed, min_period_ms: u32);
+    /// Read the current sway state — the workspace list + focused window title (RFC 0013).
+    ///
+    /// **Read-only** (there's deliberately no way to drive sway from a plugin) and
+    /// **capability-gated** by `[modules.<id>].sway = true`; returns `Err` if unset (a
+    /// synchronous denial, unlike fire-and-forget feeds). It's a *pull* get-current — call it
+    /// in `update` (e.g. on your `Event::Timer`) and render from the result; sway state is a
+    /// snapshot, not a stream.
+    fn sway_snapshot(&mut self) -> Result<SwayState, String>;
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are
@@ -560,7 +587,7 @@ pub mod prelude {
     pub use crate::widget::*;
     pub use crate::{
         export_plugin, Align, Chart, Ctx, Event, Feed, Graph, GraphKind, Icon, Paint, Plugin,
-        PointerKind, Render, Token,
+        PointerKind, Render, SwayState, SwayWorkspace, Token,
     };
 }
 

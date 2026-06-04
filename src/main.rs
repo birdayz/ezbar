@@ -275,6 +275,24 @@ fn run_bar() -> iced_layershell::Result {
     // cpu/mem/temp/battery/net graph via `feed-subscribe` (RFC 0012). The reactor lives below
     // us in the dep graph and can't read `/proc`; it calls this closure on its blocking pool.
     install_feed_sampler();
+    // Wire the bar's sway snapshot into the reactor for the read-only `sway-snapshot` capability
+    // (RFC 0013): the reactor can't open its own sway connection, so it reads the bar's.
+    ezbar_wasm::set_sway_source(Arc::new(|| {
+        let s = ezbar::sources::sway::snapshot();
+        ezbar_wasm::SwaySnapshot {
+            workspaces: s
+                .workspaces
+                .iter()
+                .map(|w| ezbar_wasm::SwayWorkspaceInfo {
+                    name: w.name.clone(),
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: s.title.clone(),
+        }
+    }));
     let name = cfg
         .bar
         .font

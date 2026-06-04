@@ -34,6 +34,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let mut path: Option<PathBuf> = None;
     let mut grants: Vec<String> = Vec::new();
     let mut grants_feeds: Vec<String> = Vec::new();
+    let mut grant_sway = false;
     let mut config: Vec<(String, String)> = Vec::new();
     let mut check = false;
 
@@ -47,6 +48,7 @@ fn main() -> ezbar_plugin::iced::Result {
                 Some(kind) => grants_feeds.push(kind),
                 None => fail("--feed needs a kind, e.g. --feed cpu"),
             },
+            "--sway" => grant_sway = true,
             "--set" => match args.next() {
                 Some(kv) => match kv.split_once('=') {
                     Some((k, v)) => config.push((k.to_string(), v.to_string())),
@@ -87,7 +89,37 @@ fn main() -> ezbar_plugin::iced::Result {
         .enable_all()
         .build()
         .expect("preview: build tokio runtime");
-    let module = WasmModule::new(rt.handle().clone(), 0, id, path, config, grants, grants_feeds);
+    // A stub sway source so `--sway` plugins have something to read in the preview (the real
+    // bar injects its live `sources::sway` snapshot; the harness fakes one).
+    if grant_sway {
+        ezbar_wasm::set_sway_source(std::sync::Arc::new(|| ezbar_wasm::SwaySnapshot {
+            workspaces: vec![
+                ezbar_wasm::SwayWorkspaceInfo {
+                    name: "1".into(),
+                    focused: true,
+                    visible: true,
+                    urgent: false,
+                },
+                ezbar_wasm::SwayWorkspaceInfo {
+                    name: "2".into(),
+                    focused: false,
+                    visible: false,
+                    urgent: false,
+                },
+            ],
+            title: "preview — focused window title".into(),
+        }));
+    }
+    let module = WasmModule::new(
+        rt.handle().clone(),
+        0,
+        id,
+        path,
+        config,
+        grants,
+        grants_feeds,
+        grant_sway,
+    );
 
     // Headless smoke test: drive the plugin briefly and report what it rendered.
     if check {
