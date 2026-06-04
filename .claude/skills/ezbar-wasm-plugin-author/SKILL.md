@@ -183,8 +183,14 @@ sway = true              # ctx.sway_snapshot() — read-only workspace list + fo
 
 [modules.notes]          # the fs tier (RFC 0015): preopen dirs into your guest, use std::fs
 fs = [{ path = "~/notes", at = "/notes", mode = "rw" }]   # mode: r (default) | rw
-# exec = ["kubectl"]     # run allow-listed programs — landing (RFC 0015)
+
+[modules.kube]
+exec = ["kubectl"]       # ctx.exec("kubectl", &["config","current-context"], None) — any args
 ```
+
+`ctx.exec(program, args, stdin) -> ExecOutput { code, stdout, stderr }` runs an allow-listed
+program to completion (gated by `exec`; `Err` if not granted). Keep it on the timer path —
+your guest is parked while it runs. See `wasm/kube` for the worked example.
 
 An ungranted `feed_subscribe` is silently never delivered (fire-and-forget — don't
 busy-wait on it); an ungranted `sway_snapshot()` returns `Err` (synchronous denial,

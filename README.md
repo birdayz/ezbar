@@ -188,7 +188,7 @@ Design: [RFC 0001](rfcs/0001-pluggable-modules.md).
 | `feeds` | `["cpu", "*"]` | host-sampled cpu/memory/temperature/battery/net |
 | `sway` | `true` | read-only workspace list + focused title |
 | `fs` | `[{ path = "~/notes", mode = "rw" }]` | preopened dirs (WASI-jailed; `r`/`rw`) |
-| `exec` | `["kubectl"]` | run allow-listed programs *(landing — RFC 0015)* |
+| `exec` | `["kubectl"]` | run allow-listed programs (any args) |
 
 Or flip **`[plugins] yolo = true`** to grant every plugin everything ("I trust my plugins,"
 like Claude Code's bypass). Even in yolo the **resource sandbox holds** (cpu/mem/epoch) — a
