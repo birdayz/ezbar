@@ -199,11 +199,15 @@ Works for Rust and TinyGo (the inject step is `wasm-tools custom-section`, langu
   negotiation** (`registry::pick_in_window` over the frozen `{0.1.0,0.2.0}` window, newest by
   dotted-numeric compare), verifies `sha256`, installs, and **prints the grant block**; plus
   `ezbar list` (installed + consent state + declared caps) and `ezbar remove <id>` (delete the
-  `.wasm` + consent record, never `config.toml`). Naming: plugin install is **`ezbar add`** —
-  `ezbar install` already means "add ezbar to sway config". **Remaining:** the HTTPS/git fetch
-  transport (so a *hosted* registry works, not just a local dir), `update`/`search`, and the TOFU
-  publisher-pin (a local dir is already trusted). The remaining piece needs the registry repo to
-  exist.
+  `.wasm` + consent + publisher records, never `config.toml`). Naming: plugin install is **`ezbar
+  add`** — `ezbar install` already means "add ezbar to sway config". The fetch transport handles
+  a **git-hosted** registry too (any git URL — incl. the future `…/ezbar-plugins.git` — is
+  shallow-cloned/ff-pulled to a cache, then resolved locally), and **TOFU publisher-pin**
+  (`publishers.toml`) refuses a known id served under a different publisher. **Security model
+  complete:** hash-keyed grants + `sha256` verify + WIT-window negotiation + publisher-pin.
+  **Remaining (sugar / gated on a populated hosted registry):** download the artifact from a
+  release URL when an entry uses `artifact = "https://…"` (vs the co-located `<version>.wasm`
+  today), and `update`/`search`.
 
 ## 9. Open questions — resolved
 1. Manifest transport → embedded section (load-time enforce) **and** index entry (pre-download

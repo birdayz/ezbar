@@ -59,10 +59,13 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   <id> [--registry <dir>|$EZBAR_REGISTRY]` (resolve from a **local** registry dir → WIT-window
   negotiation `registry::pick_in_window` → verify sha256 → install → print grant block), `ezbar
   list` (installed + consent state + declared caps), `ezbar remove <id>` (delete `.wasm` +
-  consent, never config). Naming: it's `ezbar add` (`ezbar install` already = sway-config).
-  **Remaining:** the HTTPS/git fetch transport (so a **hosted** registry works, not just a local
-  dir) + `update`/`search` + TOFU publisher-pin — needs the registry repo to exist (a publish
-  decision). The network effect no other bar has.
+  consent + pin, never config). Works against a **git-hosted** registry too (any git URL is
+  cloned/pulled to a cache, then resolved locally), with **TOFU publisher-pin** refusing a known
+  id under a changed publisher. Naming: it's `ezbar add` (`ezbar install` already = sway-config).
+  **Security model complete:** hash-keyed grants + sha256 + WIT-window + publisher-pin.
+  **Remaining (sugar):** download the artifact from a release URL (vs co-located `<version>.wasm`)
+  + `update`/`search`. The public registry repo itself is a publish decision (yours). The network
+  effect no other bar has.
 
 - [~] **CRIT (security) — id-keyed grants → confused-deputy. Hash-binding DONE; manifest
   binding remains.** RFC 0006 §5 promised hash-keyed grants ("can't swap a benign manifest under
