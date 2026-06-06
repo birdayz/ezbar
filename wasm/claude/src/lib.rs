@@ -28,6 +28,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Pure, host-unit-tested logic (proc parsing, project-dir encoding, projection, …) lives in a
+// sibling crate so it can run under `cargo test` even though this plugin is wasm-only.
+use claude_logic::{human_dur, idle_str, Level};
 use ezbar_plugin_wasm::prelude::*;
 use serde_json::Value;
 
@@ -356,7 +359,9 @@ impl Claude {
             .iter()
             .filter(|p| p.comm == "claude")
             .map(|p| {
-                let working = has_worker_descendant(p.pid, &children, &active);
+                // `working` = an actively-running tool descendant; only that suppresses a false
+                // "waiting" (an idle resident MCP/LSP child must NOT pin the agent to working).
+                let working = claude_logic::has_active_descendant(p.pid, &children, &active);
                 Raw {
                     cwd: proc_cwd(p.pid),
                     working,
@@ -389,7 +394,7 @@ impl Claude {
             .drain(..)
             .enumerate()
             .map(|(i, r)| Agent {
-                label: String::new(), // filled by `disambiguate`
+                label: String::new(), // filled by disambiguate_labels below
                 // Detector gates on `working` ALONE — a parked agent (no tool child) flags after
                 // ATTN_SECS even though its idle render loop nudges CPU. `busy` only steered the
                 // mtime hand-out above.
@@ -410,7 +415,11 @@ impl Claude {
         }
         self.saw_empty = agents.is_empty();
 
-        disambiguate(&mut agents);
+        // `parent/base` labels where basenames collide (worktrees, two terminals in one repo).
+        let cwds: Vec<String> = agents.iter().map(|a| a.cwd.clone()).collect();
+        for (a, label) in agents.iter_mut().zip(claude_logic::disambiguate_labels(&cwds)) {
+            a.label = label;
+        }
         agents.sort_by(|a, b| {
             b.waiting
                 .cmp(&a.waiting)
@@ -443,53 +452,32 @@ impl Claude {
         }
     }
 
-    /// Project seconds until the 5h limit hits 100% used at the recent fill rate. `None` unless we
-    /// have a ≥60s baseline with a meaningful, *rising* trend (so we never extrapolate noise).
+    /// Project seconds until the 5h limit hits 100% used at the recent fill rate. `None` unless
+    /// there's a ≥60s baseline with a meaningful, *rising* trend (so we never extrapolate noise).
     fn project_five(&self) -> Option<i64> {
-        let (t0, u0) = *self.limit_hist.first()?;
-        let (t1, u1) = *self.limit_hist.last()?;
-        let span = t1 - t0;
-        let rise = u1 - u0; // positive ⇒ used% is climbing
-        if span < 60 || rise < 0.5 {
-            return None;
-        }
-        let rate = rise / span as f64; // %/sec
-        Some(((100.0 - u1) / rate) as i64)
+        claude_logic::project_to_full(&self.limit_hist, 60, 0.5)
     }
 }
 
 // ── rendering helpers ────────────────────────────────────────────────────────
 
-/// Colour for a limit by how much is *used*: green while there's headroom, amber past 70%,
-/// red past 85% — i.e. it reddens as you approach the cap.
+/// Map a pure severity [`Level`] (from `claude-logic`) to a theme token.
+fn token(l: Level) -> Token {
+    match l {
+        Level::Ok => Token::Ok,
+        Level::Warn => Token::Warn,
+        Level::Urgent => Token::Urgent,
+    }
+}
+
+/// Colour for a limit by how much is *used*: green with headroom, amber past 70%, red past 85%.
 fn usage_token(used: f64) -> Token {
-    if used > 85.0 {
-        Token::Urgent
-    } else if used > 70.0 {
-        Token::Warn
-    } else {
-        Token::Ok
-    }
+    token(claude_logic::usage_level(used))
 }
 
-/// Colour for an idle agent by how long it's been quiet: amber, then red past 5 min.
+/// Colour for an idle agent by how long it's been quiet: amber, then red past `RED_SECS`.
 fn idle_color(secs: i64) -> Token {
-    if secs >= RED_SECS {
-        Token::Urgent
-    } else {
-        Token::Warn
-    }
-}
-
-/// Compact idle time: `45s` / `8m` / `2h`.
-fn idle_str(secs: i64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h", secs / 3600)
-    }
+    token(claude_logic::idle_level(secs, RED_SECS))
 }
 
 /// A two-tone box-drawing bar of `used` %, filling toward the cap, with the percent right-aligned
@@ -521,43 +509,8 @@ fn rule() -> Render {
     text("\u{2500}".repeat(60)).size(8.0).color(Token::FgDim)
 }
 
-fn human_dur(secs: i64) -> String {
-    if secs <= 0 {
-        "now".into()
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86_400)
-    }
-}
-
 fn short_model(m: &str) -> String {
     m.strip_prefix("claude-").unwrap_or(m).to_string()
-}
-
-/// Give agents whose basename collides a `parent/base` label so "which one is waiting" is
-/// answerable (worktrees, monorepo subdirs, two terminals in one repo).
-fn disambiguate(agents: &mut [Agent]) {
-    let mut counts: HashMap<String, u32> = HashMap::new();
-    for a in agents.iter() {
-        *counts.entry(base(&a.cwd).to_string()).or_default() += 1;
-    }
-    for a in agents.iter_mut() {
-        let b = base(&a.cwd).to_string();
-        let b = b.as_str();
-        a.label = if counts.get(b).copied().unwrap_or(0) > 1 {
-            let parent = a.cwd.rsplit('/').nth(1).unwrap_or("");
-            format!("{parent}/{b}")
-        } else {
-            b.to_string()
-        };
-    }
-}
-
-fn base(path: &str) -> &str {
-    path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(path)
 }
 
 // ── data (fs + exec) ─────────────────────────────────────────────────────────
@@ -587,21 +540,17 @@ fn read_procs() -> (Vec<Proc>, HashMap<i32, Vec<i32>>) {
         let Ok(stat) = fs::read_to_string(format!("/proc/{name}/stat")) else {
             continue;
         };
-        // `pid (comm) state ppid … utime stime …` — comm may hold spaces/parens, so split on
-        // the LAST ')'. After it: rest[0]=state, [1]=ppid, [11]=utime, [12]=stime.
-        let Some(close) = stat.rfind(')') else { continue };
-        let Some(open) = stat.find('(') else { continue };
-        let comm = stat.get(open + 1..close).unwrap_or("").to_string();
+        let Some(st) = claude_logic::parse_stat(&stat) else {
+            continue;
+        };
         let pid: i32 = name.parse().unwrap_or(0);
-        let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-        let field = |i: usize| rest.get(i).copied().unwrap_or("");
-        let state = field(0).chars().next().unwrap_or('?');
-        let ppid: i32 = field(1).parse().unwrap_or(0);
-        let utime: u64 = field(11).parse().unwrap_or(0);
-        let stime: u64 = field(12).parse().unwrap_or(0);
-        let cpu = utime + stime;
-        children.entry(ppid).or_default().push(pid);
-        procs.push(Proc { pid, comm, state, cpu });
+        children.entry(st.ppid).or_default().push(pid);
+        procs.push(Proc {
+            pid,
+            comm: st.comm,
+            state: st.state,
+            cpu: st.cpu,
+        });
     }
     (procs, children)
 }
@@ -616,10 +565,7 @@ fn proc_cwd(pid: i32) -> String {
         return target.to_string_lossy().to_string();
     }
     if let Ok(env) = fs::read(format!("/proc/{pid}/environ")) {
-        if let Some(pwd) = String::from_utf8_lossy(&env)
-            .split('\0')
-            .find_map(|kv| kv.strip_prefix("PWD=").map(|s| s.to_string()))
-        {
+        if let Some(pwd) = claude_logic::pwd_from_environ(&env) {
             return pwd;
         }
     }
@@ -627,42 +573,11 @@ fn proc_cwd(pid: i32) -> String {
 }
 
 /// True if `pid` has any descendant that is *actively working* (`active` set) — runnable/in-IO
-/// or burning CPU since the last poll. Mere existence of a child is NOT enough: a resident
-/// stdio MCP server or language server is a long-lived, idle (flat-CPU, sleeping) descendant,
-/// so an agent parked at the prompt with such a child must still read as waiting (ai-agent-pro).
-fn has_worker_descendant(
-    pid: i32,
-    children: &HashMap<i32, Vec<i32>>,
-    active: &std::collections::HashSet<i32>,
-) -> bool {
-    let mut stack: Vec<i32> = children.get(&pid).cloned().unwrap_or_default();
-    let mut seen = 0;
-    while let Some(p) = stack.pop() {
-        seen += 1;
-        if seen > 512 {
-            break; // cycle/runaway guard
-        }
-        if active.contains(&p) {
-            return true;
-        }
-        if let Some(kids) = children.get(&p) {
-            stack.extend(kids);
-        }
-    }
-    false
-}
-
 /// Epoch mtimes of `cwd`'s transcript `.jsonl` files, **newest first** — one per session that
-/// ran there. Claude stores transcripts under `~/.claude/projects/<cwd>`, where the dir name is
-/// the cwd with **every non-alphanumeric char → `-`** (so `/`, `.`, `_`, spaces all collapse;
-/// existing `-` survives — `…/esp-iot/.claude-worktrees` ⇒ `…-esp-iot--claude-worktrees`).
-/// Mapped here to `/claude/projects/…`. Empty when there's no transcript yet.
+/// ran there. Claude stores transcripts under `~/.claude/projects/<encode_project(cwd)>`, mapped
+/// here to `/claude/projects/…`. Empty when there's no transcript yet.
 fn transcript_mtimes(cwd: &str) -> Vec<i64> {
-    let enc: String = cwd
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let dir = format!("/claude/projects/{enc}");
+    let dir = format!("/claude/projects/{}", claude_logic::encode_project(cwd));
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
     };

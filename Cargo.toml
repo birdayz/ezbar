@@ -12,7 +12,7 @@ keywords = ["sway", "wayland", "statusbar", "wlroots", "iced"]
 categories = ["gui"]
 
 [workspace]
-members = ["crates/ezbar-plugin", "crates/ezbar-harness", "crates/ezbar-wasm"]
+members = ["crates/ezbar-plugin", "crates/ezbar-harness", "crates/ezbar-wasm", "crates/claude-logic"]
 # WASM plugin SDK + example plugins build for wasm32-wasip2 (RFC 0006), and the
 # host's wasmtime stack is heavy — keep them out of the default `cargo build`.
 exclude = ["crates/ezbar-plugin-wasm", "wasm"]

@@ -1,0 +1,7 @@
+[package]
+name = "claude-logic"
+version = "0.1.0"
+edition = "2021"
+description = "Pure, host-testable logic for the ezbar `claude` WASM plugin: /proc stat parsing, project-dir encoding, PWD extraction, label disambiguation, limit projection, and threshold levels. No I/O, no SDK — so it unit-tests on the host even though the plugin itself only builds for wasm32-wasip2."
+
+[lib]

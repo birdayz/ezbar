@@ -18,9 +18,14 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 name = "claude"
 version = "0.1.0"
 dependencies = [
+ "claude-logic",
  "ezbar-plugin-wasm",
  "serde_json",
 ]
+
+[[package]]
+name = "claude-logic"
+version = "0.1.0"
 
 [[package]]
 name = "equivalent"
