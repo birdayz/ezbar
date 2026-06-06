@@ -1,6 +1,5 @@
 pub mod battery;
 pub mod calendar;
-pub mod claude;
 pub mod github;
 pub mod media;
 pub mod ping;

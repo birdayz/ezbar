@@ -2,7 +2,6 @@
 
 pub mod battery;
 pub mod calendar;
-pub mod claude;
 pub mod clock;
 pub mod cpu;
 pub mod custom;
@@ -268,7 +267,6 @@ pub fn is_module(id: &str) -> bool {
             id,
             "cpu"
                 | "github"
-                | "claude"
                 | "custom"
                 | "disk"
                 | "net"
@@ -380,7 +378,6 @@ pub fn build(
     match id {
         "cpu" => Some(Box::new(cpu::Cpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance))),
-        "claude" => Some(Box::new(claude::Claude::new(instance))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
         "disk" => Some(Box::new(disk::Disk::new(instance, cfg))),
         "net" => Some(Box::new(net::Net::new(instance, cfg))),

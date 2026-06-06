@@ -129,7 +129,7 @@ mod registry;
 /// groups are the separators; the order is `clock` last so time anchors the far edge.
 const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
     &["cpu", "memory", "temperature"],   // machine vitals
-    &["ping", "github", "claude"],       // connectivity + dev
+    &["ping", "github"],                 // connectivity + dev
     &["calendar", "spotify"],            // work + media (kube context lives in the WASM plugin)
     &["stock", "volume", "battery"],     // status
     &["clock"],                          // time — a dedicated end-cap (switcher trails)

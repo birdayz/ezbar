@@ -1,0 +1,18 @@
+[package]
+name = "claude"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar WASM plugin: Claude Code agent dashboard — running agents (waiting-for-you first), 5h block cost/burn, and rate-limit bars. Reads /proc + ~/.claude (fs) and runs ccusage (exec)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
