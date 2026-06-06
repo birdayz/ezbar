@@ -13,7 +13,7 @@ use core::cell::RefCell;
 // v0.2.0 plugins still load too.
 wit_bindgen::generate!({
     world: "plugin",
-    path: "../../wit/since-v0.3.0",
+    path: "../../wit/since-v0.4.0",
 });
 
 use ezbar::plugin as p;
@@ -71,6 +71,10 @@ impl crate::Ctx for HostCtx {
             stdout: o.stdout,
             stderr: o.stderr,
         })
+    }
+    fn pick(&mut self, prompt: &str, items: &[&str], current: Option<usize>) -> Option<String> {
+        let items: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+        p::host::pick(prompt, &items, current.map(|i| i as u32))
     }
 }
 

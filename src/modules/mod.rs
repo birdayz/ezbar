@@ -10,7 +10,6 @@ pub mod disk;
 pub mod github;
 pub mod ip;
 pub mod keyboard;
-pub mod kubectl;
 pub mod markup;
 pub mod media;
 pub mod memory;
@@ -286,7 +285,6 @@ pub fn is_module(id: &str) -> bool {
                 | "volume"
                 | "battery"
                 | "calendar"
-                | "kubectl"
                 | "stock"
                 | "spotify"
         )
@@ -399,7 +397,6 @@ pub fn build(
         "volume" => Some(Box::new(volume::Volume::new(instance))),
         "battery" => Some(Box::new(battery::Battery::new(instance))),
         "calendar" => Some(Box::new(calendar::Calendar::new(instance))),
-        "kubectl" => Some(Box::new(kubectl::Kubectl::new(instance))),
         "stock" => Some(Box::new(stock::Stock::new(instance))),
         "spotify" => Some(Box::new(spotify::Spotify::new(instance))),
         // a registered WASM plugin (RFC 0006): load the `.wasm` as a Module.

@@ -109,7 +109,30 @@ pub trait Plugin {                                       // + a `Default` impl
     value }`. Gated by `feeds`. Lets a sandboxed plugin draw a cpu graph with no `/proc`.
   - `ctx.sway_snapshot()` — **read-only sway state** (workspace list + focused title,
     RFC 0013); a *pull* call returning `Result<SwayState, String>`. Gated by `sway`.
+  - `ctx.pick(prompt, items, current)` — **the host's native searchable picker** (RFC 0018).
+    Pass a list of strings (and the index to mark `✓`); the bar renders a real iced picker —
+    search field, fuzzy filter, keyboard, focus, theming — and your `pick()` call **parks**
+    (like `http_get`) until the user picks (returns `Some(item)`) or dismisses (`None`). No
+    grant needed. This is the model for typed/interactive input: **you don't draw a text box —
+    you invoke a host service.** Call it from `update` (an event handler), never `view`.
   - Drive plain ticks via `Event::Timer`; handle `Event::Feed`/`Event::Pointer` likewise.
+
+### Input & host services — the standard (RFC 0018)
+
+The split that keeps plugins consistent and the host minimal: **a plugin *draws* display widgets
+(text/icon/graph) from the DSL, but *invokes* host services for interactive input.** Text
+editing, focus, IME, and keyboard are solved **once** in the host (native iced), not
+reimplemented per-plugin. So a context switcher is just:
+
+```rust
+// on a chip click (wrap the chip in mouse_area → Event::Pointer{Press}):
+if let Some(chosen) = ctx.pick("kube context", &items, current) {
+    let _ = ctx.exec("kubectl", &["config", "use-context", &chosen], None);
+}
+```
+
+New interactive widgets arrive as **host services** (the `pick` line will grow: `prompt`,
+`confirm`), not as new DSL nodes or hand-drawn guest UI.
 - **Hover popups are free:** implement `popup()` and the runtime hovers the
   **whole chip** for you — opens the popup on enter, closes on leave, and
   content-sizes the surface (chart, text list, or a mix). You do **not** need a

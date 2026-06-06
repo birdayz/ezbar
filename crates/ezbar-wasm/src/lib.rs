@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -71,6 +71,24 @@ mod v3 {
             "ezbar:plugin/types@0.3.0": crate::ezbar::plugin::types,
             "ezbar:plugin/ui@0.3.0": crate::ezbar::plugin::ui,
             "ezbar:plugin/events@0.3.0": crate::ezbar::plugin::events,
+        },
+    });
+}
+
+// RFC 0018: the v0.4.0 world (adds `host.pick` — the native picker service). Same
+// version-window trick: `types`/`ui`/`events` are byte-identical to v0.1.0 and remap to its
+// generated modules, so `Tree`/`Event` and the whole drive loop stay shared; only `Plugin` +
+// the `host` trait fork. `pick` is a host import, so this is purely additive (no event/ui fork).
+mod v4 {
+    wasmtime::component::bindgen!({
+        world: "plugin",
+        path: "../../wit/since-v0.4.0",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "ezbar:plugin/types@0.4.0": crate::ezbar::plugin::types,
+            "ezbar:plugin/ui@0.4.0": crate::ezbar::plugin::ui,
+            "ezbar:plugin/events@0.4.0": crate::ezbar::plugin::events,
         },
     });
 }
@@ -153,6 +171,15 @@ struct Host {
     // `exec` of an ungranted program returns `Err`. The dangerous tier — only v0.3.0 plugins
     // can even import it.
     granted_exec: Vec<String>,
+    // This plugin's instance id (RFC 0018), so a `pick` request the bar receives can be anchored
+    // to the plugin's pill.
+    instance: u64,
+    // Set across a host call that PARKS the guest indefinitely on human input (`pick`, RFC 0018).
+    // `step()` reads this (via a shared clone) to SUSPEND the 12s WALL backstop while the fiber is
+    // parked — a human-paced pick is a legitimate unbounded park, not a runaway guest. Epoch still
+    // guards runaway guest *code* (a parked fiber runs none). Shared (not plain bool) so `step()`
+    // can read it without borrowing the store the in-flight call holds.
+    in_blocking_service: Arc<AtomicBool>,
 }
 
 /// A guest's `set-timeout` request (RFC 0011). `After(d)` = one `Event::Timer` in `d`;
@@ -382,6 +409,100 @@ impl v3::ezbar::plugin::host::Host for Host {
             stdout: out.stdout,
             stderr: out.stderr,
         })
+    }
+}
+
+// RFC 0018: the v0.4.0 host trait. Identical to v3 (delegates the `types`-based methods to v1,
+// re-builds `sway_snapshot`/`exec` into v4's own host record) plus `pick` — the native picker
+// service. Only the host interface forks; `Event`/`Tree` and the drive loop stay shared.
+impl v4::ezbar::plugin::host::Host for Host {
+    async fn log(&mut self, msg: String) {
+        ezbar::plugin::host::Host::log(self, msg).await
+    }
+    async fn text_size(&mut self) -> f32 {
+        ezbar::plugin::host::Host::text_size(self).await
+    }
+    async fn fg(&mut self) -> ezbar::plugin::types::Paint {
+        ezbar::plugin::host::Host::fg(self).await
+    }
+    async fn set_timeout(&mut self, ms: u32) {
+        ezbar::plugin::host::Host::set_timeout(self, ms).await
+    }
+    async fn subscribe(&mut self, kinds: Vec<ezbar::plugin::types::EventKind>) {
+        ezbar::plugin::host::Host::subscribe(self, kinds).await
+    }
+    async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::http_get(self, url).await
+    }
+    async fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::read_file(self, path).await
+    }
+    async fn feed_subscribe(&mut self, feed: ezbar::plugin::types::FeedKind, min: u32) {
+        ezbar::plugin::host::Host::feed_subscribe(self, feed, min).await
+    }
+    async fn sway_snapshot(&mut self) -> Result<v4::ezbar::plugin::host::SwayState, String> {
+        if !self.granted_sway {
+            return Err("capability denied: sway not granted ([modules.<id>].sway)".into());
+        }
+        let Some(src) = SWAY_SOURCE.get() else {
+            return Err("sway source unavailable".into());
+        };
+        let snap = src();
+        Ok(v4::ezbar::plugin::host::SwayState {
+            workspaces: snap
+                .workspaces
+                .into_iter()
+                .map(|w| v4::ezbar::plugin::host::SwayWorkspace {
+                    name: w.name,
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: snap.title,
+        })
+    }
+    async fn exec(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<v4::ezbar::plugin::host::ExecOut, String> {
+        // delegate to v3's implementation (identical logic), re-wrapping the output record.
+        let out = v3::ezbar::plugin::host::Host::exec(self, program, args, stdin).await?;
+        Ok(v4::ezbar::plugin::host::ExecOut {
+            code: out.code,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+    // RFC 0018: open the bar's native picker and PARK until the user selects/dismisses. No grant
+    // (it reads/runs nothing). The WALL backstop is suspended while parked (a human pick is a
+    // legitimate unbounded park, not a runaway guest); epoch still guards guest code.
+    async fn pick(
+        &mut self,
+        prompt: String,
+        items: Vec<String>,
+        current: Option<u32>,
+    ) -> Option<String> {
+        let Some(sink) = PICK_SINK.get() else {
+            return None; // no bar (e.g. headless preview) → nothing to pick from
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = PickRequest {
+            instance: self.instance,
+            prompt,
+            items,
+            current,
+            reply: tx,
+        };
+        if sink.send(req).is_err() {
+            return None; // bar gone
+        }
+        self.in_blocking_service.store(true, Ordering::SeqCst);
+        let chosen = rx.await.ok().flatten();
+        self.in_blocking_service.store(false, Ordering::SeqCst);
+        chosen
     }
 }
 
@@ -640,6 +761,7 @@ struct Reactor {
     linker: Linker<Host>,    // v0.1.0 host interface
     linker_v2: Linker<Host>, // v0.2.0 host interface (RFC 0013 version window)
     linker_v3: Linker<Host>, // v0.3.0 host interface (RFC 0015: + exec)
+    linker_v4: Linker<Host>, // v0.4.0 host interface (RFC 0018: + pick)
     client: reqwest::Client,
     rt: Handle,
     // Shared feed hubs, keyed by metric (RFC 0012). One sampler task per active kind fans a
@@ -703,6 +825,27 @@ static SWAY_SOURCE: OnceLock<Arc<SwaySource>> = OnceLock::new();
 /// closure over its `sources::sway` snapshot; `host.sway-snapshot` reads it. First write wins.
 pub fn set_sway_source(f: Arc<SwaySource>) {
     let _ = SWAY_SOURCE.set(f);
+}
+
+/// A guest's `pick()` request, routed to the bar (RFC 0018). The bar renders its NATIVE picker
+/// over `items` (marking `current` with `✓`), then resolves `reply` with the selection or `None`
+/// on dismiss. The reactor lives below the bar and can't render, so — like feeds/sway — the bar
+/// installs a sink ([`set_pick_sink`]) and `host.pick` pushes to it, parking the guest fiber on
+/// `reply` until the user acts.
+pub struct PickRequest {
+    pub instance: u64,
+    pub prompt: String,
+    pub items: Vec<String>,
+    pub current: Option<u32>,
+    pub reply: tokio::sync::oneshot::Sender<Option<String>>,
+}
+
+static PICK_SINK: OnceLock<tokio::sync::mpsc::UnboundedSender<PickRequest>> = OnceLock::new();
+
+/// Install the picker sink (RFC 0018). The bar calls this once at startup with the sender of an
+/// unbounded channel it drains in a subscription; `host.pick` pushes [`PickRequest`]s to it.
+pub fn set_pick_sink(tx: tokio::sync::mpsc::UnboundedSender<PickRequest>) {
+    let _ = PICK_SINK.set(tx);
 }
 
 /// Stable index for a feed kind — the `feeds` map key (avoids needing `FeedKind: Hash`).
@@ -822,6 +965,10 @@ impl Reactor {
         add_to_linker_async(&mut linker_v3).expect("ezbar-wasm: wasi async linker (v3)");
         v3::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v3, |h: &mut Host| h)
             .expect("ezbar-wasm: plugin linker (v3)");
+        let mut linker_v4: Linker<Host> = Linker::new(&engine);
+        add_to_linker_async(&mut linker_v4).expect("ezbar-wasm: wasi async linker (v4)");
+        v4::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v4, |h: &mut Host| h)
+            .expect("ezbar-wasm: plugin linker (v4)");
         // ONE async client shared by every plugin (Arc-cheap clone into each Host).
         let client = reqwest::Client::builder()
             .user_agent("ezbar-wasm")
@@ -832,6 +979,7 @@ impl Reactor {
             linker,
             linker_v2,
             linker_v3,
+            linker_v4,
             client,
             rt,
             feeds: Mutex::new(HashMap::new()),
@@ -1003,6 +1151,8 @@ impl Reactor {
                 feed_requests: Vec::new(),
                 granted_sway: grant_sway,
                 granted_exec: grants_exec,
+                instance: token,
+                in_blocking_service: Arc::new(AtomicBool::new(false)),
             },
         );
         store.limiter(|h| &mut h.limits);
@@ -1021,6 +1171,12 @@ impl Reactor {
         // matching world, and wrap it in `DrivenPlugin` so the rest of the loop is version-blind.
         let version = plugin_version(&self.engine, &component);
         let instantiated = match version {
+            4 => tokio::time::timeout(
+                WALL,
+                v4::Plugin::instantiate_async(&mut store, &component, &self.linker_v4),
+            )
+            .await
+            .map(|r| r.map(DrivenPlugin::V4)),
             3 => tokio::time::timeout(
                 WALL,
                 v3::Plugin::instantiate_async(&mut store, &component, &self.linker_v3),
@@ -1162,6 +1318,7 @@ enum DrivenPlugin {
     V1(Plugin),
     V2(v2::Plugin),
     V3(v3::Plugin),
+    V4(v4::Plugin),
 }
 
 impl DrivenPlugin {
@@ -1174,6 +1331,7 @@ impl DrivenPlugin {
             DrivenPlugin::V1(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V2(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V3(p) => p.call_init(store, cfg).await,
+            DrivenPlugin::V4(p) => p.call_init(store, cfg).await,
         }
     }
     async fn call_update(&self, store: &mut Store<Host>, ev: &Event) -> wasmtime::Result<bool> {
@@ -1181,6 +1339,7 @@ impl DrivenPlugin {
             DrivenPlugin::V1(p) => p.call_update(store, ev).await,
             DrivenPlugin::V2(p) => p.call_update(store, ev).await,
             DrivenPlugin::V3(p) => p.call_update(store, ev).await,
+            DrivenPlugin::V4(p) => p.call_update(store, ev).await,
         }
     }
     async fn call_view(&self, store: &mut Store<Host>) -> wasmtime::Result<Tree> {
@@ -1188,6 +1347,7 @@ impl DrivenPlugin {
             DrivenPlugin::V1(p) => p.call_view(store).await,
             DrivenPlugin::V2(p) => p.call_view(store).await,
             DrivenPlugin::V3(p) => p.call_view(store).await,
+            DrivenPlugin::V4(p) => p.call_view(store).await,
         }
     }
     async fn call_popup(&self, store: &mut Store<Host>) -> wasmtime::Result<Option<Tree>> {
@@ -1195,6 +1355,7 @@ impl DrivenPlugin {
             DrivenPlugin::V1(p) => p.call_popup(store).await,
             DrivenPlugin::V2(p) => p.call_popup(store).await,
             DrivenPlugin::V3(p) => p.call_popup(store).await,
+            DrivenPlugin::V4(p) => p.call_popup(store).await,
         }
     }
 }
@@ -1204,6 +1365,9 @@ impl DrivenPlugin {
 /// version simply won't link against either linker and is disabled at instantiate.
 fn plugin_version(engine: &Engine, component: &Component) -> u8 {
     for (name, _) in component.component_type().imports(engine) {
+        if name.starts_with("ezbar:plugin/host@0.4") {
+            return 4;
+        }
         if name.starts_with("ezbar:plugin/host@0.3") {
             return 3;
         }
@@ -1220,15 +1384,28 @@ fn plugin_version(engine: &Engine, component: &Component) -> u8 {
 /// and is wrapped in the WALL backstop (RFC 0008 §3.4 / RFC 0009 implementer checklist).
 async fn step(store: &mut Store<Host>, plugin: &DrivenPlugin, slot: &Slot, event: &Event) -> bool {
     store.set_epoch_deadline(DEADLINE_TICKS);
-    let dirty = match tokio::time::timeout(WALL, plugin.call_update(&mut *store, event)).await {
-        Ok(Ok(d)) => d,
-        Ok(Err(e)) => {
-            log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
-            return false;
-        }
-        Err(_) => {
-            log::warn!("ezbar-wasm: update exceeded {WALL:?} — disabling plugin");
-            return false;
+    // WALL with a blocking-service escape (RFC 0018): `update` may call `pick`, which parks the
+    // guest fiber on human input for an unbounded time. A clone of the flag (read WITHOUT
+    // borrowing the store the in-flight call holds) lets us tell a legitimate park from a runaway
+    // guest: on each 12s elapse, if the fiber is parked in a blocking service, keep waiting;
+    // otherwise disable. Epoch still bounds runaway guest *code* (a parked fiber runs none).
+    let blocking = store.data().in_blocking_service.clone();
+    let dirty = {
+        let call = plugin.call_update(&mut *store, event);
+        tokio::pin!(call);
+        loop {
+            match tokio::time::timeout(WALL, &mut call).await {
+                Ok(Ok(d)) => break d,
+                Ok(Err(e)) => {
+                    log::warn!("ezbar-wasm: update trapped — disabling plugin: {e}");
+                    return false;
+                }
+                Err(_) if blocking.load(Ordering::SeqCst) => continue, // parked in pick — keep waiting
+                Err(_) => {
+                    log::warn!("ezbar-wasm: update exceeded {WALL:?} — disabling plugin");
+                    return false;
+                }
+            }
         }
     };
     if !dirty {
@@ -1555,13 +1732,19 @@ impl Module for WasmModule {
             // (the host doesn't auto-close — the module drives both, like calendar).
             Some(Msg::Hover) => Response::request(HostRequest::OpenPopup(PopupMode::Hover)),
             Some(Msg::Leave) => Response::request(HostRequest::ClosePopup),
-            // Left-click opens a STICKY popup (an interactive picker) — closes on re-click
-            // (the host toggles) or when another popup opens, NOT on mouse-leave.
+            // Left-click opens a STICKY popup (an interactive picker). It's a menu: it does
+            // NOT track hover. The host dismisses it on re-click (toggle), another popup
+            // opening, or a click outside — never on mouse-leave (no surface-gap timer).
             Some(Msg::Click) => Response::request(HostRequest::OpenPopup(PopupMode::Click)),
             // Forward a pointer event to the drive task (non-blocking). Scrolls are
             // coalesced into `pending_scroll` and flushed as one message, so a scroll
             // flood never fills the channel and evicts a queued `press` (RFC 0009 §3.4).
             Some(Msg::Pointer(pe)) => {
+                // A left-press inside an interactive (Click) popup is a *selection*: forward it
+                // (the guest acts on it) AND close the popup — a picker dismisses when you pick
+                // (RFC 0017 §10.5, host-side). `ClosePopup` is a no-op when no popup is open, so
+                // a press on a chip's own inner control is harmless.
+                let is_press = matches!(pe.kind, PointerKind::Press);
                 if matches!(pe.kind, PointerKind::Scroll) {
                     let acc = self.pending_scroll.take().map_or(0.0, |(_, d)| d) + pe.delta;
                     let merged = PointerEvent {
@@ -1584,7 +1767,11 @@ impl Module for WasmModule {
                     }
                     let _ = self.input.try_send(pe.clone());
                 }
-                Response::none()
+                if is_press {
+                    Response::request(HostRequest::ClosePopup)
+                } else {
+                    Response::none()
+                }
             }
             _ => Response::none(), // Tick: just re-render; `view` reads the cache
         }

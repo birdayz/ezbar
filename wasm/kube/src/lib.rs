@@ -1,7 +1,8 @@
-//! ezbar WASM plugin: `kube` — an **interactive** kubectl-context widget, the full motivating
-//! example (RFC 0015). The chip shows the current context (red on prod). **Left-click** the
-//! chip to open a sticky picker; **left-click a context** to switch to it
-//! (`kubectl config use-context`) — both over the sandboxed `exec` capability.
+//! ezbar WASM plugin: `kube` — a kubectl-context switcher. The chip shows the current context
+//! (red on prod). **Click** it to open the bar's **native searchable picker** (RFC 0018) over
+//! the context list; pick one to switch (`kubectl config use-context`). The picker — search
+//! field, fuzzy filter, keyboard, focus, theming — is the host's; this plugin just supplies the
+//! list and runs the switch over the sandboxed `exec` capability.
 //!
 //! ```toml
 //! [modules.kube]
@@ -44,14 +45,19 @@ impl Plugin for Kube {
                 ctx.set_timeout(5000); // re-poll context + list at ~0.2 Hz
                 true
             }
-            // a picker row was clicked → switch to that context, then refresh the chip
-            Event::Pointer { id, kind: PointerKind::Press, .. } => {
-                let Some(target) = id.strip_prefix("use:") else {
+            // Click the chip → open the host's native searchable picker over the contexts.
+            Event::Pointer { kind: PointerKind::Press, .. } => {
+                if self.contexts.is_empty() {
                     return false;
-                };
-                let target = target.to_string();
-                let _ = ctx.exec("kubectl", &["config", "use-context", &target], None);
-                self.refresh(ctx);
+                }
+                let items: Vec<&str> = self.contexts.iter().map(|s| s.as_str()).collect();
+                let current = self.contexts.iter().position(|c| *c == self.current);
+                if let Some(chosen) = ctx.pick("kube context", &items, current) {
+                    if chosen != self.current {
+                        let _ = ctx.exec("kubectl", &["config", "use-context", &chosen], None);
+                    }
+                    self.refresh(ctx);
+                }
                 true
             }
             _ => false,
@@ -72,33 +78,16 @@ impl Plugin for Kube {
         } else {
             Token::Fg
         };
-        row([
-            Icon::Kubernetes.view(14.0, Token::Accent),
-            text(label).color(color),
-        ])
-        .spacing(6.0)
-    }
-
-    fn popup(&self) -> Option<Render> {
-        if self.contexts.is_empty() {
-            return None; // nothing to pick → no interactive popup
-        }
-        let rows: Vec<Render> = self
-            .contexts
-            .iter()
-            .map(|c| {
-                let active = *c == self.current;
-                let label = text(if active {
-                    format!("\u{2713} {c}") // ✓ current
-                } else {
-                    format!("   {c}")
-                })
-                .color(if active { Token::Accent } else { Token::Fg });
-                // each row is a click target → makes the popup "interactive" (click-to-open)
-                mouse_area(format!("use:{c}"), container(label))
-            })
-            .collect();
-        Some(column(rows).spacing(3.0))
+        // the whole chip is a click target (opens the native picker) — wrap it in a mouse_area so
+        // the press reaches `update` as `Event::Pointer{Press}`.
+        mouse_area(
+            "chip",
+            row([
+                Icon::Kubernetes.view(14.0, Token::Accent),
+                text(label).color(color),
+            ])
+            .spacing(6.0),
+        )
     }
 }
 

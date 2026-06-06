@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text};
+use ezbar_plugin::iced::widget::{column, row, scrollable, text};
 use ezbar_plugin::iced::{Color, Element, Subscription};
 use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
@@ -93,10 +93,12 @@ impl Module for Claude {
                     .into(),
             );
         }
-        mouse_area(row(items).spacing(4).align_y(Vertical::Center))
-            .on_enter(ModMsg::new(Msg::Enter))
-            .on_exit(ModMsg::new(Msg::Leave))
-            .into()
+        // Bare chip — the host owns the full-height whole-pill hover (RFC 0017 §5).
+        row(items).spacing(4).align_y(Vertical::Center).into()
+    }
+
+    fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
+        Some((ModMsg::new(Msg::Enter), ModMsg::new(Msg::Leave)))
     }
 
     fn popup(&self, _ctx: &Ctx) -> Option<Element<'_, ModMsg>> {

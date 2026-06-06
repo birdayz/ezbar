@@ -13,3 +13,5 @@ Thumbs.db
 
 # Rust build artifacts in any (nested) crate
 target/
+# the redpanda cross-glibc container build output (RFC: deploy to johannes@redpanda)
+/target-deb

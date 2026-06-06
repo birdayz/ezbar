@@ -414,6 +414,13 @@ pub trait Ctx {
     /// guest is parked while the command runs.
     fn exec(&mut self, program: &str, args: &[&str], stdin: Option<&[u8]>)
         -> Result<ExecOutput, String>;
+    /// Open the bar's **native searchable picker** over `items` and block until the user picks
+    /// one (returns it) or dismisses (returns `None`). `current` is the index of the item to
+    /// mark `✓`. The picker — search field, fuzzy filtering, keyboard, focus, theming — is
+    /// rendered by the host in iced, so you never reimplement text input (RFC 0018). Like
+    /// [`exec`](Ctx::exec), the guest parks here while the user interacts, so call it from
+    /// `update` (an event handler), not `view`. Needs no capability grant (it reads/runs nothing).
+    fn pick(&mut self, prompt: &str, items: &[&str], current: Option<usize>) -> Option<String>;
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are

@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{SinkExt, Stream};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
+use iced::widget::{
+    button, column, container, mouse_area, row, scrollable, text, text_input, Space,
+};
 use iced::{
     event, window, Background, Border, Color, Element, Length, Padding, Subscription, Task,
 };
@@ -18,8 +20,97 @@ use ezbar::modules;
 use ezbar::sources::volume;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Reconfigure, ThemeTokens};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+
+/// RFC 0018: the bar end of the reactor's `pick()` channel. The receiver is parked here at
+/// startup (`set_pick_sink`) and `take()`n by the `pick_stream` subscription (which runs once).
+static PICK_RX: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ezbar_wasm::PickRequest>>> =
+    Mutex::new(None);
+/// Pending pick requests, FIFO. The native picker shows one at a time; a request arriving while
+/// one is open waits here until the current resolves (each plugin fiber parks per pick).
+static PENDING_PICKS: Mutex<VecDeque<ezbar_wasm::PickRequest>> = Mutex::new(VecDeque::new());
+
+/// Drain the reactor's `pick()` requests into the bar (RFC 0018). Runs once (recipe dedup); takes
+/// the receiver, queues each request, and pokes the bar to open the next picker.
+fn pick_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(4, |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
+        // Bind in a statement so the MutexGuard drops BEFORE any await (else the future is !Send).
+        let taken = PICK_RX.lock().unwrap().take();
+        let mut rx = match taken {
+            Some(rx) => rx,
+            None => {
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        while let Some(req) = rx.recv().await {
+            PENDING_PICKS.lock().unwrap().push_back(req);
+            if out.send(Message::PickReady).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// The bar's open native picker (RFC 0018) — a searchable list rendered in iced over a guest's
+/// `pick()` items, resolving the guest's `oneshot` on commit/dismiss.
+struct Picker {
+    id: window::Id,
+    instance: u64,
+    prompt: String,
+    items: Vec<String>,
+    current: Option<usize>,
+    query: String,
+    /// Selection index into the *filtered* list (the Enter target = the highlighted row).
+    sel: usize,
+    input_id: iced::advanced::widget::Id,
+    reply: tokio::sync::oneshot::Sender<Option<String>>,
+}
+
+impl Picker {
+    /// Indices into `items` matching the query (case-insensitive substring); all when empty.
+    fn filtered(&self) -> Vec<usize> {
+        filter_indices(&self.items, &self.query)
+    }
+}
+
+/// The picker's fuzzy filter (RFC 0018): indices of `items` containing `query`
+/// (case-insensitive); all of them when `query` is empty. Pure → unit-tested.
+fn filter_indices(items: &[String], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let q = query.to_lowercase();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.to_lowercase().contains(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Split a picker row label into match/non-match spans (RFC 0018 §6): the matched substring at
+/// full `fg`, the rest at `dim`. Case-insensitive, first occurrence; falls back to a plain dim
+/// label if the query isn't a clean byte-boundary substring (non-ASCII case-fold drift).
+fn highlight_row<'a>(label: &str, query: &str, fg: Color, dim: Color) -> Element<'a, Message> {
+    if query.is_empty() {
+        return text(label.to_string()).size(13).color(fg).into();
+    }
+    let ql = query.to_lowercase();
+    if let Some(start) = label.to_lowercase().find(&ql) {
+        let end = start + ql.len();
+        if label.is_char_boundary(start) && end <= label.len() && label.is_char_boundary(end) {
+            return row![
+                text(label[..start].to_string()).size(13).color(dim),
+                text(label[start..end].to_string()).size(13).color(fg),
+                text(label[end..].to_string()).size(13).color(dim),
+            ]
+            .into();
+        }
+    }
+    text(label.to_string()).size(13).color(dim).into()
+}
 
 // jemalloc as the global allocator. glibc malloc hoards freed pages in per-thread
 // arenas and only hands the top back via `malloc_trim`, so the bar's per-frame
@@ -39,7 +130,7 @@ mod registry;
 const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
     &["cpu", "memory", "temperature"],   // machine vitals
     &["ping", "github", "claude"],       // connectivity + dev
-    &["calendar", "kubectl", "spotify"], // work + media
+    &["calendar", "spotify"],            // work + media (kube context lives in the WASM plugin)
     &["stock", "volume", "battery"],     // status
     &["clock"],                          // time — a dedicated end-cap (switcher trails)
 ];
@@ -480,6 +571,14 @@ fn run_bar() -> iced_layershell::Result {
             title: s.title.clone(),
         }
     }));
+    // RFC 0018: wire the reactor's `pick()` host service to the bar's native picker. A plugin
+    // that calls `ctx.pick(...)` parks; the reactor pushes a `PickRequest` here, the bar renders
+    // the native searchable picker, and resolves the request's `oneshot` with the choice.
+    {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ezbar_wasm::PickRequest>();
+        ezbar_wasm::set_pick_sink(tx);
+        *PICK_RX.lock().unwrap() = Some(rx);
+    }
     let name = cfg
         .bar
         .font
@@ -547,7 +646,7 @@ impl iced::Executor for BoundedExecutor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopupKind {
     /// the ▾ preset switcher — the only host-owned popup; module popups (calendar,
-    /// stock, kubectl) go through the module-popup path (`HostRequest::OpenPopup`).
+    /// stock, …) go through the module-popup path (`HostRequest::OpenPopup`).
     Switcher,
 }
 
@@ -565,6 +664,9 @@ struct Bar {
     bars: Vec<BarSurface>,
     popup: Option<(window::Id, PopupKind)>,
     module_popup: Option<(window::Id, u64, PopupMode)>,
+    /// RFC 0018: the open native picker (`ctx.pick`), if any. One at a time; folded into the
+    /// one-popup discipline (opening it closes other popups; teardown closes it).
+    picker: Option<Picker>,
     modules: Vec<ModuleEntry>,
 
     // popup anchoring: last cursor x over a bar, so a popup opens above the
@@ -662,11 +764,36 @@ enum Message {
     Ipc(String),
     OpenPopup(PopupKind),
     ClosePopup,
-    /// Close the open module popup (e.g. a sticky picker) when the pointer leaves it.
-    CloseModulePopup,
+    /// A press landed on empty bar background while a popup was open → dismiss it
+    /// (menu semantics: click-outside closes). Deterministic — no hover/timer.
+    DismissPopups,
+    /// RFC 0018: a `pick()` request was queued by the reactor → open the picker if free.
+    PickReady,
+    /// The picker's search query changed (native `text_input`).
+    PickerQuery(String),
+    /// Move the picker selection by ±1 (arrow keys), clamped to the filtered set.
+    PickerMove(i32),
+    /// Mouse moved over the `n`-th filtered row → make it the selection (last input wins).
+    PickerHover(usize),
+    /// Commit the current picker selection (Enter).
+    PickerCommit,
+    /// Commit the `n`-th filtered row (mouse click).
+    PickerCommitIdx(usize),
+    /// Dismiss the picker without choosing (Esc / click-outside).
+    PickerDismiss,
     ConfigReloaded(Result<Config, String>),
     WindowClosed(window::Id),
     Cursor(window::Id, f32),
+    /// Second hop of opening a module popup: create its layer surface anchored to the pill's
+    /// real layout `bounds` (queried via a widget operation in `OpenPopup`) — deterministic,
+    /// vs. the one-event-stale `cursor_x` it used to read.
+    PlaceModulePopup {
+        instance: u64,
+        id: window::Id,
+        /// The pill's laid-out bounds if it was host-tagged; `None` for modules that hover
+        /// via their own `mouse_area` (then we fall back to the cursor anchor).
+        bounds: Option<iced::Rectangle>,
+    },
     /// A sway output appeared/disappeared/changed — reconcile the surface set.
     OutputsChanged,
     Noop,
@@ -674,6 +801,59 @@ enum Message {
         instance: u64,
         msg: ModMsg,
     },
+}
+
+/// Stable widget id for a module's pill, so a popup can query its laid-out bounds.
+fn pill_id(instance: u64) -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::from(format!("ezbar-pill-{instance}"))
+}
+
+/// The lone placeable **module** in a render group, ignoring host chrome (the `▾` switcher)
+/// that may ride along in the same group — so the default `["clock","switcher"]` end-cap
+/// still gives the clock whole-pill hover/click instead of falling through to no hover at all.
+/// `None` if the group holds zero or two-plus modules (whole-pill is single-module only).
+/// (Interim toward RFC 0017 §5's per-module wrapping.)
+fn sole_module(group: &[Placed]) -> Option<&Placed> {
+    let mut mods = group.iter().filter(|p| p.type_id != "switcher");
+    let only = mods.next()?;
+    mods.next().is_none().then_some(only)
+}
+
+/// A widget [`Operation`](iced::advanced::widget::Operation) that captures the layout bounds
+/// of the pill container whose id == `target`. This is how a whole-pill hover/click popup
+/// anchors to the pill's REAL geometry (ground truth, deterministic) rather than a
+/// one-event-stale cursor cache. iced has no synchronous "give me this widget's bounds", so
+/// it returns a `Task` resolved against the live widget tree — a frame's deferral to read
+/// truth, not a timing guess.
+///
+/// It **always** finishes with `Outcome::Some(self.found)` (an `Option`): modules that handle
+/// their own hover inside `view` (e.g. `stock` in a multi-module group) have no host-tagged
+/// pill, so `found` stays `None` and the caller falls back to the cursor anchor — otherwise
+/// an `Outcome::None` would yield no message at all and the popup would never open.
+struct PillBounds {
+    target: iced::advanced::widget::Id,
+    found: Option<iced::Rectangle>,
+}
+
+impl iced::advanced::widget::Operation<Option<iced::Rectangle>> for PillBounds {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(
+            &mut dyn iced::advanced::widget::Operation<Option<iced::Rectangle>>,
+        ),
+    ) {
+        operate(self); // keep descending into children
+    }
+
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
+        if id == Some(&self.target) {
+            self.found = Some(bounds);
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<Option<iced::Rectangle>> {
+        iced::advanced::widget::operation::Outcome::Some(self.found)
+    }
 }
 
 fn iced_layer(l: config::Layer) -> Layer {
@@ -981,6 +1161,8 @@ fn ipc_stream() -> impl Stream<Item = Message> {
 }
 
 const MODULE_POPUP_SIZE: (u32, u32) = (480, 400);
+/// Native picker surface size (RFC 0018): field + up to ~8 rows (the body caps + scrolls).
+const PICKER_SIZE: (u32, u32) = (320, 384);
 
 impl Bar {
     fn new() -> (Self, Task<Message>) {
@@ -1017,6 +1199,7 @@ impl Bar {
             bars,
             popup: None,
             module_popup: None,
+            picker: None,
             modules: build_modules(&config, &rt),
             cursor_x: 0.0,
             cursor_output: None,
@@ -1110,7 +1293,42 @@ impl Bar {
                 Task::batch([close_mod, open])
             }
             Message::ClosePopup => self.close_popup_task(),
-            Message::CloseModulePopup => self.close_module_popup_any(),
+            Message::DismissPopups => {
+                // `close_any_popup` dismisses the picker (sends `None`); then drain any queued
+                // pick (force-close paths don't go through `picker_resolve`, so they must drain
+                // explicitly or a second plugin's `pick` would hang parked — Torvalds).
+                let close = self.close_any_popup();
+                let next = self.open_next_picker();
+                Task::batch([close, next])
+            }
+            Message::PickReady => self.open_next_picker(),
+            Message::PickerQuery(q) => {
+                if let Some(p) = &mut self.picker {
+                    p.query = q;
+                    p.sel = 0; // first match becomes the Enter target
+                }
+                Task::none()
+            }
+            Message::PickerMove(d) => {
+                if let Some(p) = &mut self.picker {
+                    let n = p.filtered().len() as i32;
+                    if n > 0 {
+                        p.sel = (p.sel as i32 + d).rem_euclid(n) as usize;
+                    }
+                }
+                Task::none()
+            }
+            Message::PickerHover(i) => {
+                // last input wins: mouse-over sets the selection so there's only ever one
+                // highlighted row (no keyboard-vs-hover ambiguity).
+                if let Some(p) = &mut self.picker {
+                    p.sel = i;
+                }
+                Task::none()
+            }
+            Message::PickerCommit => self.picker_commit(None),
+            Message::PickerCommitIdx(i) => self.picker_commit(Some(i)),
+            Message::PickerDismiss => self.picker_resolve(None),
             Message::ConfigReloaded(Ok(cfg)) => {
                 log::info!("config reloaded");
                 self.apply_config(cfg)
@@ -1126,6 +1344,37 @@ impl Bar {
                     self.cursor_output = Some(b.output.clone());
                 }
                 Task::none()
+            }
+            Message::PlaceModulePopup {
+                instance,
+                id,
+                bounds,
+            } => {
+                // Only place it if it's still the active popup (the user may have moved on
+                // before the bounds query resolved).
+                match self.module_popup {
+                    Some((pid, inst, mode)) if pid == id && inst == instance => {
+                        let size = self
+                            .modules
+                            .iter()
+                            .find(|e| e.id == instance)
+                            .and_then(|e| e.module.popup_size())
+                            .unwrap_or(MODULE_POPUP_SIZE);
+                        // Anchor under the pill (ground-truth geometry) when it was host-tagged;
+                        // otherwise (module-internal hover, e.g. stock) fall back to the cursor.
+                        let anchor_x = bounds.map_or(self.cursor_x, |b| b.center_x());
+                        let left = self.popup_left_margin_at(size.0, anchor_x);
+                        Task::done(Message::NewLayerShell {
+                            settings: self.popup_settings(
+                                size,
+                                left,
+                                matches!(mode, PopupMode::Hover),
+                            ),
+                            id,
+                        })
+                    }
+                    _ => Task::none(),
+                }
             }
             Message::OutputsChanged => self.reconcile_surfaces(),
             Message::WindowClosed(id) => {
@@ -1155,6 +1404,15 @@ impl Bar {
                     if pid == id {
                         self.module_popup = None;
                     }
+                }
+                // The picker surface was closed (by us or the compositor): answer the parked
+                // guest with `None` if unresolved, and drain any queued pick (so a second
+                // plugin's parked `pick` doesn't hang — Torvalds).
+                if self.picker.as_ref().is_some_and(|p| p.id == id) {
+                    if let Some(p) = self.picker.take() {
+                        let _ = p.reply.send(None);
+                    }
+                    return self.open_next_picker();
                 }
                 Task::none()
             }
@@ -1211,19 +1469,19 @@ impl Bar {
                 let close_existing = self.close_any_popup();
                 let id = window::Id::unique();
                 self.module_popup = Some((id, instance, mode));
-                // a module may request a content-sized popup (e.g. a small wasm chart)
-                let size = self
-                    .modules
-                    .iter()
-                    .find(|e| e.id == instance)
-                    .and_then(|e| e.module.popup_size())
-                    .unwrap_or(MODULE_POPUP_SIZE);
-                let left = self.popup_left_margin(size.0);
-                let open = Task::done(Message::NewLayerShell {
-                    settings: self.popup_settings(size, left, matches!(mode, PopupMode::Hover)),
-                    id,
-                });
-                Task::batch([close_existing, open])
+                // Anchor to the pill's REAL layout bounds (see `PlaceModulePopup`): a widget
+                // operation reads the laid-out geometry of the pill's container — ground truth,
+                // deterministic under any load — instead of `cursor_x`, which is one event
+                // stale at this point (the pointer event that entered the pill hasn't had its
+                // `Cursor` update applied yet). Also centers the popup under the pill, not the
+                // cursor, so the same pill always opens in the same place.
+                let op = PillBounds {
+                    target: pill_id(instance),
+                    found: None,
+                };
+                let place = iced::advanced::widget::operate(op)
+                    .map(move |bounds| Message::PlaceModulePopup { instance, id, bounds });
+                Task::batch([close_existing, place])
             }
             HostRequest::ClosePopup => {
                 if let Some((pid, inst, _)) = self.module_popup {
@@ -1244,6 +1502,13 @@ impl Bar {
         }
         if let Some((pid, _, _)) = self.module_popup.take() {
             tasks.push(iced::window::close(pid));
+        }
+        // An open picker is part of the one-popup discipline (RFC 0017/0018): dismiss it with
+        // `None`. Closed flat (not via `picker_resolve`, which would re-open the next queued one
+        // and fight the popup being opened).
+        if let Some(p) = self.picker.take() {
+            let _ = p.reply.send(None);
+            tasks.push(iced::window::close(p.id));
         }
         Task::batch(tasks)
     }
@@ -1266,12 +1531,18 @@ impl Bar {
         }
     }
 
-    /// Left margin so a `popup_w`-wide popup is centered above the cursor (the widget
-    /// that triggered it), clamped so it always stays fully on the output — both
-    /// edges, so a right-anchored widget (e.g. the ▾ switcher) opens visibly.
-    fn popup_left_margin(&self, popup_w: u32) -> i32 {
+    /// Left margin so a `popup_w`-wide popup is centered on `anchor_x`, clamped so it always
+    /// stays fully on the output — both edges, so a right-anchored widget (e.g. the ▾
+    /// switcher) opens visibly.
+    fn popup_left_margin_at(&self, popup_w: u32, anchor_x: f32) -> i32 {
         let max_left = (self.screen_w as i32 - popup_w as i32).max(0);
-        (self.cursor_x as i32 - popup_w as i32 / 2).clamp(0, max_left)
+        (anchor_x as i32 - popup_w as i32 / 2).clamp(0, max_left)
+    }
+
+    /// Cursor-anchored variant for the hardcoded popups (switcher/volume) that have no pill
+    /// widget to query — they open under the cursor.
+    fn popup_left_margin(&self, popup_w: u32) -> i32 {
+        self.popup_left_margin_at(popup_w, self.cursor_x)
     }
 
     /// Layer-shell settings for a popup, anchored to the **same edge as the bar** so
@@ -1311,6 +1582,71 @@ impl Bar {
             output_option,
             namespace: Some("ezbar-popup".to_string()),
         }
+    }
+
+    /// Like [`popup_settings`](Self::popup_settings) but keyboard-interactive and opaque — the
+    /// native picker (RFC 0018) needs focus to type. `Exclusive` is the only interactivity that
+    /// grabs keyboard on map under wlr-layer-shell (`OnDemand` doesn't); the compositor restores
+    /// the prior focus when the surface closes.
+    fn picker_settings(&self, size: (u32, u32), left_margin: i32) -> NewLayerShellSettings {
+        let mut s = self.popup_settings(size, left_margin, false);
+        s.keyboard_interactivity = KeyboardInteractivity::Exclusive;
+        s.namespace = Some("ezbar-picker".to_string());
+        s
+    }
+
+    /// Open the next queued `pick()` request, if the picker is free (RFC 0018). One at a time:
+    /// requests arriving while a picker is open wait in `PENDING_PICKS`.
+    fn open_next_picker(&mut self) -> Task<Message> {
+        if self.picker.is_some() {
+            return Task::none();
+        }
+        let Some(req) = PENDING_PICKS.lock().unwrap().pop_front() else {
+            return Task::none();
+        };
+        let close = self.close_any_popup(); // one-popup discipline
+        let id = window::Id::unique();
+        let input_id = iced::advanced::widget::Id::unique();
+        let size = PICKER_SIZE;
+        let left = self.popup_left_margin(size.0);
+        self.picker = Some(Picker {
+            id,
+            instance: req.instance,
+            prompt: req.prompt,
+            items: req.items,
+            current: req.current.map(|c| c as usize),
+            query: String::new(),
+            sel: 0,
+            input_id: input_id.clone(),
+            reply: req.reply,
+        });
+        let open = Task::done(Message::NewLayerShell {
+            settings: self.picker_settings(size, left),
+            id,
+        });
+        Task::batch([close, open, iced::widget::operation::focus(input_id)])
+    }
+
+    /// Commit the picker selection: the `idx`-th filtered row (a click) or the current `sel`
+    /// (Enter), resolving the guest with the chosen item.
+    fn picker_commit(&mut self, idx: Option<usize>) -> Task<Message> {
+        let chosen = self.picker.as_ref().and_then(|p| {
+            let filtered = p.filtered();
+            let fi = idx.unwrap_or(p.sel);
+            filtered.get(fi).and_then(|&i| p.items.get(i)).cloned()
+        });
+        self.picker_resolve(chosen)
+    }
+
+    /// Resolve the open picker with `chosen` (or `None` to dismiss): answer the guest's `pick()`,
+    /// close the surface, and open the next queued request.
+    fn picker_resolve(&mut self, chosen: Option<String>) -> Task<Message> {
+        let Some(p) = self.picker.take() else {
+            return Task::none();
+        };
+        let _ = p.reply.send(chosen); // un-parks the guest's `pick().await`
+        let close = iced::window::close(p.id);
+        Task::batch([close, self.open_next_picker()])
     }
 
     fn open_popup(&self, kind: PopupKind) -> (window::Id, Task<Message>) {
@@ -1369,12 +1705,17 @@ impl Bar {
             // The same chip row renders on every output's bar surface.
             return self.bar_view();
         }
+        if let Some(p) = &self.picker {
+            if id == p.id {
+                return self.picker_view(p);
+            }
+        }
         if let Some((pid, kind)) = self.popup {
             if id == pid {
                 return self.popup_view(kind);
             }
         }
-        if let Some((pid, instance, mode)) = self.module_popup {
+        if let Some((pid, instance, _mode)) = self.module_popup {
             if id == pid {
                 if let Some(entry) = self.modules.iter().find(|e| e.id == instance) {
                     let ctx = Ctx {
@@ -1383,21 +1724,163 @@ impl Bar {
                     };
                     if let Some(content) = entry.module.popup(&ctx) {
                         let mapped = content.map(move |m| Message::ModuleMsg { instance, msg: m });
-                        // A sticky (click-opened) popup, e.g. a picker, doesn't close on chip-
-                        // leave — so close it when the pointer leaves the popup surface itself.
-                        let body = if matches!(mode, PopupMode::Click) {
-                            mouse_area(self.wrap_popup(mapped))
-                                .on_exit(Message::CloseModulePopup)
-                                .into()
-                        } else {
-                            self.wrap_popup(mapped)
-                        };
-                        return body;
+                        // A sticky (click-opened) popup, e.g. a picker, is a menu: it does NOT
+                        // track hover. It stays put until a deterministic dismiss — re-click the
+                        // chip (host toggles), open another popup, or click outside (the bar's
+                        // `DismissPopups`). Both popup kinds just render here.
+                        return self.wrap_popup(mapped);
                     }
                 }
             }
         }
         Space::new().into()
+    }
+
+    /// The native searchable picker (RFC 0018 §6): an always-focused search field (inset well, no
+    /// ring), an accent under-rule, and a scrollable list with split-run match highlight, a fixed
+    /// `✓` slot, and a single highlighted (selected) row carrying a 3px accent edge + wash + `↵`.
+    fn picker_view<'a>(&'a self, p: &'a Picker) -> Element<'a, Message> {
+        let fg = ThemeTokens::color(self.theme.fg);
+        let dim = Color { a: 0.45, ..fg }; // wider contrast than theme fg_dim (r/unixporn)
+        let fgdim = ThemeTokens::color(self.theme.fg_dim);
+        let accent = ThemeTokens::color(self.theme.accent);
+        let filtered = p.filtered();
+
+        // ── search field — inset well, magnifier, n/m count, styled native text_input ──
+        let input = text_input(&p.prompt, &p.query)
+            .id(p.input_id.clone())
+            .on_input(Message::PickerQuery)
+            .on_submit(Message::PickerCommit)
+            .size(15)
+            .padding(0)
+            .style(move |_t, _s| text_input::Style {
+                background: Background::Color(Color::TRANSPARENT),
+                border: Border {
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: 0.0.into(),
+                },
+                icon: fgdim,
+                placeholder: fgdim,
+                value: fg,
+                selection: Color { a: 0.20, ..accent },
+            });
+        let count = text(format!("{}/{}", filtered.len(), p.items.len()))
+            .size(11)
+            .color(fgdim);
+        let field = container(
+            row![
+                text("\u{f002}").size(13).color(fgdim), // nf magnifier
+                input,
+                count,
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+        )
+        .padding([9, 12])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(Color { a: 0.06, ..fg })),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        });
+
+        // ── the list ──
+        let mut rows: Vec<Element<Message>> = Vec::new();
+        if filtered.is_empty() {
+            let msg = if p.items.is_empty() {
+                "no items".to_string()
+            } else {
+                format!("no match for \u{201c}{}\u{201d}", p.query)
+            };
+            rows.push(
+                container(text(msg).size(13).color(fgdim))
+                    .center_x(Length::Fill)
+                    .padding([16, 0])
+                    .into(),
+            );
+        } else {
+            for (fi, &i) in filtered.iter().enumerate() {
+                let selected = fi == p.sel;
+                let is_current = p.current == Some(i);
+                let check: Element<Message> = if is_current {
+                    text("\u{f00c}").size(11).color(accent).into() // nf check
+                } else {
+                    Space::new().into()
+                };
+                let tail: Element<Message> = if selected {
+                    text("\u{21b5}").size(11).color(fgdim).into() // ↵
+                } else {
+                    Space::new().into()
+                };
+                let inner = row![
+                    container(check).width(Length::Fixed(16.0)),
+                    highlight_row(&p.items[i], &p.query, fg, dim),
+                    Space::new().width(Length::Fill),
+                    tail,
+                ]
+                .spacing(6)
+                .align_y(Vertical::Center);
+                let edge = if selected { accent } else { Color::TRANSPARENT };
+                let wash = selected.then_some(Background::Color(Color { a: 0.10, ..accent }));
+                let body = container(
+                    row![
+                        container(Space::new())
+                            .width(Length::Fixed(3.0))
+                            .height(Length::Fill) // span the row, even when a long name wraps
+                            .style(move |_| container::Style {
+                                background: Some(Background::Color(edge)),
+                                border: Border {
+                                    radius: 1.5.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                        container(inner).padding([6, 8]).width(Length::Fill),
+                    ]
+                    .align_y(Vertical::Center),
+                )
+                .style(move |_| container::Style {
+                    background: wash,
+                    border: Border {
+                        radius: 6.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+                rows.push(
+                    mouse_area(body)
+                        .interaction(iced::mouse::Interaction::Pointer)
+                        .on_enter(Message::PickerHover(fi))
+                        .on_press(Message::PickerCommitIdx(fi))
+                        .into(),
+                );
+            }
+        }
+        let list = scrollable(column(rows).spacing(2)).height(Length::Fill);
+
+        // accent under-rule (the field is always focused → accent, not sep)
+        let rule = container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |_| container::Style {
+                background: Some(Background::Color(Color { a: 0.85, ..accent })),
+                ..Default::default()
+            });
+
+        let body = column![field, rule, list].spacing(8);
+        let chrome = container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(12)
+            .style(self.popup_style());
+        // Move the pointer off the picker surface → dismiss (the `on_exit` only fires after the
+        // cursor was over it, so it never self-closes on open). Esc, click-outside, and select
+        // also dismiss; this is the "moved away → cancel" the user expects.
+        mouse_area(chrome).on_exit(Message::PickerDismiss).into()
     }
 
     /// Render an RFC 0001 module by its `id` (looked up in the live module list).
@@ -1480,10 +1963,25 @@ impl Bar {
     /// chrome by `type_id`, with `[theme].spacing` between them and the configured
     /// separator mark interposed (never before the `▾` switcher).
     fn build_widgets(&self, items: &[Placed]) -> Element<'_, Message> {
+        // When a group holds ≥2 modules, the single-module `with_pill_hover` on the group cell
+        // can't target one of them — so the host wraps EACH module per-module in a full-height
+        // hover/click cell (RFC 0017 §5), reaching the bar's top/bottom edge (Fitts) even
+        // inside a shared group. Single-module groups still use the cell-level wrap (which, in
+        // islands, also covers the float so it reaches the very screen edge).
+        let module_count = items
+            .iter()
+            .filter(|p| self.modules.iter().any(|e| e.name == p.key))
+            .count();
         let mut out: Vec<Element<Message>> = Vec::new();
         for p in items {
             let el = if self.modules.iter().any(|e| e.name == p.key) {
-                self.render_module(&p.key)
+                self.render_module(&p.key).map(|el| {
+                    if module_count >= 2 {
+                        self.wrap_pill_interaction(&p.key, el)
+                    } else {
+                        el
+                    }
+                })
             } else {
                 self.render_widget(&p.type_id)
             };
@@ -1502,12 +2000,43 @@ impl Bar {
             .into()
     }
 
+    /// Per-module hover/click wrap (RFC 0017 §5): give one module a **full-height** hit cell
+    /// (so its hover/click target reaches the bar's top & bottom edges — Fitts) plus the
+    /// anchor tag, even when it shares a group with other modules. The chip stays vertically
+    /// centered; only the invisible hit area grows. A module that declares no trigger passes
+    /// through unwrapped (it owns its own input, e.g. `volume` scroll).
+    fn wrap_pill_interaction<'a>(
+        &self,
+        key: &str,
+        el: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        use iced::mouse::Interaction::Pointer;
+        let Some(entry) = self.modules.iter().find(|e| e.name == key) else {
+            return el;
+        };
+        let instance = entry.id;
+        if let Some((enter, leave)) = entry.module.hover_messages() {
+            return mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
+                .interaction(Pointer)
+                .on_enter(Message::ModuleMsg { instance, msg: enter })
+                .on_exit(Message::ModuleMsg { instance, msg: leave })
+                .into();
+        }
+        if let Some(click) = entry.module.click_message() {
+            return mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
+                .interaction(Pointer)
+                .on_press(Message::ModuleMsg { instance, msg: click })
+                .into();
+        }
+        el
+    }
+
     /// If `group` is a single module that opted into whole-pill hover
     /// ([`Module::hover_messages`]), return its `(instance, enter, leave)` so the
     /// bar can wrap the styled pill in one `mouse_area`. `None` for multi-widget
     /// groups (the target would be ambiguous) and modules that didn't opt in.
     fn pill_hover(&self, group: &[Placed]) -> Option<(u64, ModMsg, ModMsg)> {
-        let [only] = group else { return None };
+        let only = sole_module(group)?;
         let entry = self.modules.iter().find(|e| e.name == only.key)?;
         let (enter, leave) = entry.module.hover_messages()?;
         Some((entry.id, enter, leave))
@@ -1529,14 +2058,22 @@ impl Bar {
         // compositor default (which read as a text I-beam on the popup picker).
         use iced::mouse::Interaction::Pointer;
         if let Some((instance, enter, leave)) = self.pill_hover(group) {
-            return mouse_area(widgets)
+            // Tag the pill with a stable Id so the popup can anchor to its real layout
+            // bounds (deterministic), not a one-event-stale cursor cache. See `PillBounds`.
+            // `height(Fill)` is load-bearing: the pill cell is full-height for Fitts's law
+            // (slamming the cursor to the screen edge still lands on the bar); a default
+            // `Shrink` container would collapse that hit area to the glyphs and kill the
+            // top-edge hover.
+            let tagged = container(widgets).id(pill_id(instance)).height(Length::Fill);
+            return mouse_area(tagged)
                 .interaction(Pointer)
                 .on_enter(Message::ModuleMsg { instance, msg: enter })
                 .on_exit(Message::ModuleMsg { instance, msg: leave })
                 .into();
         }
         if let Some((instance, click)) = self.pill_click(group) {
-            return mouse_area(widgets)
+            let tagged = container(widgets).id(pill_id(instance)).height(Length::Fill);
+            return mouse_area(tagged)
                 .interaction(Pointer)
                 .on_press(Message::ModuleMsg { instance, msg: click })
                 .into();
@@ -1547,9 +2084,23 @@ impl Bar {
     /// Like [`pill_hover`](Self::pill_hover) but for a single module that opts into whole-pill
     /// **click**-to-open (an interactive popup) via [`Module::click_message`].
     fn pill_click(&self, group: &[Placed]) -> Option<(u64, ModMsg)> {
-        let [only] = group else { return None };
+        let only = sole_module(group)?;
         let entry = self.modules.iter().find(|e| e.name == only.key)?;
         Some((entry.id, entry.module.click_message()?))
+    }
+
+    /// Click-outside dismiss (RFC 0001, menu semantics): wrap the bar so a press that
+    /// reaches the bar *background* closes any open popup. A chip's own `mouse_area`/`button`
+    /// captures the press first (iced stops propagation), so this fires only on the bare bar
+    /// — clicking a chip still toggles/opens as normal; `DismissPopups` is a no-op when
+    /// nothing is open.
+    ///
+    /// CRITICAL: this wrap is UNCONDITIONAL. It must not depend on popup state — making the
+    /// widget-tree *shape* change when a popup opens resets the inner pill's hover state,
+    /// which fires a spurious `on_exit` → closes the hover popup → unwraps → `on_enter` →
+    /// reopens … a flicker loop at frame rate. A constant tree shape keeps hover stable.
+    fn arm_dismiss<'a>(&self, content: Element<'a, Message>) -> Element<'a, Message> {
+        mouse_area(content).on_press(Message::DismissPopups).into()
     }
 
     fn bar_view(&self) -> Element<'_, Message> {
@@ -1654,20 +2205,22 @@ impl Bar {
                 right_pills.push(self.with_pill_hover(g, cell.into()));
             }
             let right_cluster = row(right_pills).align_y(Vertical::Center);
-            container(
-                row![
-                    ws_pill,
-                    Space::new().width(Length::Fill),
-                    title_pill,
-                    Space::new().width(Length::Fill),
-                    right_cluster,
-                ]
-                .align_y(Vertical::Center),
+            self.arm_dismiss(
+                container(
+                    row![
+                        ws_pill,
+                        Space::new().width(Length::Fill),
+                        title_pill,
+                        Space::new().width(Length::Fill),
+                        right_cluster,
+                    ]
+                    .align_y(Vertical::Center),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([0, 10])
+                .into(),
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding([0, 10])
-            .into()
         } else {
             // Solid slab: one run, groups joined by a divider in a `group_gap` (the
             // separator mark, or a hairline when no explicit style), widgets within a
@@ -1721,11 +2274,13 @@ impl Bar {
                 .align_x(Horizontal::Right)
                 .center_y(Length::Fill)
                 .padding([0, 8]);
-            container(row![left_c, center_c, right_c].align_y(Vertical::Center))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding([0, 8])
-                .into()
+            self.arm_dismiss(
+                container(row![left_c, center_c, right_c].align_y(Vertical::Center))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding([0, 8])
+                    .into(),
+            )
         }
     }
 
@@ -1985,14 +2540,29 @@ impl Bar {
             e.module.shutdown();
         }
         self.modules = next;
+        let mut tasks = Vec::new();
         // A module popup whose owner no longer exists must close.
         if let Some((pid, inst, _)) = self.module_popup {
             if !self.modules.iter().any(|e| e.id == inst) {
                 self.module_popup = None;
-                return iced::window::close(pid);
+                tasks.push(iced::window::close(pid));
             }
         }
-        Task::none()
+        // A picker whose owning plugin was torn down (Reconstruct/removed) while parked must close
+        // (its guest fiber aborted; the `reply` drop is harmless) — else a dangling overlay with a
+        // stolen keyboard grab remains (RFC 0018, Torvalds teardown).
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| !self.modules.iter().any(|e| e.id == p.instance))
+        {
+            if let Some(p) = self.picker.take() {
+                let _ = p.reply.send(None);
+                tasks.push(iced::window::close(p.id));
+            }
+            tasks.push(self.open_next_picker()); // drain a queued pick (Torvalds)
+        }
+        Task::batch(tasks)
     }
 
     /// Bump an instance's subscription generation so iced re-rolls its recipes.
@@ -2072,10 +2642,26 @@ impl Bar {
             Subscription::run(config_stream),
             Subscription::run(ipc_stream),
             Subscription::run(outputs_stream),
+            Subscription::run(pick_stream), // RFC 0018: reactor pick() requests → the bar
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::Cursor(id, position.x))
+                }
+                // RFC 0018: ↑/↓/Esc drive the native picker. Only the picker surface is
+                // keyboard-interactive (`Exclusive`), so these only fire while it's focused;
+                // the handlers no-op when no picker is open. Enter rides text_input's on_submit.
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(n),
+                    ..
+                }) => {
+                    use iced::keyboard::key::Named;
+                    match n {
+                        Named::ArrowUp => Some(Message::PickerMove(-1)),
+                        Named::ArrowDown => Some(Message::PickerMove(1)),
+                        Named::Escape => Some(Message::PickerDismiss),
+                        _ => None,
+                    }
                 }
                 _ => None,
             }),
@@ -2291,6 +2877,58 @@ mod tests {
         assert!(desired_module_specs(&cfg)
             .iter()
             .all(|s| modules::is_module(&s.type_id)));
+    }
+
+    #[test]
+    fn picker_filter_is_case_insensitive_substring() {
+        let items: Vec<String> = ["gke_PROD_eu", "minikube", "gke_dev_us", "docker-desktop"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // empty query → everything, in order
+        assert_eq!(filter_indices(&items, ""), vec![0, 1, 2, 3]);
+        // case-insensitive substring
+        assert_eq!(filter_indices(&items, "gke"), vec![0, 2]);
+        assert_eq!(filter_indices(&items, "PROD"), vec![0]);
+        assert_eq!(filter_indices(&items, "prod"), vec![0]); // fold both ways
+        assert_eq!(filter_indices(&items, "k"), vec![0, 1, 2, 3]); // every item has a 'k'
+        // no match → empty (the picker shows its no-match state)
+        assert!(filter_indices(&items, "zzz").is_empty());
+    }
+
+    #[test]
+    fn highlight_row_never_panics() {
+        // defensive: weird queries / unicode must not slice on a non-char-boundary.
+        let fg = Color::WHITE;
+        let dim = Color { a: 0.4, ..fg };
+        for (label, q) in [
+            ("café-prod", "é"),
+            ("café-prod", "PROD"),
+            ("İstanbul", "i"),
+            ("plain", ""),
+            ("plain", "xyz"),
+        ] {
+            let _ = highlight_row(label, q, fg, dim); // must not panic
+        }
+    }
+
+    #[test]
+    fn sole_module_ignores_switcher_chrome() {
+        let m = |k: &str, t: &str| Placed {
+            key: k.into(),
+            type_id: t.into(),
+            config: empty_cfg(),
+        };
+        // the default end-cap `["clock", switcher]` → the clock is still the lone module, so it
+        // gets whole-pill hover (the regression: the trailing ▾ used to kill clock hover).
+        let g = [m("clock", "clock"), m("switcher", "switcher")];
+        assert_eq!(sole_module(&g).map(|p| p.key.as_str()), Some("clock"));
+        // a genuine two-module group is NOT a whole-pill target.
+        let g2 = [m("stock", "stock"), m("volume", "volume")];
+        assert!(sole_module(&g2).is_none());
+        // chrome alone resolves to no module.
+        let g3 = [m("switcher", "switcher")];
+        assert!(sole_module(&g3).is_none());
     }
 
     #[test]

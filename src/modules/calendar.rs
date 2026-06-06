@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Local};
 use ezbar_plugin::iced::alignment::{Horizontal, Vertical};
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{column, container, mouse_area, row, scrollable, text, Space};
+use ezbar_plugin::iced::widget::{column, container, row, scrollable, text, Space};
 use ezbar_plugin::iced::{Background, Border, Color, Element, Length, Subscription};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
@@ -112,10 +112,12 @@ impl Module for Calendar {
             .into()
         };
 
-        mouse_area(chip)
-            .on_enter(ModMsg::new(Msg::Enter))
-            .on_exit(ModMsg::new(Msg::Leave))
-            .into()
+        // Bare chip — the host owns the full-height whole-pill hover (RFC 0017 §5).
+        chip
+    }
+
+    fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
+        Some((ModMsg::new(Msg::Enter), ModMsg::new(Msg::Leave)))
     }
 
     fn popup(&self, ctx: &Ctx) -> Option<Element<'_, ModMsg>> {

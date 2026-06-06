@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{canvas, mouse_area, row, text};
+use ezbar_plugin::iced::widget::{canvas, row, text};
 use ezbar_plugin::iced::{Color, Element, Length, Subscription};
 use ezbar_plugin::ui::graph::{MiniTrend, StockChart};
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
@@ -97,10 +97,14 @@ impl Module for Stock {
             );
         }
         parts.push(text(rest).color(color).into());
-        mouse_area(row(parts).spacing(8).align_y(Vertical::Center))
-            .on_enter(ModMsg::new(Msg::Enter))
-            .on_exit(ModMsg::new(Msg::Leave))
-            .into()
+        // Bare chip — the host owns the (full-height, whole-pill) hover surface via
+        // `hover_messages` (RFC 0017 §5), so the chip no longer self-wires a content-height
+        // `mouse_area` that couldn't reach the screen edge.
+        row(parts).spacing(8).align_y(Vertical::Center).into()
+    }
+
+    fn hover_messages(&self) -> Option<(ModMsg, ModMsg)> {
+        Some((ModMsg::new(Msg::Enter), ModMsg::new(Msg::Leave)))
     }
 
     fn popup(&self, _ctx: &Ctx) -> Option<Element<'_, ModMsg>> {
