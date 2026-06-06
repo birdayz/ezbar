@@ -483,7 +483,12 @@ fn mk_text(content: String, pos: Point, color: Color, size: f32, weight: Weight)
 /// segment, ready to feed to `bezier_curve_to`.
 fn smooth_controls(pts: &[Point], y_lo: f32, y_hi: f32) -> Vec<(Point, Point, Point)> {
     let n = pts.len();
-    let clamp = |p: Point| Point::new(p.x, p.y.clamp(y_lo, y_hi));
+    // Normalise the band before clamping: a caller that passes an inverted plot area (y_lo > y_hi,
+    // e.g. a chart shorter than its header inset) must NOT panic — a canvas `draw` panic isn't
+    // contained by the host and would take the whole bar down. `f32::clamp(lo, hi)` panics when
+    // lo > hi, so order them first.
+    let (lo, hi) = (y_lo.min(y_hi), y_lo.max(y_hi));
+    let clamp = |p: Point| Point::new(p.x, p.y.clamp(lo, hi));
     (0..n.saturating_sub(1))
         .map(|i| {
             let p0 = pts[i.saturating_sub(1)];
@@ -737,7 +742,9 @@ impl<Message> canvas::Program<Message> for StockChart {
                     .with_width(1.2)
                     .with_color(with_alpha(Color::WHITE, 0.55)),
             );
-            let lx = p.x.clamp(x0 + 22.0, x1 - 22.0);
+            // order the bounds so a narrow plot (x1 - 22 < x0 + 22) can't panic the clamp.
+            let (lxa, lxb) = (x0 + 22.0, x1 - 22.0);
+            let lx = p.x.clamp(lxa.min(lxb), lxa.max(lxb));
             // keep the callout in the plot band; flip across the marker if its
             // natural side would run into the header or the footer row
             let ly = if above {
@@ -854,5 +861,23 @@ mod tests {
             ..g
         };
         assert_eq!(t.seg_color(cpu_color, 90.0), Color::from_rgb(1.0, 0.2, 0.2));
+    }
+
+    #[test]
+    fn smooth_controls_survives_inverted_band() {
+        // Regression: a chart shorter than the header inset gives y_lo > y_hi, which used to
+        // panic `clamp(54, 0)` inside a canvas draw and crash the whole bar. It must now produce
+        // in-band control points instead of panicking.
+        let pts = [
+            Point::new(0.0, 5.0),
+            Point::new(10.0, 20.0),
+            Point::new(20.0, 3.0),
+        ];
+        let segs = smooth_controls(&pts, 54.0, 0.0); // inverted band — the real crash input
+        assert_eq!(segs.len(), pts.len() - 1);
+        for (c1, c2, _) in &segs {
+            assert!((0.0..=54.0).contains(&c1.y), "c1.y {} out of band", c1.y);
+            assert!((0.0..=54.0).contains(&c2.y), "c2.y {} out of band", c2.y);
+        }
     }
 }
