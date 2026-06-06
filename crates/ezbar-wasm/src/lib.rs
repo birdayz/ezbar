@@ -2096,7 +2096,7 @@ pub fn discover(dir: &Path) -> Vec<(String, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
-    use super::host_matches;
+    use super::*;
 
     #[test]
     fn host_grant_is_case_insensitive_and_port_agnostic() {
@@ -2125,5 +2125,114 @@ mod tests {
         assert!(!host_matches("example.com", "evil.com"));
         assert!(!host_matches("example.com", "sub.example.com")); // no implicit subdomain
         assert!(!host_matches("", "example.com"));
+    }
+
+    // ── render arena (RFC 0006/0009) ──────────────────────────────────────────
+
+    fn txt(s: &str, size: Option<f32>) -> LNode {
+        LNode::Text {
+            content: s.into(),
+            color: Paint::Token(0),
+            size,
+        }
+    }
+
+    #[test]
+    fn check_fwd_requires_children_before_parent() {
+        // `lower()` emits post-order, so a child index must precede its parent's.
+        assert_eq!(check_fwd(5, 3), Ok(3));
+        assert!(check_fwd(5, 5).is_err()); // self-reference
+        assert!(check_fwd(5, 6).is_err()); // forward ref / cycle
+    }
+
+    #[test]
+    fn popup_interactive_only_when_a_mouse_area_is_present() {
+        // A display popup (RFC 0017): text/spacer only → hover-driven, NOT interactive.
+        let display = Lifted {
+            nodes: vec![LNode::Spacer(4.0), txt("weather", None)],
+            root: 1,
+        };
+        assert!(!popup_is_interactive(&display));
+
+        // An interactive popup: a `mouse-area` anywhere in the arena → click-driven (a picker).
+        let interactive = Lifted {
+            nodes: vec![
+                txt("row", None),
+                LNode::MouseArea {
+                    child: 0,
+                    id: "ctx".into(),
+                },
+            ],
+            root: 1,
+        };
+        assert!(popup_is_interactive(&interactive));
+    }
+
+    #[test]
+    fn measure_row_sums_width_and_takes_max_height() {
+        // two "ab" texts (2 chars, size 10) joined by 5px spacing.
+        let l = Lifted {
+            nodes: vec![
+                txt("ab", Some(10.0)),
+                txt("ab", Some(10.0)),
+                LNode::Row {
+                    children: vec![0, 1],
+                    spacing: 5.0,
+                    align: 0,
+                },
+            ],
+            root: 2,
+        };
+        let (w, h) = measure(&l, 2);
+        // per text: 2 * 10 * 0.55 = 11.0 wide, 10 * 1.4 = 14.0 tall.
+        assert!((w - (11.0 + 11.0 + 5.0)).abs() < 1e-3, "w={w}");
+        assert!((h - 14.0).abs() < 1e-3, "h={h}");
+    }
+
+    #[test]
+    fn measure_column_stacks_height_and_takes_max_width() {
+        let l = Lifted {
+            nodes: vec![
+                txt("a", Some(10.0)),   // 1*10*0.55 = 5.5 wide
+                txt("abc", Some(10.0)), // 3*10*0.55 = 16.5 wide
+                LNode::Column {
+                    children: vec![0, 1],
+                    spacing: 4.0,
+                    align: 0,
+                },
+            ],
+            root: 2,
+        };
+        let (w, h) = measure(&l, 2);
+        assert!((w - 16.5).abs() < 1e-3, "w={w}"); // widest child
+        assert!((h - (14.0 + 14.0 + 4.0)).abs() < 1e-3, "h={h}"); // stacked + spacing
+    }
+
+    #[test]
+    fn measure_container_pads_both_sides_and_leaves_size() {
+        let l = Lifted {
+            nodes: vec![
+                LNode::Chart {
+                    values: vec![1.0, 2.0],
+                    line: Paint::Token(2),
+                    width: 100.0,
+                    height: 30.0,
+                },
+                LNode::Container {
+                    child: 0,
+                    padding: 4.0,
+                },
+            ],
+            root: 1,
+        };
+        // Chart is a fixed-size leaf; the container adds padding on both sides.
+        assert_eq!(measure(&l, 0), (100.0, 30.0));
+        assert_eq!(measure(&l, 1), (108.0, 38.0));
+        // a mouse-area is layout-transparent (passes its child's size through).
+        let ma = Lifted {
+            nodes: vec![LNode::Spacer(12.0), LNode::MouseArea { child: 0, id: "x".into() }],
+            root: 1,
+        };
+        assert_eq!(measure(&ma, 1), (12.0, 0.0));
     }
 }
