@@ -10,7 +10,7 @@
 //! `ezbar_harness::run(Box::new(MyModule::new(0)))`. See the `ezbar-plugin-author`
 //! skill and `crates/ezbar-harness/examples/counter.rs`.
 
-use ezbar::modules::{calendar::Calendar, claude::Claude, cpu::Cpu, github::GitHub};
+use ezbar::modules::{calendar::Calendar, claude::Claude, clock::Clock, cpu::Cpu, github::GitHub};
 use ezbar_plugin::Module;
 
 fn main() -> ezbar_plugin::iced::Result {
@@ -21,6 +21,15 @@ fn main() -> ezbar_plugin::iced::Result {
         "github" => vec![Box::new(GitHub::new(0))],
         "claude" => vec![Box::new(Claude::new(0))],
         "calendar" => vec![Box::new(Calendar::new(0))],
+        "clock" => {
+            // CLOCK_CAL=hover|click picks which popup to preview (default click = full grid).
+            let mut t = toml::value::Table::new();
+            t.insert(
+                "calendar".into(),
+                toml::Value::String(std::env::var("CLOCK_CAL").unwrap_or_else(|_| "click".into())),
+            );
+            vec![Box::new(Clock::new(0, &toml::Value::Table(t)))]
+        }
         "all" => vec![
             Box::new(Cpu::new(0, &cfg)),
             Box::new(GitHub::new(1)),
