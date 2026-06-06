@@ -26,7 +26,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 use ezbar_plugin::iced::advanced::subscription::{from_recipe, EventStream, Hasher, Recipe};
 use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
 use ezbar_plugin::iced::{alignment, Color, Element, Length, Subscription};
-use ezbar_plugin::ui::graph::{Graph, GraphKind, StockChart};
+use ezbar_plugin::ui::graph::{Graph, GraphKind, MiniTrend};
 use ezbar_plugin::{icons, Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 // RFC 0008: async world — host imports are async (http_get suspends the guest's
@@ -551,6 +551,7 @@ enum LNode {
     },
     Chart {
         values: Vec<f64>,
+        line: Paint,
         width: f32,
         height: f32,
     },
@@ -642,6 +643,7 @@ fn lift_node(n: &Node, idx: u32) -> Result<LNode, String> {
         },
         N::Chart(c) => LNode::Chart {
             values: c.values.clone(),
+            line: paint(&c.line),
             width: c.width,
             height: c.height,
         },
@@ -2049,14 +2051,21 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
         .width(Length::Fixed(48.0))
         .height(Length::Fixed(16.0))
         .into(),
-        // the high-fidelity stock-popup renderer (smoothed gradient area chart)
+        // Generic smoothed gradient-area sparkline (RFC 0009): honours the plugin's
+        // `line` colour, sizes to any width/height, and carries NO stock chrome ($-labels,
+        // price badge, fixed header inset). `StockChart` *looked* high-fidelity but baked in
+        // a 54px header — at a 30px-tall plugin chart its plot area inverted and it panicked
+        // (`clamp(54,0)`), taking the whole bar down. `MiniTrend` is the bar's own GPU-graph
+        // identity (smoothed bézier + gradient fill + end-cap dot), crash-safe at any size.
         LNode::Chart {
             values,
+            line,
             width,
             height,
-        } => canvas(StockChart {
+        } => canvas(MiniTrend {
             values: values.clone(),
-            symbol: String::new(),
+            color: paint_color(line, ctx),
+            bg: ctx.bg(),
         })
         .width(Length::Fixed(*width))
         .height(Length::Fixed(*height))
