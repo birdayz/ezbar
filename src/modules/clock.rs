@@ -145,9 +145,13 @@ impl Module for Clock {
     fn popup_size(&self) -> Option<(u32, u32)> {
         // grid width + the host's 12px popup padding on each side + a little breathing room.
         let w = (self.grid_w() + 40.0) as u32;
+        // Height is content-tight (the host top-aligns the content in a fixed surface, so any
+        // surplus shows as a dead band at the bottom). Both share the 6-week grid (200px) + the
+        // host's 24px vertical padding; they differ only in the header above it: a 28px chevron
+        // row (click) vs. a 36px two-line date block (hover).
         match self.trigger {
-            Trigger::Click => Some((w, 320)),
-            Trigger::Hover => Some((w, 184)),
+            Trigger::Click => Some((w, 270)),
+            Trigger::Hover => Some((w, 284)),
             Trigger::Off => None,
         }
     }
@@ -175,30 +179,12 @@ impl Clock {
         7.0 * CELL + if self.week_numbers { WK_W } else { 0.0 }
     }
 
-    /// The sticky click popup: a navigable month grid (fixed 6 rows so the popup never
-    /// changes height on `‹ ›`), ISO week-number column, today disc, alpha-recessive
-    /// weekend / adjacent-month days.
-    fn month_view(&self, pal: Pal) -> Element<'_, ModMsg> {
-        let today = Local::now().date_naive();
-        let shown = self.shown_month;
-
-        // ‹  JUNE 2026  ›  — clicking the label jumps back to today.
-        let label = mouse_area(
-            text(shown.format("%B %Y").to_string().to_uppercase())
-                .size(14)
-                .color(pal.fg),
-        )
-        .interaction(Interaction::Pointer)
-        .on_press(ModMsg::new(Msg::Today));
-        let header = row![
-            chev("\u{2039}", Msg::PrevMonth, pal),
-            Space::new().width(Length::Fill),
-            label,
-            Space::new().width(Length::Fill),
-            chev("\u{203A}", Msg::NextMonth, pal),
-        ]
-        .align_y(Vertical::Center);
-
+    /// The weekday-initials header + a fixed **6-week** grid of day cells for the month whose
+    /// first day is `shown` (so the popup never changes height). Shared by the navigable click
+    /// popup and the read-only hover card so the month looks identical in both — only the chrome
+    /// above it differs (chevrons vs. the date line). Today is disced; weekend and adjacent-month
+    /// days are alpha-recessive; an optional ISO week-number column leads each row.
+    fn month_grid(&self, shown: NaiveDate, today: NaiveDate, pal: Pal) -> Element<'_, ModMsg> {
         // weekday initials, aligned to the day columns (week-# spacer first).
         let mut hdr: Vec<Element<ModMsg>> = Vec::new();
         if self.week_numbers {
@@ -244,18 +230,49 @@ impl Clock {
             }
             weeks.push(row(cells).align_y(Vertical::Center).into());
         }
+        column![row(hdr), column(weeks)].spacing(6).into()
+    }
 
-        let grid = column![header, rule(pal.sep, 1.0), row(hdr), column(weeks)]
-            .spacing(6)
-            .width(Length::Fixed(self.grid_w()));
+    /// The sticky click popup: the month grid under a `‹ MONTH YEAR ›` header — chevrons page
+    /// months, the label jumps back to today.
+    fn month_view(&self, pal: Pal) -> Element<'_, ModMsg> {
+        let today = Local::now().date_naive();
+        let shown = self.shown_month;
+
+        // ‹  JUNE 2026  ›  — clicking the label jumps back to today.
+        let label = mouse_area(
+            text(shown.format("%B %Y").to_string().to_uppercase())
+                .size(14)
+                .color(pal.fg),
+        )
+        .interaction(Interaction::Pointer)
+        .on_press(ModMsg::new(Msg::Today));
+        let header = row![
+            chev("\u{2039}", Msg::PrevMonth, pal),
+            Space::new().width(Length::Fill),
+            label,
+            Space::new().width(Length::Fill),
+            chev("\u{203A}", Msg::NextMonth, pal),
+        ]
+        .align_y(Vertical::Center);
+
+        let grid = column![
+            header,
+            rule(pal.sep, 1.0),
+            self.month_grid(shown, today, pal)
+        ]
+        .spacing(6)
+        .width(Length::Fixed(self.grid_w()));
         container(grid).center_x(Length::Fill).into()
     }
 
-    /// The hover glance card: long date, ISO week + day-of-year, and a static current-week
-    /// strip (today disced). Display-only — no chevrons (a hover surface can't honor them).
+    /// The hover glance card: today's long date + ISO week / day-of-year, then the **full current
+    /// month** grid (display-only — a hover surface can't honor chevrons, but it shows the whole
+    /// month at a glance, today disced).
     fn glance(&self, pal: Pal) -> Element<'_, ModMsg> {
         let now = Local::now();
         let date = now.date_naive();
+        let month_first = date.with_day(1).unwrap_or(date);
         let long = text(now.format(&self.popup_format).to_string())
             .size(15)
             .color(pal.fg);
@@ -268,30 +285,11 @@ impl Clock {
         .size(12)
         .color(pal.dim);
 
-        let back = if self.sunday_first {
-            date.weekday().num_days_from_sunday()
-        } else {
-            date.weekday().num_days_from_monday()
-        } as i64;
-        let week_start = date - chrono::Duration::days(back);
-        let mut hdr: Vec<Element<ModMsg>> = Vec::new();
-        let mut days: Vec<Element<ModMsg>> = Vec::new();
-        for (i, wd) in weekday_order(self.sunday_first).into_iter().enumerate() {
-            hdr.push(
-                container(text(weekday_initial(wd)).size(11).color(pal.dim))
-                    .center_x(Length::Fixed(CELL))
-                    .into(),
-            );
-            let d = week_start + chrono::Duration::days(i as i64);
-            days.push(day_cell(d, date, true, pal));
-        }
-
         let card = column![
             long,
             meta,
             rule(pal.sep, 1.0),
-            row(hdr),
-            row(days).align_y(Vertical::Center)
+            self.month_grid(month_first, date, pal)
         ]
         .spacing(6)
         .width(Length::Fixed(self.grid_w()));
