@@ -90,6 +90,13 @@ fn filter_indices(items: &[String], query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Left margin that centers a `popup_w`-wide popup on `anchor_x`, clamped so it never runs off
+/// either edge of a `screen_w`-wide output (pinned to 0 when the popup is wider than the screen).
+fn centered_left_margin(screen_w: u32, popup_w: u32, anchor_x: f32) -> i32 {
+    let max_left = (screen_w as i32 - popup_w as i32).max(0);
+    (anchor_x as i32 - popup_w as i32 / 2).clamp(0, max_left)
+}
+
 /// Split a picker row label into match/non-match spans (RFC 0018 §6): the matched substring at
 /// full `fg`, the rest at `dim`. Case-insensitive, first occurrence; falls back to a plain dim
 /// label if the query isn't a clean byte-boundary substring (non-ASCII case-fold drift).
@@ -1535,8 +1542,7 @@ impl Bar {
     /// stays fully on the output — both edges, so a right-anchored widget (e.g. the ▾
     /// switcher) opens visibly.
     fn popup_left_margin_at(&self, popup_w: u32, anchor_x: f32) -> i32 {
-        let max_left = (self.screen_w as i32 - popup_w as i32).max(0);
-        (anchor_x as i32 - popup_w as i32 / 2).clamp(0, max_left)
+        centered_left_margin(self.screen_w, popup_w, anchor_x)
     }
 
     /// Cursor-anchored variant for the hardcoded popups (switcher/volume) that have no pill
@@ -2894,6 +2900,18 @@ mod tests {
         assert_eq!(filter_indices(&items, "k"), vec![0, 1, 2, 3]); // every item has a 'k'
         // no match → empty (the picker shows its no-match state)
         assert!(filter_indices(&items, "zzz").is_empty());
+    }
+
+    #[test]
+    fn popup_margin_centers_and_clamps_on_screen() {
+        // centered on the anchor when there's room: 500 - 100/2 = 450.
+        assert_eq!(centered_left_margin(1000, 100, 500.0), 450);
+        // anchor near the left edge → clamped to 0 (no negative / off-screen-left).
+        assert_eq!(centered_left_margin(1000, 100, 10.0), 0);
+        // anchor near the right edge → clamped so the popup's right edge stays on-screen.
+        assert_eq!(centered_left_margin(1000, 100, 990.0), 900);
+        // popup wider than the output → pinned to 0 rather than a negative margin.
+        assert_eq!(centered_left_margin(50, 100, 25.0), 0);
     }
 
     #[test]
