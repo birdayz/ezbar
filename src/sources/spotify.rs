@@ -355,3 +355,29 @@ fn open_browser(url: &str) {
     }
     log::debug!("open this URL to authorize Spotify: {url}");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::urlencode;
+
+    #[test]
+    fn urlencode_is_rfc3986_unreserved_passthrough() {
+        // unreserved set (A-Z a-z 0-9 - _ . ~) passes through untouched.
+        assert_eq!(urlencode("Abc-XYZ_09.~"), "Abc-XYZ_09.~");
+        assert_eq!(urlencode(""), "");
+    }
+
+    #[test]
+    fn urlencode_percent_encodes_reserved_and_space() {
+        assert_eq!(urlencode(" "), "%20");
+        // the chars that actually matter in an OAuth query/redirect: / ? & = : space
+        assert_eq!(urlencode("a/b?c&d=e:f"), "a%2Fb%3Fc%26d%3De%3Af");
+        assert_eq!(urlencode("%"), "%25"); // the escape char itself is escaped
+    }
+
+    #[test]
+    fn urlencode_handles_multibyte_utf8() {
+        // each UTF-8 byte is percent-encoded uppercase: é = 0xC3 0xA9.
+        assert_eq!(urlencode("é"), "%C3%A9");
+    }
+}
