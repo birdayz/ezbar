@@ -89,14 +89,14 @@ struct Claude {
     /// one-tick hysteresis: true after a single zero-agent reading, so a lone transient empty
     /// is absorbed rather than blinked through to the popup.
     saw_empty: bool,
-    /// false until we've found an agent or a short grace has passed — so a cold start (where the
-    /// first `/proc` scans flakily miss the agents) renders a quiet loading chip instead of a
-    /// misleading "0 agents".
+    /// false until we've found an agent or the warm-up grace has passed — so a cold start (where
+    /// cap-std hands back a PARTIAL `/proc` listing for the first seconds, missing the high-PID
+    /// agents) renders a quiet loading chip instead of a misleading "0 agents".
     scanned: bool,
-    /// last scan's total `/proc` process count — cap-std returns a PARTIAL listing for the first
-    /// tick or two of a cold start, so we wait for this to stabilise before trusting a "0 agents".
-    prev_procs: usize,
-    tick: u32,
+    /// epoch of the first tick — anchors the warm-up grace.
+    started: i64,
+    /// epoch of the last ccusage block read — paces it to ~60s without a tick counter.
+    last_block: i64,
 }
 
 fn now_secs() -> i64 {
@@ -110,16 +110,29 @@ impl Plugin for Claude {
     fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
         match ev {
             Event::Timer => {
+                let now = now_secs();
+                if self.started == 0 {
+                    self.started = now;
+                }
+                let was_scanned = self.scanned;
                 self.refresh_agents();
                 self.limits = read_limits();
                 self.sample_limit();
-                // Read the ccusage block every ~60s, but not until tick 5 (~15s in): it's a
-                // blocking `exec` that parks the fiber for seconds (cold `bunx` is slow), and
-                // while parked the plugin can't render. The chip needs only agents + limits (both
-                // cheap), so we let the first few agent-only ticks populate and paint it before
-                // the parking exec ever runs — otherwise the exec freezes a half-loaded chip on
-                // every cold start. The popup's block section just fills in by ~15s.
-                if self.tick % 20 == 5 {
+
+                // Trust the scan (paint the count) once we've found an agent, or after a warm-up
+                // grace — never before. cap-std returns a PARTIAL `/proc` listing for the first
+                // seconds of a cold start (missing the high-PID agents), so an early "0 agents"
+                // is an artifact; until `scanned`, a quiet loading chip shows.
+                if !self.agents.is_empty() || now - self.started >= 25 {
+                    self.scanned = true;
+                }
+
+                // Read the ccusage block (popup-only) every ~60s — but ONLY once the chip is
+                // already painting a populated frame (`was_scanned`, i.e. scanned on a prior
+                // tick). It's a blocking `exec` that parks the fiber for seconds (cold `bunx` is
+                // slow); running it before the chip has painted would freeze a half-loaded chip.
+                if was_scanned && (self.last_block == 0 || now - self.last_block >= 60) {
+                    self.last_block = now;
                     let block = read_block(ctx);
                     if let Some(b) = &block {
                         // sparkline plots the *spend rate* (Δcost), not cumulative cost.
@@ -133,8 +146,10 @@ impl Plugin for Claude {
                     }
                     self.block = block;
                 }
-                self.tick = self.tick.wrapping_add(1);
-                ctx.set_timeout(3000);
+
+                // Poll FAST until the scan settles (warms the cold cap-std `/proc` enumeration up
+                // sooner so the agents appear in a second or two, not ~15), then the calm cadence.
+                ctx.set_timeout(if self.scanned { 3000 } else { 500 });
                 true
             }
             _ => false,
@@ -462,20 +477,6 @@ impl Claude {
                 .then(b.idle.cmp(&a.idle))
                 .then(a.label.cmp(&b.label))
         });
-
-        // Trust the scan (let the chip show counts) once we've found an agent OR the `/proc`
-        // enumeration count has stabilised tick-to-tick. cap-std hands back a PARTIAL `/proc`
-        // listing for the first second or two of a cold start (e.g. 519 of 630 entries, missing
-        // the high-PID agents), so an early "0 agents" is an artifact, not reality — until then
-        // the chip stays in its quiet loading state instead of flashing a misleading empty count.
-        let n = procs.len();
-        let stable =
-            self.prev_procs > 0 && (n.abs_diff(self.prev_procs) as f64) < self.prev_procs as f64 * 0.05;
-        if !agents.is_empty() || stable {
-            self.scanned = true;
-        }
-        self.prev_procs = n;
-
         self.agents = agents;
     }
 
