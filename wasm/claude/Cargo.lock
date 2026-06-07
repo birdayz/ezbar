@@ -20,12 +20,14 @@ version = "0.1.0"
 dependencies = [
  "claude-logic",
  "ezbar-plugin-wasm",
- "serde_json",
 ]
 
 [[package]]
 name = "claude-logic"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "equivalent"

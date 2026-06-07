@@ -6,6 +6,64 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
+
+/// The current 5-hour spend block, parsed from `ccusage blocks --active --json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    pub cost: f64,
+    pub burn: f64,
+    pub mins_left: i64,
+    pub projected: f64,
+    pub model: String,
+}
+
+/// Account rate-limit usage, parsed from Claude Code's statusline JSON. `*_used` is percent
+/// consumed (0..100); `*_reset_in` is seconds until the window resets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limits {
+    pub five_used: Option<f64>,
+    pub five_reset_in: i64,
+    pub week_used: Option<f64>,
+    pub week_reset_in: i64,
+}
+
+/// Parse the `rate_limits` out of the statusline JSON (`~/.claude/ezbar-status.json`). `now` is
+/// the current epoch, used to turn each window's absolute `resets_at` into a countdown. `None`
+/// when the JSON is malformed or carries no `rate_limits` block.
+pub fn parse_limits(json: &str, now: i64) -> Option<Limits> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let rl = &v["rate_limits"];
+    if rl.is_null() {
+        return None;
+    }
+    let reset_in = |k: &str| rl[k]["resets_at"].as_i64().map(|t| t - now).unwrap_or(0);
+    Some(Limits {
+        five_used: rl["five_hour"]["used_percentage"].as_f64(),
+        five_reset_in: reset_in("five_hour"),
+        week_used: rl["seven_day"]["used_percentage"].as_f64(),
+        week_reset_in: reset_in("seven_day"),
+    })
+}
+
+/// Parse the active block out of `ccusage blocks --active --json`. `None` when the JSON is
+/// malformed or no block is currently active. Missing numeric fields default to 0 (a partial
+/// block still renders).
+pub fn parse_block(json: &[u8]) -> Option<Block> {
+    let v: Value = serde_json::from_slice(json).ok()?;
+    let b = v["blocks"]
+        .as_array()?
+        .iter()
+        .find(|b| b["isActive"].as_bool().unwrap_or(false))?;
+    Some(Block {
+        cost: b["costUSD"].as_f64().unwrap_or(0.0),
+        burn: b["burnRate"]["costPerHour"].as_f64().unwrap_or(0.0),
+        mins_left: b["projection"]["remainingMinutes"].as_i64().unwrap_or(0),
+        projected: b["projection"]["totalCost"].as_f64().unwrap_or(0.0),
+        model: b["models"][0].as_str().unwrap_or("").to_string(),
+    })
+}
+
 /// Severity for a thresholded value; the renderer maps it to a theme token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -343,6 +401,58 @@ mod tests {
         children.insert(2, vec![3]);
         let active: HashSet<i32> = HashSet::new();
         assert!(!has_active_descendant(1, &children, &active));
+    }
+
+    #[test]
+    fn parse_limits_from_statusline_json() {
+        // shape mirrors ~/.claude/ezbar-status.json (Claude Code's statusline payload).
+        let json = r#"{"cost":{"total_cost_usd":1.0},"rate_limits":{
+            "five_hour":{"used_percentage":58.0,"resets_at":1000},
+            "seven_day":{"used_percentage":24.0,"resets_at":2000}}}"#;
+        let l = parse_limits(json, 100).unwrap();
+        assert_eq!(l.five_used, Some(58.0));
+        assert_eq!(l.five_reset_in, 900); // resets_at 1000 − now 100
+        assert_eq!(l.week_used, Some(24.0));
+        assert_eq!(l.week_reset_in, 1900);
+    }
+
+    #[test]
+    fn parse_limits_rejects_missing_or_bad() {
+        assert!(parse_limits(r#"{"cost":{}}"#, 0).is_none()); // no rate_limits
+        assert!(parse_limits("not json", 0).is_none());
+        // present but reset times absent → countdown defaults to 0, not a panic.
+        let l = parse_limits(r#"{"rate_limits":{"five_hour":{"used_percentage":10.0}}}"#, 50).unwrap();
+        assert_eq!(l.five_used, Some(10.0));
+        assert_eq!(l.five_reset_in, 0);
+        assert_eq!(l.week_used, None);
+    }
+
+    #[test]
+    fn parse_block_picks_the_active_one() {
+        let json = br#"{"blocks":[
+            {"isActive":false,"costUSD":1.0},
+            {"isActive":true,"costUSD":52.26,"burnRate":{"costPerHour":37.0},
+             "projection":{"remainingMinutes":180,"totalCost":185.0},
+             "models":["claude-opus-4-8","claude-haiku"]}]}"#;
+        let b = parse_block(json).unwrap();
+        assert_eq!(b.cost, 52.26);
+        assert_eq!(b.burn, 37.0);
+        assert_eq!(b.mins_left, 180);
+        assert_eq!(b.projected, 185.0);
+        assert_eq!(b.model, "claude-opus-4-8"); // first model
+    }
+
+    #[test]
+    fn parse_block_none_or_partial() {
+        assert!(parse_block(br#"{"blocks":[{"isActive":false}]}"#).is_none()); // none active
+        assert!(parse_block(br#"{"blocks":[]}"#).is_none());
+        assert!(parse_block(b"garbage").is_none());
+        // active but sparse → missing numbers default to 0, still renders.
+        let b = parse_block(br#"{"blocks":[{"isActive":true,"costUSD":3.5}]}"#).unwrap();
+        assert_eq!(b.cost, 3.5);
+        assert_eq!(b.burn, 0.0);
+        assert_eq!(b.mins_left, 0);
+        assert_eq!(b.model, "");
     }
 
     #[test]

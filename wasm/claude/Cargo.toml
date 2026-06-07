@@ -10,7 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
 claude-logic = { path = "../../crates/claude-logic" }
-serde_json = "1"
 
 [profile.release]
 opt-level = "s"

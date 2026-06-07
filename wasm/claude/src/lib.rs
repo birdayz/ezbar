@@ -28,11 +28,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// Pure, host-unit-tested logic (proc parsing, project-dir encoding, projection, …) lives in a
-// sibling crate so it can run under `cargo test` even though this plugin is wasm-only.
-use claude_logic::{human_dur, idle_str, Level};
+// Pure, host-unit-tested logic (proc parsing, project-dir encoding, projection, JSON parsing, …)
+// lives in a sibling crate so it can run under `cargo test` even though this plugin is wasm-only.
+use claude_logic::{human_dur, idle_str, Block, Level, Limits};
 use ezbar_plugin_wasm::prelude::*;
-use serde_json::Value;
 
 // Idle escalation (seconds since last transcript write, when not actively working):
 const ATTN_SECS: i64 = 60; // quiet this long ⇒ "waiting for you" (amber)
@@ -54,22 +53,6 @@ struct Agent {
     idle: i64,
     /// Quiet past the attention threshold and not actively running a tool ⇒ wants you.
     waiting: bool,
-}
-
-struct Block {
-    cost: f64,
-    burn: f64,
-    mins_left: i64,
-    projected: f64,
-    model: String,
-}
-
-struct Limits {
-    /// percent of the window already *used* (0 = fresh, 100 = exhausted).
-    five_used: Option<f64>,
-    five_reset_in: i64,
-    week_used: Option<f64>,
-    week_reset_in: i64,
 }
 
 #[derive(Default)]
@@ -649,19 +632,7 @@ fn transcript_mtimes(cwd: &str) -> Vec<i64> {
 
 fn read_limits() -> Option<Limits> {
     let data = fs::read_to_string("/claude/ezbar-status.json").ok()?;
-    let v: Value = serde_json::from_str(&data).ok()?;
-    let rl = &v["rate_limits"];
-    if rl.is_null() {
-        return None;
-    }
-    let now = now_secs();
-    let reset_in = |k: &str| rl[k]["resets_at"].as_i64().map(|t| t - now).unwrap_or(0);
-    Some(Limits {
-        five_used: rl["five_hour"]["used_percentage"].as_f64(),
-        five_reset_in: reset_in("five_hour"),
-        week_used: rl["seven_day"]["used_percentage"].as_f64(),
-        week_reset_in: reset_in("seven_day"),
-    })
+    claude_logic::parse_limits(&data, now_secs())
 }
 
 fn read_block(ctx: &mut dyn Ctx) -> Option<Block> {
@@ -671,18 +642,7 @@ fn read_block(ctx: &mut dyn Ctx) -> Option<Block> {
     if o.code != 0 {
         return None;
     }
-    let v: Value = serde_json::from_slice(&o.stdout).ok()?;
-    let b = v["blocks"]
-        .as_array()?
-        .iter()
-        .find(|b| b["isActive"].as_bool().unwrap_or(false))?;
-    Some(Block {
-        cost: b["costUSD"].as_f64().unwrap_or(0.0),
-        burn: b["burnRate"]["costPerHour"].as_f64().unwrap_or(0.0),
-        mins_left: b["projection"]["remainingMinutes"].as_i64().unwrap_or(0),
-        projected: b["projection"]["totalCost"].as_f64().unwrap_or(0.0),
-        model: b["models"][0].as_str().unwrap_or("").to_string(),
-    })
+    claude_logic::parse_block(&o.stdout)
 }
 
 export_plugin!(Claude);
