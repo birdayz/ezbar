@@ -406,4 +406,15 @@ mod tests {
         assert!(off.a < red.a && off.a > 0.0); // dimmed but still visible
         assert_eq!((off.r, off.g, off.b), (red.r, red.g, red.b)); // pulses alpha, not hue
     }
+
+    #[test]
+    fn parse_style_maps_config_strings_and_defaults_to_boxed() {
+        use super::{parse_style, WsStyle};
+        assert_eq!(parse_style("filled"), WsStyle::Filled);
+        assert_eq!(parse_style("outlined"), WsStyle::Outlined);
+        assert_eq!(parse_style("underbar"), WsStyle::Underbar);
+        assert_eq!(parse_style("boxed"), WsStyle::Boxed);
+        // an unknown / mistyped style falls back to the default rather than erroring.
+        assert_eq!(parse_style("nonsense"), WsStyle::Boxed);
+    }
 }
