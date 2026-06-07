@@ -2209,6 +2209,18 @@ mod tests {
     }
 
     #[test]
+    fn scroll_normalizes_wheel_and_touchpad_to_lines() {
+        // a notched wheel already reports line-equivalents → passes through unchanged.
+        assert_eq!(scroll_lines(ScrollDelta::Lines { x: 0.0, y: 3.0 }), 3.0);
+        // a touchpad reports pixels (~16px ≈ one line) → divided down so the same gesture
+        // doesn't read ~50× larger than a wheel notch on the frozen f32 ABI.
+        assert_eq!(scroll_lines(ScrollDelta::Pixels { x: 0.0, y: 32.0 }), 2.0);
+        assert_eq!(scroll_lines(ScrollDelta::Pixels { x: 0.0, y: -16.0 }), -1.0);
+        // horizontal component is ignored — only y drives the guest's scroll.
+        assert_eq!(scroll_lines(ScrollDelta::Lines { x: 9.0, y: 0.0 }), 0.0);
+    }
+
+    #[test]
     fn measure_container_pads_both_sides_and_leaves_size() {
         let l = Lifted {
             nodes: vec![
