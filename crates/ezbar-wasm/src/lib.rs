@@ -2209,6 +2209,29 @@ mod tests {
     }
 
     #[test]
+    fn lift_enforces_node_cap_and_root_range() {
+        // a valid one-node tree lifts fine.
+        let ok = Tree {
+            nodes: vec![Node::Spacer(4.0)],
+            root: 0,
+        };
+        assert!(lift(&ok).is_ok());
+        // a root index past the end is rejected — it's the render recursion's entry point.
+        let bad_root = Tree {
+            nodes: vec![Node::Spacer(4.0)],
+            root: 7,
+        };
+        assert!(lift(&bad_root).is_err());
+        // an arena over the node cap is rejected, so a runaway/malicious plugin can't blow up
+        // the host's render recursion (RFC 0006).
+        let huge = Tree {
+            nodes: vec![Node::Spacer(0.0); MAX_NODES + 1],
+            root: 0,
+        };
+        assert!(lift(&huge).is_err());
+    }
+
+    #[test]
     fn scroll_normalizes_wheel_and_touchpad_to_lines() {
         // a notched wheel already reports line-equivalents → passes through unchanged.
         assert_eq!(scroll_lines(ScrollDelta::Lines { x: 0.0, y: 3.0 }), 3.0);
