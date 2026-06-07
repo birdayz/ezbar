@@ -7,3 +7,6 @@
 [toolchain]
 channel = "1.96.0"
 components = ["rustfmt", "clippy"]
+# the WASM plugins (wasm/*) build for this target — declare it so `cargo build --target
+# wasm32-wasip2` works on a fresh checkout without a manual `rustup target add`.
+targets = ["wasm32-wasip2"]
