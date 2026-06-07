@@ -130,3 +130,19 @@ fn human(b: u64) -> String {
         format!("{b}B")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::human;
+
+    #[test]
+    fn human_scales_at_kib_and_mib_boundaries() {
+        assert_eq!(human(0), "0B");
+        assert_eq!(human(1023), "1023B"); // just under 1 KiB stays bytes
+        assert_eq!(human(1024), "1K"); // exactly 1 KiB flips to K
+        assert_eq!(human(1536), "2K"); // 1.5 KiB, K is integer-rounded
+        assert_eq!(human(1024 * 1024 - 1), "1024K"); // just under 1 MiB
+        assert_eq!(human(1024 * 1024), "1.0M"); // exactly 1 MiB flips to M, one decimal
+        assert_eq!(human(1024 * 1024 * 3 / 2), "1.5M");
+    }
+}
