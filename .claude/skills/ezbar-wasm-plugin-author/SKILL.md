@@ -269,6 +269,31 @@ document the grant lines your plugin needs in your README so users know what to 
 - **Build flags:** keep the `.wasm` small — `opt-level="s"`, `lto=true`,
   `strip=true`, `codegen-units=1` (already in the example's `Cargo.toml`).
 
+### Sandbox gotchas (fs / exec)
+
+The host runs you under a cap-std (WASI preopen) sandbox, which behaves subtly differently from
+a normal process. The ones that actually bite, learned the hard way building the `claude` plugin:
+
+- **A blocking host call freezes your rendering, not just a thread.** `ctx.exec(...)` and
+  `http_get` *park your fiber* until they return, and the host renders nothing in the meantime. A
+  slow call (a cold `bunx`, a network timeout) on your first tick means the chip shows the host's
+  loading `…` for that whole time. So: read cheap data (files) every tick, but **don't run a slow
+  blocking call before your chip has painted a real frame** — gate it behind a "have I rendered
+  yet?" flag, and pace it (e.g. once every ~60s) rather than every tick.
+- **You can't `readlink` a `/proc/<pid>/*` magic symlink.** cap-std refuses it (the target is an
+  absolute path outside the preopen). For a process's cwd, read `PWD` out of
+  `/proc/<pid>/environ` (a plain readable file for a same-uid process) instead.
+- **`/proc` enumeration is *partial* for the first second or two of a cold start.** `read_dir
+  ("/proc")` hands back a short listing while the sandbox warms up (e.g. 519 of 630 entries,
+  missing the high-PID processes), then the full set. So a fresh scan can momentarily miss the
+  very thing you're looking for — never trust an early empty/zero result: show a loading state
+  until you've found what you expect (or a grace elapses), and poll fast (`set_timeout(500)`)
+  until it settles so the warm-up finishes in ~1s instead of ~15.
+- **Keep pure logic in a separate `lib` crate.** A plugin is `cdylib`-only and links a wasm-only
+  SDK, so its own functions can't run under `cargo test`. Factor the I/O-free bits (parsing,
+  formatting, math) into a plain std crate the plugin depends on, and unit-test *that* on the host
+  (see `crates/claude-logic`).
+
 ## Cargo.toml
 
 ```toml
