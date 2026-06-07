@@ -171,7 +171,11 @@ impl Module for Custom {
         // output is a single plain segment → a plain `text` (unchanged for existing widgets).
         parts.push(crate::modules::markup::view(&self.text, ctx));
         // a danger dot when `alert` matches the output (RFC 0003) — themed `urgent`.
-        if self.alert.as_ref().is_some_and(|re| re.is_match(&self.text)) {
+        if self
+            .alert
+            .as_ref()
+            .is_some_and(|re| re.is_match(&self.text))
+        {
             parts.push(
                 text("\u{25cf}")
                     .color(ctx.urgent())
@@ -284,7 +288,9 @@ mod tests {
     #[test]
     fn listen_cmd_absent_or_blank_is_none() {
         // unset → poll form (command path), not stream
-        assert!(make("command = \"date\"\ninterval = 9").listen_cmd.is_none());
+        assert!(make("command = \"date\"\ninterval = 9")
+            .listen_cmd
+            .is_none());
         // a blank/whitespace value doesn't accidentally select the (empty) stream form
         assert!(make("listen_cmd = \"   \"").listen_cmd.is_none());
     }

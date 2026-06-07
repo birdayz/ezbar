@@ -31,8 +31,12 @@ pub fn run(wasm: &Path, sidecar: Option<&Path>, out: Option<&Path>) -> Result<St
     let sidecar = sidecar
         .map(PathBuf::from)
         .unwrap_or_else(|| wasm.with_file_name("ezbar-plugin.toml"));
-    let sidecar_bytes = std::fs::read(&sidecar)
-        .map_err(|e| format!("read {}: {e} (write an ezbar-plugin.toml, RFC 0014 §4)", sidecar.display()))?;
+    let sidecar_bytes = std::fs::read(&sidecar).map_err(|e| {
+        format!(
+            "read {}: {e} (write an ezbar-plugin.toml, RFC 0014 §4)",
+            sidecar.display()
+        )
+    })?;
     let meta = parse_sidecar(&String::from_utf8_lossy(&sidecar_bytes))?;
 
     let wasm_bytes = std::fs::read(wasm).map_err(|e| format!("read {}: {e}", wasm.display()))?;
@@ -58,7 +62,9 @@ pub fn run(wasm: &Path, sidecar: Option<&Path>, out: Option<&Path>) -> Result<St
 /// `version` are required (the registry path is `plugins/<id>/<version>.toml`); `wit`
 /// defaults to the first frozen version, `name` to `id`, `description` to empty.
 fn parse_sidecar(body: &str) -> Result<Meta, String> {
-    let doc: toml::Value = body.parse().map_err(|e| format!("ezbar-plugin.toml: {e}"))?;
+    let doc: toml::Value = body
+        .parse()
+        .map_err(|e| format!("ezbar-plugin.toml: {e}"))?;
     let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let id = s("id").ok_or("ezbar-plugin.toml: missing `id`")?;
     let version = s("version").ok_or("ezbar-plugin.toml: missing `version`")?;

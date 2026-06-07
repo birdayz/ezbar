@@ -101,7 +101,9 @@ fn coalesce(segs: Vec<Segment>) -> Vec<Segment> {
     let mut out: Vec<Segment> = Vec::with_capacity(segs.len());
     for s in segs {
         match out.last_mut() {
-            Some(prev) if prev.color == s.color && prev.bold == s.bold => prev.text.push_str(&s.text),
+            Some(prev) if prev.color == s.color && prev.bold == s.bold => {
+                prev.text.push_str(&s.text)
+            }
             _ => out.push(s),
         }
     }
@@ -164,7 +166,11 @@ mod tests {
     use super::{parse, Segment};
 
     fn seg(text: &str, color: Option<&str>, bold: bool) -> Segment {
-        Segment { text: text.into(), color: color.map(Into::into), bold }
+        Segment {
+            text: text.into(),
+            color: color.map(Into::into),
+            bold,
+        }
     }
 
     #[test]
@@ -193,12 +199,18 @@ mod tests {
 
     #[test]
     fn tags_nest() {
-        assert_eq!(parse("[b][c=ok]x[/c][/b]"), vec![seg("x", Some("ok"), true)]);
+        assert_eq!(
+            parse("[b][c=ok]x[/c][/b]"),
+            vec![seg("x", Some("ok"), true)]
+        );
     }
 
     #[test]
     fn unclosed_tag_styles_to_the_end() {
-        assert_eq!(parse("[c=warn]rest"), vec![seg("rest", Some("warn"), false)]);
+        assert_eq!(
+            parse("[c=warn]rest"),
+            vec![seg("rest", Some("warn"), false)]
+        );
     }
 
     #[test]
@@ -230,7 +242,10 @@ mod tests {
             text_size: 13.0,
             bar_height: 28,
         };
-        let ctx = Ctx { instance_id: 0, theme: &theme };
+        let ctx = Ctx {
+            instance_id: 0,
+            theme: &theme,
+        };
         let _styled: Element<'_, ModMsg> = super::view("net [c=urgent]down[/c] [b]!!![/b]", &ctx);
         let _plain: Element<'_, ModMsg> = super::view("just text", &ctx);
         let _unknown: Element<'_, ModMsg> = super::view("[c=nope]x[/c]", &ctx); // unknown token → builds, no colour

@@ -421,7 +421,11 @@ mod tests {
         assert!(parse_limits(r#"{"cost":{}}"#, 0).is_none()); // no rate_limits
         assert!(parse_limits("not json", 0).is_none());
         // present but reset times absent → countdown defaults to 0, not a panic.
-        let l = parse_limits(r#"{"rate_limits":{"five_hour":{"used_percentage":10.0}}}"#, 50).unwrap();
+        let l = parse_limits(
+            r#"{"rate_limits":{"five_hour":{"used_percentage":10.0}}}"#,
+            50,
+        )
+        .unwrap();
         assert_eq!(l.five_used, Some(10.0));
         assert_eq!(l.five_reset_in, 0);
         assert_eq!(l.week_used, None);

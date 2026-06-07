@@ -77,7 +77,14 @@ impl Module for WindowTitle {
             // Substitute the (already-truncated) title into each format segment's text, then
             // render. Substituting AFTER parsing keeps the title literal — no markup injection.
             Some(fmt) => markup::render(&substitute(fmt, &self.title), ctx),
-            None => markup::render(&[Segment { text: self.title.clone(), color: None, bold: false }], ctx),
+            None => markup::render(
+                &[Segment {
+                    text: self.title.clone(),
+                    color: None,
+                    bold: false,
+                }],
+                ctx,
+            ),
         }
     }
 }
@@ -105,14 +112,21 @@ mod tests {
     use crate::modules::markup::{parse, Segment};
 
     fn seg(text: &str, color: Option<&str>, bold: bool) -> Segment {
-        Segment { text: text.into(), color: color.map(Into::into), bold }
+        Segment {
+            text: text.into(),
+            color: color.map(Into::into),
+            bold,
+        }
     }
 
     #[test]
     fn title_is_substituted_into_parsed_markup() {
         // format parsed once → markup structure; the title fills the placeholder after.
         let fmt = parse("[c=accent]{title}[/c]");
-        assert_eq!(substitute(&fmt, "Firefox"), vec![seg("Firefox", Some("accent"), false)]);
+        assert_eq!(
+            substitute(&fmt, "Firefox"),
+            vec![seg("Firefox", Some("accent"), false)]
+        );
     }
 
     #[test]

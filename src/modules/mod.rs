@@ -105,12 +105,21 @@ pub fn register_wasm_plugins(dir: &Path) {
 }
 
 fn wasm_plugin_path(id: &str) -> Option<PathBuf> {
-    plugins().read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+    plugins()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .cloned()
 }
 
 /// Ids of all registered wasm plugins, sorted — for default placement injection.
 pub fn wasm_plugin_ids() -> Vec<String> {
-    let mut ids: Vec<String> = plugins().read().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+    let mut ids: Vec<String> = plugins()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .cloned()
+        .collect();
     ids.sort();
     ids
 }
@@ -153,10 +162,17 @@ fn fs_grants(cfg: &toml::Value) -> Vec<ezbar_wasm::FsGrant> {
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
-                    let base = host_path.file_name().and_then(|s| s.to_str()).unwrap_or("dir");
+                    let base = host_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("dir");
                     format!("/{base}")
                 });
-            Some(ezbar_wasm::FsGrant { host_path, guest_path, write })
+            Some(ezbar_wasm::FsGrant {
+                host_path,
+                guest_path,
+                write,
+            })
         })
         .collect()
 }
@@ -406,24 +422,24 @@ pub fn build(
                 yolo_grants()
             } else {
                 match crate::grants::decide(other, &path) {
-                crate::grants::Decision::Granted => {
-                    let g: Grants = (
-                        network_grants(cfg),                                       // `[modules.<id>].network`
-                        feed_grants(cfg),                                          // `.feeds` (RFC 0012)
-                        cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // `.sway` (RFC 0013)
-                        fs_grants(cfg),                                            // `.fs` (RFC 0015)
-                        exec_grants(cfg),                                          // `.exec` (RFC 0015)
-                    );
-                    // RFC 0014 Phase A: if the plugin's embedded `ezbar:manifest` DECLARES a
-                    // capability the user didn't grant, say so — an ungranted-and-therefore-
-                    // silent widget then explains itself instead of failing mute.
-                    warn_undeclared_grants(other, &path, &g.0, &g.1, g.2, &g.3, &g.4);
-                    g
-                }
-                // The on-disk bytes don't match the consented hash — withhold every cap.
-                crate::grants::Decision::Withheld => {
-                    (Vec::new(), Vec::new(), false, Vec::new(), Vec::new())
-                }
+                    crate::grants::Decision::Granted => {
+                        let g: Grants = (
+                            network_grants(cfg), // `[modules.<id>].network`
+                            feed_grants(cfg),    // `.feeds` (RFC 0012)
+                            cfg.get("sway").and_then(|v| v.as_bool()).unwrap_or(false), // `.sway` (RFC 0013)
+                            fs_grants(cfg),   // `.fs` (RFC 0015)
+                            exec_grants(cfg), // `.exec` (RFC 0015)
+                        );
+                        // RFC 0014 Phase A: if the plugin's embedded `ezbar:manifest` DECLARES a
+                        // capability the user didn't grant, say so — an ungranted-and-therefore-
+                        // silent widget then explains itself instead of failing mute.
+                        warn_undeclared_grants(other, &path, &g.0, &g.1, g.2, &g.3, &g.4);
+                        g
+                    }
+                    // The on-disk bytes don't match the consented hash — withhold every cap.
+                    crate::grants::Decision::Withheld => {
+                        (Vec::new(), Vec::new(), false, Vec::new(), Vec::new())
+                    }
                 }
             };
             let m: Box<dyn Module> = Box::new(ezbar_wasm::WasmModule::new(
@@ -454,7 +470,9 @@ mod tests {
     #[test]
     fn fs_grants_parse_path_mode_and_mount() {
         // explicit mount + rw
-        let g = fs_grants(&tbl("fs = [{ path = \"/etc\", at = \"/etc-ro\", mode = \"rw\" }]"));
+        let g = fs_grants(&tbl(
+            "fs = [{ path = \"/etc\", at = \"/etc-ro\", mode = \"rw\" }]",
+        ));
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].host_path, std::path::PathBuf::from("/etc"));
         assert_eq!(g[0].guest_path, "/etc-ro");
@@ -481,10 +499,8 @@ mod tests {
     #[test]
     fn graph_cfg_parses_each_knob() {
         let g = graph_cfg(
-            &tbl(
-                "[graph]\nsamples = 80\nwidth = 64\nheight = 24\n\
-                 line_width = 2.5\nfill = false\nline_color = \"accent\"",
-            ),
+            &tbl("[graph]\nsamples = 80\nwidth = 64\nheight = 24\n\
+                 line_width = 2.5\nfill = false\nline_color = \"accent\""),
             30,
         );
         assert_eq!(g.samples, 80);
@@ -498,7 +514,10 @@ mod tests {
     #[test]
     fn graph_cfg_clamps_absurd_values() {
         // a fat-fingered config can't blow out the bar
-        let c = graph_cfg(&tbl("[graph]\nline_width = 999\nheight = 0\nsamples = 1"), 30);
+        let c = graph_cfg(
+            &tbl("[graph]\nline_width = 999\nheight = 0\nsamples = 1"),
+            30,
+        );
         assert_eq!(c.line_width, 8.0);
         assert_eq!(c.height, 6.0);
         assert_eq!(c.samples, 2);

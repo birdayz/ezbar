@@ -202,11 +202,7 @@ impl Clock {
         // weekday initials, aligned to the day columns (week-# spacer first).
         let mut hdr: Vec<Element<ModMsg>> = Vec::new();
         if self.week_numbers {
-            hdr.push(
-                container(Space::new())
-                    .width(Length::Fixed(WK_W))
-                    .into(),
-            );
+            hdr.push(container(Space::new()).width(Length::Fixed(WK_W)).into());
         }
         for wd in weekday_order(self.sunday_first) {
             hdr.push(
@@ -231,10 +227,14 @@ impl Clock {
                 // ISO weeks are Monday-defined — key the column off the row's Monday.
                 let monday = row_start + chrono::Duration::days(days_to_monday(row_start));
                 cells.push(
-                    container(text(format!("{:02}", monday.iso_week().week())).size(11).color(pal.dim))
-                        .center_x(Length::Fixed(WK_W))
-                        .center_y(Length::Fixed(CELL))
-                        .into(),
+                    container(
+                        text(format!("{:02}", monday.iso_week().week()))
+                            .size(11)
+                            .color(pal.dim),
+                    )
+                    .center_x(Length::Fixed(WK_W))
+                    .center_y(Length::Fixed(CELL))
+                    .into(),
                 );
             }
             for d in 0..7 {
@@ -302,7 +302,12 @@ impl Clock {
 /// One day cell: a fixed square so columns align. Today = an `accent` disc with
 /// luminance-picked cut-out ink (legible on any theme). Otherwise alpha-recessive:
 /// adjacent-month ghosted, weekend dimmed, in-month weekday at full `fg`.
-fn day_cell<'a>(date: NaiveDate, today: NaiveDate, in_month: bool, pal: Pal) -> Element<'a, ModMsg> {
+fn day_cell<'a>(
+    date: NaiveDate,
+    today: NaiveDate,
+    in_month: bool,
+    pal: Pal,
+) -> Element<'a, ModMsg> {
     let inner: Element<ModMsg> = if date == today {
         container(text(format!("{}", date.day())).size(13).color(pal.ink))
             .center_x(Length::Fixed(DISC))
@@ -412,12 +417,22 @@ fn days_in_year(y: i32) -> u32 {
 fn weekday_order(sunday_first: bool) -> [Weekday; 7] {
     if sunday_first {
         [
-            Weekday::Sun, Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri,
+            Weekday::Sun,
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
             Weekday::Sat,
         ]
     } else {
         [
-            Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat,
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
             Weekday::Sun,
         ]
     }
@@ -506,7 +521,11 @@ fn granularity(fmt: &str) -> Unit {
         // a '%' specifier: skip flags/width/precision (`-_0^#:.` and digits), then read the
         // final letter. `%%` is a literal percent — no field.
         i += 1;
-        while i < bytes.len() && matches!(bytes[i], b'-' | b'_' | b'0' | b'^' | b'#' | b':' | b'.' | b'0'..=b'9')
+        while i < bytes.len()
+            && matches!(
+                bytes[i],
+                b'-' | b'_' | b'0' | b'^' | b'#' | b':' | b'.' | b'0'..=b'9'
+            )
         {
             i += 1;
         }
@@ -516,12 +535,12 @@ fn granularity(fmt: &str) -> Unit {
         let spec = bytes[i];
         i += 1;
         let u = match spec {
-            b'%' => continue,                                  // escaped literal
-            b'f' => Unit::Sub,                                 // sub-second
+            b'%' => continue,                                            // escaped literal
+            b'f' => Unit::Sub,                                           // sub-second
             b'S' | b'T' | b'r' | b'c' | b'X' | b'+' | b's' => Unit::Sec, // include seconds
             b'M' | b'R' => Unit::Min,
             b'H' | b'I' | b'k' | b'l' | b'p' | b'P' => Unit::Hour, // hour / AM-PM (12h bound)
-            _ => Unit::Day,                                    // date fields & everything else
+            _ => Unit::Day,                                        // date fields & everything else
         };
         best = finest(best, u);
     }
@@ -645,7 +664,10 @@ mod tests {
         // 30s + 0.25s into the minute → 29.75s to the next minute.
         let w = until_next_boundary(Unit::Min, at(1_700_000_040 + 30, 250_000_000));
         let ms = w.as_millis();
-        assert!((29_740..=29_760).contains(&ms), "expected ~29.75s, got {ms}ms");
+        assert!(
+            (29_740..=29_760).contains(&ms),
+            "expected ~29.75s, got {ms}ms"
+        );
     }
 
     #[test]

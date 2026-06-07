@@ -114,7 +114,10 @@ fn now_playing(d: &MediaData, max: usize) -> String {
         format!("{} \u{2013} {}", d.artist, d.title)
     };
     if s.chars().count() > max {
-        format!("{}\u{2026}", s.chars().take(max.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}\u{2026}",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
     } else {
         s
     }

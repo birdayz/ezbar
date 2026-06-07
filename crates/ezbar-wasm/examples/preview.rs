@@ -61,11 +61,18 @@ fn main() -> ezbar_plugin::iced::Result {
                         Some(g) => g.to_string(),
                         None => format!(
                             "/{}",
-                            host_path.file_name().and_then(|s| s.to_str()).unwrap_or("dir")
+                            host_path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("dir")
                         ),
                     };
                     let write = it.next() == Some("rw");
-                    grants_fs.push(ezbar_wasm::FsGrant { host_path, guest_path, write });
+                    grants_fs.push(ezbar_wasm::FsGrant {
+                        host_path,
+                        guest_path,
+                        write,
+                    });
                 }
                 None => fail("--fs needs <hostpath>[:<guestmount>][:rw]"),
             },

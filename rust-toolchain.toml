@@ -1,0 +1,9 @@
+# Pin the toolchain so rustfmt / clippy / builds are byte-for-byte deterministic across every
+# local checkout and CI — rustfmt's *default* formatting changes between releases, so a floating
+# `stable` is what let the tree drift out of `cargo fmt --check`. rustup honors this file for
+# every command run in the tree (overriding the runner's default), so CI's `cargo fmt --all
+# --check` and a contributor's `cargo fmt` always run the same version. Bump deliberately — in
+# the same commit that re-runs `cargo fmt --all`.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

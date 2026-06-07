@@ -236,16 +236,20 @@ pub fn grant_block(id: &str, m: &ezbar_wasm::manifest::Manifest) -> String {
     }
     if !m.fs.is_empty() {
         // fs needs a mode the manifest doesn't pin — emit a read-only template to edit.
-        let entries = m
-            .fs
-            .iter()
-            .map(|p| format!("{{ path = {p:?}, mode = \"r\" }}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        s.push_str(&format!("fs = [{entries}]   # DANGEROUS — review; set mode = \"rw\" if needed\n"));
+        let entries =
+            m.fs.iter()
+                .map(|p| format!("{{ path = {p:?}, mode = \"r\" }}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+        s.push_str(&format!(
+            "fs = [{entries}]   # DANGEROUS — review; set mode = \"rw\" if needed\n"
+        ));
     }
     if !m.exec.is_empty() {
-        s.push_str(&format!("exec = [{}]   # DANGEROUS — runs these programs\n", join(&m.exec)));
+        s.push_str(&format!(
+            "exec = [{}]   # DANGEROUS — runs these programs\n",
+            join(&m.exec)
+        ));
     }
     s
 }
@@ -255,7 +259,8 @@ pub fn grant_block(id: &str, m: &ezbar_wasm::manifest::Manifest) -> String {
 /// print the hash (so they can match it to a source) and the grant block (to paste), and
 /// point at `ezbar grant` to consent. `id` is the placement id (the `.wasm` stem).
 pub fn inspect(wasm_path: &Path, id: &str) -> Result<String, String> {
-    let bytes = std::fs::read(wasm_path).map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
+    let bytes =
+        std::fs::read(wasm_path).map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
     let hash = sha256_hex(&bytes);
     let mut out = format!(
         "plugin '{id}'  ({})\n  sha256: {hash}\n\n",
@@ -360,7 +365,9 @@ mod tests {
         );
         let h = sha256_hex(b"weather-bytes");
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
@@ -396,6 +403,9 @@ mod tests {
         // a swapped binary under the same id → withheld (the whole point)
         assert_eq!(verdict(Some(&benign), &hostile), Verdict::Withhold);
         // stored hash is compared case-insensitively
-        assert_eq!(verdict(Some(&benign.to_uppercase()), &benign), Verdict::Grant);
+        assert_eq!(
+            verdict(Some(&benign.to_uppercase()), &benign),
+            Verdict::Grant
+        );
     }
 }

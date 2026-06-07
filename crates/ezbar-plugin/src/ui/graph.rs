@@ -216,7 +216,13 @@ impl Graph {
             let (px, py, pv) = seg[0];
             let (x, y, v) = seg[1];
             let c = self.seg_color(color, if pv > v { pv } else { v });
-            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c, self.line_width);
+            stroke_segment(
+                frame,
+                Point::new(px, py),
+                Point::new(x, y),
+                c,
+                self.line_width,
+            );
         }
     }
 
@@ -249,7 +255,13 @@ impl Graph {
             let (px, py, pt) = seg[0];
             let (x, y, t) = seg[1];
             let c = self.seg_color(temperature_color, if pt > t { pt } else { t });
-            stroke_segment(frame, Point::new(px, py), Point::new(x, y), c, self.line_width);
+            stroke_segment(
+                frame,
+                Point::new(px, py),
+                Point::new(x, y),
+                c,
+                self.line_width,
+            );
         }
     }
 
@@ -295,7 +307,13 @@ impl Graph {
                 if let Some((px, py, pp)) = prev {
                     let seg = if pp > p { pp } else { p };
                     let c = self.seg_color(ping_color, seg);
-                    stroke_segment(frame, Point::new(px, py), Point::new(x, y), c, self.line_width);
+                    stroke_segment(
+                        frame,
+                        Point::new(px, py),
+                        Point::new(x, y),
+                        c,
+                        self.line_width,
+                    );
                 }
                 prev = Some((x, y, p));
             } else {

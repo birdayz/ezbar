@@ -155,19 +155,29 @@ impl Plugin for Claude {
         // The Bot stays calm — Accent when agents run, dim when none. Escalation is carried
         // ONLY by the ⚠ + idle text below, so a single agent going quiet can't double-paint
         // the whole chip amber (one signal, one colour).
-        let bot = if total > 0 { Token::Accent } else { Token::FgDim };
+        let bot = if total > 0 {
+            Token::Accent
+        } else {
+            Token::FgDim
+        };
         let mut parts = vec![
             Icon::Bot.view(13.0, bot),
-            text(format!("{total}"))
-                .size(13.0)
-                .color(if total > 0 { Token::Fg } else { Token::FgDim }),
+            text(format!("{total}")).size(13.0).color(if total > 0 {
+                Token::Fg
+            } else {
+                Token::FgDim
+            }),
         ];
         // the loud bit: agents waiting for you, with the worst idle — escalates amber → red.
         if let Some(d) = worst {
             let n = self.agents.iter().filter(|a| a.waiting).count();
             let c = idle_color(d);
             parts.push(Icon::Alert.view(13.0, c));
-            parts.push(text(format!("{n}\u{00b7}{}", idle_str(d))).size(13.0).color(c));
+            parts.push(
+                text(format!("{n}\u{00b7}{}", idle_str(d)))
+                    .size(13.0)
+                    .color(c),
+            );
         }
         // 5h then 7d limit *used* — labelled so a glance isn't a guess. Each label+value is
         // bound tighter (3px) than the chip's 5px inter-element gap, so the two read as two
@@ -175,7 +185,9 @@ impl Plugin for Claude {
         let limit_pill = |label: &str, used: f64| {
             row([
                 text(label.to_string()).size(11.0).color(Token::FgDim),
-                text(format!("{used:.0}%")).size(13.0).color(usage_token(used)),
+                text(format!("{used:.0}%"))
+                    .size(13.0)
+                    .color(usage_token(used)),
             ])
             .spacing(3.0)
             .align(Align::Center)
@@ -226,7 +238,9 @@ impl Plugin for Claude {
             col.push(
                 row([
                     Icon::Alert.view(13.0, c),
-                    text(format!("{waiting} waiting for you")).size(13.0).color(c),
+                    text(format!("{waiting} waiting for you"))
+                        .size(13.0)
+                        .color(c),
                 ])
                 .spacing(6.0)
                 .align(Align::Center),
@@ -240,7 +254,11 @@ impl Plugin for Claude {
             for a in &self.agents {
                 // One glyph for every row (shared advance ⇒ names align flush); colour carries
                 // state: green = active, amber/red = idle-and-waiting by how long.
-                let c = if a.waiting { idle_color(a.idle) } else { Token::Ok };
+                let c = if a.waiting {
+                    idle_color(a.idle)
+                } else {
+                    Token::Ok
+                };
                 let mut r = vec![
                     Icon::Dot.view(12.0, c),
                     text(a.label.clone()).size(13.0).color(Token::Fg),
@@ -249,11 +267,11 @@ impl Plugin for Claude {
                 // active agent stays clean (name + green dot). No extra spacer — the row's
                 // 8px spacing already sets the gap, on-grid with every other tag in the panel.
                 if a.waiting || a.idle >= 30 {
-                    r.push(
-                        text(idle_str(a.idle))
-                            .size(11.0)
-                            .color(if a.waiting { c } else { Token::FgDim }),
-                    );
+                    r.push(text(idle_str(a.idle)).size(11.0).color(if a.waiting {
+                        c
+                    } else {
+                        Token::FgDim
+                    }));
                 }
                 col.push(row(r).spacing(8.0).align(Align::Center));
             }
@@ -266,7 +284,9 @@ impl Plugin for Claude {
             col.push(
                 row([
                     text(format!("${:.2}", b.cost)).size(13.0).color(Token::Fg),
-                    text(format!("${:.0}/hr", b.burn)).size(13.0).color(Token::Fg),
+                    text(format!("${:.0}/hr", b.burn))
+                        .size(13.0)
+                        .color(Token::Fg),
                     text(format!("{} left", human_dur(b.mins_left * 60)))
                         .size(13.0)
                         .color(Token::FgDim),
@@ -275,9 +295,13 @@ impl Plugin for Claude {
                 .align(Align::Center),
             );
             col.push(
-                text(format!("projected ${:.0} \u{00b7} {}", b.projected, short_model(&b.model)))
-                    .size(12.0)
-                    .color(Token::FgDim),
+                text(format!(
+                    "projected ${:.0} \u{00b7} {}",
+                    b.projected,
+                    short_model(&b.model)
+                ))
+                .size(12.0)
+                .color(Token::FgDim),
             );
             if self.burn_hist.len() >= 3 {
                 // line colour reads the *risk*, not the brand: green while healthy, amber/red as
@@ -359,7 +383,11 @@ impl Claude {
         // resident child (MCP/LSP server, even one that heartbeats) ticks only a little, so
         // mere "CPU rose at all" would wrongly pin its parent agent to "working" forever
         // (ai-agent-pro). Normalised by real elapsed time so a delayed poll can't inflate it.
-        let elapsed = if self.prev_poll > 0 { (now - self.prev_poll).max(1) } else { 1 };
+        let elapsed = if self.prev_poll > 0 {
+            (now - self.prev_poll).max(1)
+        } else {
+            1
+        };
         self.prev_poll = now;
         let busy_delta = (CPU_BUSY_TPS * elapsed) as u64;
         let mut active = std::collections::HashSet::new();
@@ -451,7 +479,10 @@ impl Claude {
 
         // `parent/base` labels where basenames collide (worktrees, two terminals in one repo).
         let cwds: Vec<String> = agents.iter().map(|a| a.cwd.clone()).collect();
-        for (a, label) in agents.iter_mut().zip(claude_logic::disambiguate_labels(&cwds)) {
+        for (a, label) in agents
+            .iter_mut()
+            .zip(claude_logic::disambiguate_labels(&cwds))
+        {
             a.label = label;
         }
         agents.sort_by(|a, b| {
@@ -526,7 +557,9 @@ fn limit_row(label: &str, used: f64, reset_in: i64) -> Render {
         text(label).size(12.0).color(Token::FgDim),
         row([
             text("\u{2588}".repeat(filled)).size(13.0).color(lvl),
-            text("\u{2591}".repeat(W - filled)).size(13.0).color(Token::FgDim),
+            text("\u{2591}".repeat(W - filled))
+                .size(13.0)
+                .color(Token::FgDim),
         ])
         .spacing(0.0),
         text(format!("{pad}{pct}%")).size(13.0).color(lvl),

@@ -31,7 +31,9 @@ pub const SUPPORTED_WIT: &[&str] = &["0.1.0", "0.2.0"];
 /// Parse a `plugins/<id>/<version>.toml`. `id`, `version`, `sha256` are required (an entry
 /// that can't pin its artifact is useless); `wit` defaults to the first frozen version.
 pub fn parse_entry(toml_body: &str) -> Result<Entry, String> {
-    let doc: toml::Value = toml_body.parse().map_err(|e| format!("registry entry: {e}"))?;
+    let doc: toml::Value = toml_body
+        .parse()
+        .map_err(|e| format!("registry entry: {e}"))?;
     let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let req = |k: &str| s(k).ok_or_else(|| format!("registry entry: missing `{k}`"));
     let id = req("id")?;
@@ -93,7 +95,10 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
         .filter_map(|body| parse_entry(&body).ok())
         .collect();
     if entries.is_empty() {
-        return Err(format!("no index entries for '{id}' under {}", dir.display()));
+        return Err(format!(
+            "no index entries for '{id}' under {}",
+            dir.display()
+        ));
     }
     let picked = pick_in_window(&entries, SUPPORTED_WIT).ok_or_else(|| {
         format!("no version of '{id}' supports this ezbar's WIT window {SUPPORTED_WIT:?} — upgrade ezbar")
@@ -128,7 +133,8 @@ pub fn add(id: &str, registry: &str) -> Result<String, String> {
         ));
     }
 
-    let plugins = ezbar::config::plugins_dir().ok_or("no config dir (set HOME or XDG_CONFIG_HOME)")?;
+    let plugins =
+        ezbar::config::plugins_dir().ok_or("no config dir (set HOME or XDG_CONFIG_HOME)")?;
     std::fs::create_dir_all(&plugins).map_err(|e| format!("mkdir {}: {e}", plugins.display()))?;
     let dest = plugins.join(format!("{id}.wasm"));
     std::fs::write(&dest, &bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
@@ -159,7 +165,10 @@ pub fn update(id: Option<&str>, registry_override: Option<&str>) -> Result<Strin
         Some(i) => vec![i.to_string()],
         None => {
             let dir = ezbar::config::plugins_dir().ok_or("no config dir")?;
-            ezbar_wasm::discover(&dir).into_iter().map(|(id, _)| id).collect()
+            ezbar_wasm::discover(&dir)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
         }
     };
     if ids.is_empty() {
@@ -173,7 +182,9 @@ pub fn update(id: Option<&str>, registry_override: Option<&str>) -> Result<Strin
             .or_else(|| recorded.as_ref().map(|(_, r)| r.clone()))
             .filter(|s| !s.is_empty());
         let Some(source) = source else {
-            out.push_str(&format!("{id}: unknown source — pass --registry to update\n"));
+            out.push_str(&format!(
+                "{id}: unknown source — pass --registry to update\n"
+            ));
             continue;
         };
         // Peek the registry's newest in-window version before re-installing.
@@ -223,7 +234,9 @@ fn load_installed() -> toml::value::Table {
 }
 
 fn save_installed(t: toml::value::Table) -> bool {
-    let Some(path) = installed_path() else { return false };
+    let Some(path) = installed_path() else {
+        return false;
+    };
     let body = format!(
         "# ezbar installed-plugin state (version + source registry) — host-owned.\n\n{}",
         toml::to_string(&toml::Value::Table(t)).unwrap_or_default()
@@ -232,7 +245,9 @@ fn save_installed(t: toml::value::Table) -> bool {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("toml.ezbar-tmp");
-    std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_ok()
+    std::fs::write(&tmp, &body)
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .is_ok()
 }
 
 /// The (version, source-registry) `ezbar add` recorded for `id`, if any.
@@ -295,7 +310,9 @@ fn load_pins() -> toml::value::Table {
 }
 
 fn save_pins(t: toml::value::Table) -> bool {
-    let Some(path) = pins_path() else { return false };
+    let Some(path) = pins_path() else {
+        return false;
+    };
     let body = format!(
         "# ezbar registry publisher pins (TOFU) — host-owned. Delete a line to re-pin on the\n\
          # next `ezbar add`.\n\n{}",
@@ -305,11 +322,16 @@ fn save_pins(t: toml::value::Table) -> bool {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("toml.ezbar-tmp");
-    std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_ok()
+    std::fs::write(&tmp, &body)
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .is_ok()
 }
 
 fn pinned(id: &str) -> Option<String> {
-    load_pins().get(id).and_then(|v| v.as_str()).map(String::from)
+    load_pins()
+        .get(id)
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 fn pin(id: &str, publisher: &str) -> bool {
@@ -334,7 +356,8 @@ fn unpin(id: &str) -> bool {
 fn read_artifact(dir: &Path, entry: &Entry) -> Result<Vec<u8>, String> {
     let local = dir.join(format!("{}.wasm", entry.version));
     if local.is_file() {
-        return std::fs::read(&local).map_err(|e| format!("read artifact {}: {e}", local.display()));
+        return std::fs::read(&local)
+            .map_err(|e| format!("read artifact {}: {e}", local.display()));
     }
     let url = entry.artifact.trim();
     if url.starts_with("http://") || url.starts_with("https://") {
@@ -355,7 +378,9 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
     rt.block_on(async {
-        let resp = reqwest::get(url).await.map_err(|e| format!("GET {url}: {e}"))?;
+        let resp = reqwest::get(url)
+            .await
+            .map_err(|e| format!("GET {url}: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("GET {url}: HTTP {}", resp.status()));
         }
@@ -406,7 +431,14 @@ fn clone_or_pull(url: &str) -> Result<PathBuf, String> {
         let _ = std::fs::create_dir_all(parent);
     }
     let ok = Command::new("git")
-        .args(["clone", "--depth", "1", "--quiet", url, &dir.to_string_lossy()])
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--quiet",
+            url,
+            &dir.to_string_lossy(),
+        ])
         .status()
         .map_err(|e| format!("run git: {e} (is git installed?)"))?
         .success();
@@ -423,7 +455,8 @@ fn clone_or_pull(url: &str) -> Result<PathBuf, String> {
 pub fn search(term: &str, registry: &str) -> Result<String, String> {
     let root = resolve_registry(registry)?;
     let pdir = root.join("plugins");
-    let rd = std::fs::read_dir(&pdir).map_err(|e| format!("read registry {}: {e}", pdir.display()))?;
+    let rd =
+        std::fs::read_dir(&pdir).map_err(|e| format!("read registry {}: {e}", pdir.display()))?;
     let needle = term.to_lowercase();
     let mut hits: Vec<(String, String, String)> = Vec::new(); // id, version, description
     for ent in rd.flatten().filter(|e| e.path().is_dir()) {
@@ -546,16 +579,26 @@ mod tests {
 
     #[test]
     fn picks_newest_version_within_the_wit_window() {
-        let entries = vec![entry("1.0.0", "0.1.0"), entry("1.10.0", "0.2.0"), entry("1.9.0", "0.1.0")];
+        let entries = vec![
+            entry("1.0.0", "0.1.0"),
+            entry("1.10.0", "0.2.0"),
+            entry("1.9.0", "0.1.0"),
+        ];
         // numeric compare: 1.10.0 wins over 1.9.0 (both in window)
-        assert_eq!(pick_in_window(&entries, SUPPORTED_WIT).unwrap().version, "1.10.0");
+        assert_eq!(
+            pick_in_window(&entries, SUPPORTED_WIT).unwrap().version,
+            "1.10.0"
+        );
     }
 
     #[test]
     fn skips_out_of_window_and_errors_when_all_too_new() {
         // newest is 2.0.0 but its wit (0.3.0) is beyond the host window → fall back to 1.5.0
         let entries = vec![entry("1.5.0", "0.2.0"), entry("2.0.0", "0.3.0")];
-        assert_eq!(pick_in_window(&entries, SUPPORTED_WIT).unwrap().version, "1.5.0");
+        assert_eq!(
+            pick_in_window(&entries, SUPPORTED_WIT).unwrap().version,
+            "1.5.0"
+        );
         // everything out of window → None (caller: "upgrade ezbar")
         let all_new = vec![entry("2.0.0", "0.3.0"), entry("3.0.0", "0.4.0")];
         assert!(pick_in_window(&all_new, SUPPORTED_WIT).is_none());
@@ -565,7 +608,7 @@ mod tests {
     fn publisher_tofu_pins_then_guards() {
         assert_eq!(check_publisher(None, "birdayz"), PinCheck::Pin); // first sight → pin
         assert_eq!(check_publisher(Some("birdayz"), "birdayz"), PinCheck::Ok); // same → ok
-        // a different publisher for a pinned id → refused (takeover guard)
+                                                                               // a different publisher for a pinned id → refused (takeover guard)
         assert_eq!(
             check_publisher(Some("birdayz"), "attacker"),
             PinCheck::Mismatch("birdayz".to_string())

@@ -34,23 +34,26 @@ static PENDING_PICKS: Mutex<VecDeque<ezbar_wasm::PickRequest>> = Mutex::new(VecD
 /// Drain the reactor's `pick()` requests into the bar (RFC 0018). Runs once (recipe dedup); takes
 /// the receiver, queues each request, and pokes the bar to open the next picker.
 fn pick_stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(4, |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
-        // Bind in a statement so the MutexGuard drops BEFORE any await (else the future is !Send).
-        let taken = PICK_RX.lock().unwrap().take();
-        let mut rx = match taken {
-            Some(rx) => rx,
-            None => {
-                std::future::pending::<()>().await;
-                return;
+    iced::stream::channel(
+        4,
+        |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
+            // Bind in a statement so the MutexGuard drops BEFORE any await (else the future is !Send).
+            let taken = PICK_RX.lock().unwrap().take();
+            let mut rx = match taken {
+                Some(rx) => rx,
+                None => {
+                    std::future::pending::<()>().await;
+                    return;
+                }
+            };
+            while let Some(req) = rx.recv().await {
+                PENDING_PICKS.lock().unwrap().push_back(req);
+                if out.send(Message::PickReady).await.is_err() {
+                    break;
+                }
             }
-        };
-        while let Some(req) = rx.recv().await {
-            PENDING_PICKS.lock().unwrap().push_back(req);
-            if out.send(Message::PickReady).await.is_err() {
-                break;
-            }
-        }
-    })
+        },
+    )
 }
 
 /// The bar's open native picker (RFC 0018) — a searchable list rendered in iced over a guest's
@@ -135,11 +138,11 @@ mod registry;
 /// semantic clusters that render as separate sub-islands (RFC 0005). The gaps between
 /// groups are the separators; the order is `clock` last so time anchors the far edge.
 const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
-    &["cpu", "memory", "temperature"],   // machine vitals
-    &["ping", "github"],                 // connectivity + dev
-    &["calendar", "spotify"],            // work + media (kube context lives in the WASM plugin)
-    &["stock", "volume", "battery"],     // status
-    &["clock"],                          // time — a dedicated end-cap (switcher trails)
+    &["cpu", "memory", "temperature"], // machine vitals
+    &["ping", "github"],               // connectivity + dev
+    &["calendar", "spotify"],          // work + media (kube context lives in the WASM plugin)
+    &["stock", "volume", "battery"],   // status
+    &["clock"],                        // time — a dedicated end-cap (switcher trails)
 ];
 
 struct ModuleEntry {
@@ -474,10 +477,12 @@ fn install_feed_sampler() {
     let net_prev: Arc<Mutex<Option<(std::time::Instant, u64)>>> = Arc::new(Mutex::new(None));
     ezbar_wasm::set_feed_sampler(Arc::new(move |kind| match kind {
         FeedKind::Cpu => Some(system::extract_cpu_usage_value(&system::get_cpu_usage())),
-        FeedKind::Memory => Some(system::extract_memory_usage_value(&system::get_memory_usage())),
-        FeedKind::Temperature => {
-            Some(system::extract_temperature_value(&system::get_cpu_temperature()))
-        }
+        FeedKind::Memory => Some(system::extract_memory_usage_value(
+            &system::get_memory_usage(),
+        )),
+        FeedKind::Temperature => Some(system::extract_temperature_value(
+            &system::get_cpu_temperature(),
+        )),
         FeedKind::Battery => battery_percent(&battery::get_battery_status()),
         FeedKind::Net => net_rate(&net_prev),
         FeedKind::Ping => None, // deferred — no target in the v0.1 ABI (RFC 0012 §6)
@@ -1486,8 +1491,13 @@ impl Bar {
                     target: pill_id(instance),
                     found: None,
                 };
-                let place = iced::advanced::widget::operate(op)
-                    .map(move |bounds| Message::PlaceModulePopup { instance, id, bounds });
+                let place = iced::advanced::widget::operate(op).map(move |bounds| {
+                    Message::PlaceModulePopup {
+                        instance,
+                        id,
+                        bounds,
+                    }
+                });
                 Task::batch([close_existing, place])
             }
             HostRequest::ClosePopup => {
@@ -2024,14 +2034,23 @@ impl Bar {
         if let Some((enter, leave)) = entry.module.hover_messages() {
             return mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
                 .interaction(Pointer)
-                .on_enter(Message::ModuleMsg { instance, msg: enter })
-                .on_exit(Message::ModuleMsg { instance, msg: leave })
+                .on_enter(Message::ModuleMsg {
+                    instance,
+                    msg: enter,
+                })
+                .on_exit(Message::ModuleMsg {
+                    instance,
+                    msg: leave,
+                })
                 .into();
         }
         if let Some(click) = entry.module.click_message() {
             return mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
                 .interaction(Pointer)
-                .on_press(Message::ModuleMsg { instance, msg: click })
+                .on_press(Message::ModuleMsg {
+                    instance,
+                    msg: click,
+                })
                 .into();
         }
         el
@@ -2070,18 +2089,31 @@ impl Bar {
             // (slamming the cursor to the screen edge still lands on the bar); a default
             // `Shrink` container would collapse that hit area to the glyphs and kill the
             // top-edge hover.
-            let tagged = container(widgets).id(pill_id(instance)).height(Length::Fill);
+            let tagged = container(widgets)
+                .id(pill_id(instance))
+                .height(Length::Fill);
             return mouse_area(tagged)
                 .interaction(Pointer)
-                .on_enter(Message::ModuleMsg { instance, msg: enter })
-                .on_exit(Message::ModuleMsg { instance, msg: leave })
+                .on_enter(Message::ModuleMsg {
+                    instance,
+                    msg: enter,
+                })
+                .on_exit(Message::ModuleMsg {
+                    instance,
+                    msg: leave,
+                })
                 .into();
         }
         if let Some((instance, click)) = self.pill_click(group) {
-            let tagged = container(widgets).id(pill_id(instance)).height(Length::Fill);
+            let tagged = container(widgets)
+                .id(pill_id(instance))
+                .height(Length::Fill);
             return mouse_area(tagged)
                 .interaction(Pointer)
-                .on_press(Message::ModuleMsg { instance, msg: click })
+                .on_press(Message::ModuleMsg {
+                    instance,
+                    msg: click,
+                })
                 .into();
         }
         widgets
@@ -2464,14 +2496,21 @@ impl Bar {
 
         // Open surfaces for newly-matching outputs.
         for name in to_create {
-            let width = desired.iter().find(|o| o.name == name).map_or(1920, |o| o.width);
+            let width = desired
+                .iter()
+                .find(|o| o.name == name)
+                .map_or(1920, |o| o.width);
             let id = window::Id::unique();
             log::info!("reconcile: CREATE {id:?} for output {name}");
             tasks.push(Task::done(Message::NewLayerShell {
                 settings: bar_settings(&self.config, self.bar_pos, &name),
                 id,
             }));
-            self.bars.push(BarSurface { id, output: name, width });
+            self.bars.push(BarSurface {
+                id,
+                output: name,
+                width,
+            });
         }
 
         // If the cursor's output no longer has a bar, forget it (so popups don't
@@ -2840,7 +2879,10 @@ mod tests {
     use super::*;
 
     fn keys(cfg: &Config) -> Vec<String> {
-        desired_module_specs(cfg).into_iter().map(|s| s.key).collect()
+        desired_module_specs(cfg)
+            .into_iter()
+            .map(|s| s.key)
+            .collect()
     }
 
     // ── output-churn reconcile (RFC 0004) — the regression harness for the two-bars saga ──
@@ -2853,11 +2895,20 @@ mod tests {
     #[test]
     fn churn_creates_appearing_outputs_and_closes_gone_ones() {
         // new output B appears next to a tracked A
-        assert_eq!(plan(&["DP-1", "DP-2"], &[("DP-1", 1)]), (vec![], vec!["DP-2".into()]));
+        assert_eq!(
+            plan(&["DP-1", "DP-2"], &[("DP-1", 1)]),
+            (vec![], vec!["DP-2".into()])
+        );
         // an output goes away → its surface closes
-        assert_eq!(plan(&["DP-1"], &[("DP-1", 1), ("DP-2", 2)]), (vec![2], vec![]));
+        assert_eq!(
+            plan(&["DP-1"], &[("DP-1", 1), ("DP-2", 2)]),
+            (vec![2], vec![])
+        );
         // hot-swap: A leaves as B arrives
-        assert_eq!(plan(&["DP-2"], &[("DP-1", 1)]), (vec![1], vec!["DP-2".into()]));
+        assert_eq!(
+            plan(&["DP-2"], &[("DP-1", 1)]),
+            (vec![1], vec!["DP-2".into()])
+        );
         // steady state: nothing to do (idempotent — no churn out for unchanged in)
         assert_eq!(plan(&["DP-1"], &[("DP-1", 1)]), (vec![], vec![]));
     }
@@ -2898,7 +2949,7 @@ mod tests {
         assert_eq!(filter_indices(&items, "PROD"), vec![0]);
         assert_eq!(filter_indices(&items, "prod"), vec![0]); // fold both ways
         assert_eq!(filter_indices(&items, "k"), vec![0, 1, 2, 3]); // every item has a 'k'
-        // no match → empty (the picker shows its no-match state)
+                                                                   // no match → empty (the picker shows its no-match state)
         assert!(filter_indices(&items, "zzz").is_empty());
     }
 

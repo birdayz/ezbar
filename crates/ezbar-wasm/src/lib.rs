@@ -224,7 +224,11 @@ impl ezbar::plugin::host::Host for Host {
         // Capability check (RFC 0012): only deliver feeds the user granted. Fire-and-forget
         // — the frozen WIT has no result, so an ungranted feed is logged and silently never
         // delivered (the plugin can't tell; documented in the SDK contract).
-        if self.granted_feeds.iter().any(|g| g == "*" || g == feed_kind_name(feed)) {
+        if self
+            .granted_feeds
+            .iter()
+            .any(|g| g == "*" || g == feed_kind_name(feed))
+        {
             self.feed_requests.push((feed, min));
         } else {
             log::info!(
@@ -392,7 +396,11 @@ impl v3::ezbar::plugin::host::Host for Host {
             use std::process::{Command, Stdio};
             let mut child = Command::new(&prog)
                 .args(&args)
-                .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+                .stdin(if stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -400,7 +408,9 @@ impl v3::ezbar::plugin::host::Host for Host {
             if let (Some(mut si), Some(bytes)) = (child.stdin.take(), stdin) {
                 let _ = si.write_all(&bytes);
             }
-            child.wait_with_output().map_err(|e| format!("wait '{prog}': {e}"))
+            child
+                .wait_with_output()
+                .map_err(|e| format!("wait '{prog}': {e}"))
         })
         .await
         .map_err(|e| format!("exec join: {e}"))??;
@@ -1006,12 +1016,22 @@ impl Reactor {
                 if let Some(sub) = hub.subs.iter_mut().find(|s| s.token == token) {
                     sub.min_period = min_period; // re-subscribe → just update the cadence
                 } else {
-                    hub.subs.push(Sub { token, tx, min_period, last_sent: None });
+                    hub.subs.push(Sub {
+                        token,
+                        tx,
+                        min_period,
+                        last_sent: None,
+                    });
                 }
             }
             None => {
                 self.spawn_sampler(kind);
-                let subs = vec![Sub { token, tx, min_period, last_sent: None }];
+                let subs = vec![Sub {
+                    token,
+                    tx,
+                    min_period,
+                    last_sent: None,
+                }];
                 feeds.insert(key, FeedHub { subs });
             }
         }
@@ -1057,7 +1077,10 @@ impl Reactor {
                         if !due {
                             return true; // throttled — keep, deliver a later tick
                         }
-                        match sub.tx.try_send(FeedSample { feed: kind, value: v }) {
+                        match sub.tx.try_send(FeedSample {
+                            feed: kind,
+                            value: v,
+                        }) {
                             Ok(()) => {
                                 sub.last_sent = Some(now);
                                 true
@@ -2265,7 +2288,13 @@ mod tests {
         assert_eq!(measure(&l, 1), (108.0, 38.0));
         // a mouse-area is layout-transparent (passes its child's size through).
         let ma = Lifted {
-            nodes: vec![LNode::Spacer(12.0), LNode::MouseArea { child: 0, id: "x".into() }],
+            nodes: vec![
+                LNode::Spacer(12.0),
+                LNode::MouseArea {
+                    child: 0,
+                    id: "x".into(),
+                },
+            ],
             root: 1,
         };
         assert_eq!(measure(&ma, 1), (12.0, 0.0));

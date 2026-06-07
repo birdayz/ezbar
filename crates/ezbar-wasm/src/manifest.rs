@@ -47,9 +47,10 @@ pub fn parse(body: &str) -> Option<Manifest> {
     let list = |k: &str| -> Vec<String> {
         match caps.get(k) {
             Some(toml::Value::String(s)) => vec![s.clone()],
-            Some(toml::Value::Array(a)) => {
-                a.iter().filter_map(|v| v.as_str().map(String::from)).collect()
-            }
+            Some(toml::Value::Array(a)) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
             _ => Vec::new(),
         }
     };
@@ -149,8 +150,7 @@ mod tests {
         assert_eq!(top.feeds, ["cpu"]); // a bare string is accepted as a one-element list
         assert!(top.sway);
 
-        let nested =
-            parse("[capabilities]\nnetwork = [\"a\", \"b\"]\nsway = false").unwrap();
+        let nested = parse("[capabilities]\nnetwork = [\"a\", \"b\"]\nsway = false").unwrap();
         assert_eq!(nested.network, ["a", "b"]);
         assert!(!nested.sway);
         assert!(nested.feeds.is_empty());
@@ -183,7 +183,10 @@ mod tests {
 
     #[test]
     fn no_section_or_other_section_is_none() {
-        assert_eq!(read(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]), None); // bare module
+        assert_eq!(
+            read(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+            None
+        ); // bare module
         assert_eq!(read(&wasm_with_section("producers", b"x")), None); // unrelated section
         assert_eq!(read(b"not wasm at all"), None); // garbage → None, no panic
     }
@@ -203,7 +206,10 @@ mod tests {
         // parses (a naive single-byte size would corrupt the section).
         let host = "h".repeat(200);
         let body = format!("network = [\"{host}\"]");
-        let out = inject(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00], body.as_bytes());
+        let out = inject(
+            &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+            body.as_bytes(),
+        );
         assert_eq!(read(&out).unwrap().network, [host]);
     }
 

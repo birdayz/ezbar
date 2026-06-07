@@ -131,12 +131,15 @@ impl Module for Workspaces {
                     self.anim
                         .entry(w.name.clone())
                         .or_insert_with(|| {
-                            Animation::new(w.focused).easing(Easing::EaseOutCubic).duration(FADE)
+                            Animation::new(w.focused)
+                                .easing(Easing::EaseOutCubic)
+                                .duration(FADE)
                         })
                         .go_mut(w.focused, now); // lilt no-ops if the target is unchanged
                 }
                 // Evict gone workspaces so the map can't grow — no lifecycle leak.
-                self.anim.retain(|name, _| ws.iter().any(|w| &w.name == name));
+                self.anim
+                    .retain(|name, _| ws.iter().any(|w| &w.name == name));
                 self.list = ws.clone();
             }
             Some(Msg::Switch(name)) => sway::run_command(format!("workspace {name}")),
@@ -233,7 +236,10 @@ type Paint = (Color, f32, Color, Color);
 /// changing `blink_on`).
 fn urgent_pulse(urg: Color, urgent: bool, blink_on: bool) -> Color {
     if urgent && !blink_on {
-        Color { a: urg.a * 0.4, ..urg }
+        Color {
+            a: urg.a * 0.4,
+            ..urg
+        }
     } else {
         urg
     }
@@ -317,7 +323,11 @@ fn chip<'a>(
     let (rest, foc): (Paint, Paint) = match style {
         WsStyle::Filled => {
             let urgent_p = (urg, 0.0, urg, base);
-            let focused_p = if urgent { urgent_p } else { (accent, 0.0, accent, base) };
+            let focused_p = if urgent {
+                urgent_p
+            } else {
+                (accent, 0.0, accent, base)
+            };
             // accent-at-alpha-0 (not `TRANSPARENT`) so the fill fades in on-hue, not via
             // darkened-toward-black; `bg.a > 0.001` still suppresses it at rest.
             let rest = if urgent {
@@ -348,7 +358,11 @@ fn chip<'a>(
         // boxed (default): every ws a defined cell, tiered by state, hairline border.
         WsStyle::Boxed | WsStyle::Underbar => {
             let urgent_p = (urg, 1.0, urg, base);
-            let focused_p = if urgent { urgent_p } else { (accent, 1.0, accent, base) };
+            let focused_p = if urgent {
+                urgent_p
+            } else {
+                (accent, 1.0, accent, base)
+            };
             let rest = if urgent {
                 urgent_p
             } else if visible {
