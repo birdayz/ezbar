@@ -89,6 +89,13 @@ struct Claude {
     /// one-tick hysteresis: true after a single zero-agent reading, so a lone transient empty
     /// is absorbed rather than blinked through to the popup.
     saw_empty: bool,
+    /// false until we've found an agent or a short grace has passed — so a cold start (where the
+    /// first `/proc` scans flakily miss the agents) renders a quiet loading chip instead of a
+    /// misleading "0 agents".
+    scanned: bool,
+    /// last scan's total `/proc` process count — cap-std returns a PARTIAL listing for the first
+    /// tick or two of a cold start, so we wait for this to stabilise before trusting a "0 agents".
+    prev_procs: usize,
     tick: u32,
 }
 
@@ -106,7 +113,13 @@ impl Plugin for Claude {
                 self.refresh_agents();
                 self.limits = read_limits();
                 self.sample_limit();
-                if self.tick % 20 == 0 {
+                // Read the ccusage block every ~60s, but not until tick 5 (~15s in): it's a
+                // blocking `exec` that parks the fiber for seconds (cold `bunx` is slow), and
+                // while parked the plugin can't render. The chip needs only agents + limits (both
+                // cheap), so we let the first few agent-only ticks populate and paint it before
+                // the parking exec ever runs — otherwise the exec freezes a half-loaded chip on
+                // every cold start. The popup's block section just fills in by ~15s.
+                if self.tick % 20 == 5 {
                     let block = read_block(ctx);
                     if let Some(b) = &block {
                         // sparkline plots the *spend rate* (Δcost), not cumulative cost.
@@ -129,6 +142,16 @@ impl Plugin for Claude {
     }
 
     fn view(&self) -> Render {
+        // Cold start: we haven't scanned `/proc` yet, so show a quiet loading chip rather than a
+        // misleading "0 agents" before the first reading lands.
+        if !self.scanned {
+            return row([
+                Icon::Bot.view(13.0, Token::FgDim),
+                text("\u{2026}").size(13.0).color(Token::FgDim),
+            ])
+            .spacing(5.0)
+            .align(Align::Center);
+        }
         let total = self.agents.len();
         let worst = self.worst_idle();
         // The Bot stays calm — Accent when agents run, dim when none. Escalation is carried
@@ -171,6 +194,19 @@ impl Plugin for Claude {
     }
 
     fn popup(&self) -> Option<Render> {
+        // Cold start: don't claim "no agents running" before the first scan — show a header that
+        // reads as loading. (Keeps the popup non-interactive, so it stays hover-driven.)
+        if !self.scanned {
+            return Some(
+                row([
+                    Icon::Bot.view(15.0, Token::Accent),
+                    text("Claude Code").size(15.0).color(Token::Fg),
+                    text("\u{2026}").size(15.0).color(Token::FgDim),
+                ])
+                .spacing(8.0)
+                .align(Align::Center),
+            );
+        }
         let total = self.agents.len();
         let waiting = self.agents.iter().filter(|a| a.waiting).count();
         let mut col: Vec<Render> = Vec::new();
@@ -426,6 +462,20 @@ impl Claude {
                 .then(b.idle.cmp(&a.idle))
                 .then(a.label.cmp(&b.label))
         });
+
+        // Trust the scan (let the chip show counts) once we've found an agent OR the `/proc`
+        // enumeration count has stabilised tick-to-tick. cap-std hands back a PARTIAL `/proc`
+        // listing for the first second or two of a cold start (e.g. 519 of 630 entries, missing
+        // the high-PID agents), so an early "0 agents" is an artifact, not reality — until then
+        // the chip stays in its quiet loading state instead of flashing a misleading empty count.
+        let n = procs.len();
+        let stable =
+            self.prev_procs > 0 && (n.abs_diff(self.prev_procs) as f64) < self.prev_procs as f64 * 0.05;
+        if !agents.is_empty() || stable {
+            self.scanned = true;
+        }
+        self.prev_procs = n;
+
         self.agents = agents;
     }
 
