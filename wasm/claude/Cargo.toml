@@ -2,7 +2,7 @@
 name = "claude"
 version = "0.1.0"
 edition = "2021"
-description = "ezbar WASM plugin: Claude Code agent dashboard — running agents (waiting-for-you first), 5h block cost/burn, and rate-limit bars. Reads /proc + ~/.claude (fs) and runs ccusage (exec)."
+description = "ezbar WASM plugin: Claude Code agent dashboard — running agents (waiting-for-you first), a Recount-style per-agent $/hr DPS meter derived from a stored damage log, and rate-limit bars. Reads /proc + ~/.claude (fs). No exec."
 
 [lib]
 crate-type = ["cdylib"]

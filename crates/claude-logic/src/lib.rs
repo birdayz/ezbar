@@ -8,14 +8,51 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-/// The current 5-hour spend block, parsed from `ccusage blocks --active --json`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Block {
+/// A session's two cumulative, monotonic "damage" counters from its per-session statusline
+/// snapshot (`~/.claude/ezbar/sessions/<id>.json`): total spend, and total **API-active** time
+/// (the seconds the model was actually working — Claude Code's own measurement). Both are
+/// computed for us, so the bar needs no token-pricing math and no external tool.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Session {
+    /// `cost.total_cost_usd` — cumulative $ spent.
     pub cost: f64,
-    pub burn: f64,
-    pub mins_left: i64,
-    pub projected: f64,
-    pub model: String,
+    /// `cost.total_api_duration_ms / 1000` — cumulative seconds the model spent in API calls.
+    /// This is the meter's "active combat time": wall-clock idle (the agent parked waiting for
+    /// you) does not advance it, so it's the honest denominator for a burn *rate*.
+    pub api_secs: f64,
+}
+
+/// Parse a session snapshot into its [`Session`] counters. `None` only when the cost figure is
+/// absent/malformed; a missing active-time defaults to `0` (a brand-new session that hasn't made
+/// an API call yet is valid — its DPS just stays 0 until it works).
+pub fn parse_session(json: &str) -> Option<Session> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let cost = v["cost"]["total_cost_usd"].as_f64()?;
+    let api_secs = v["cost"]["total_api_duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
+    Some(Session { cost, api_secs })
+}
+
+/// The **anchor** sample for a session: `(epoch, cumulative_cost, cumulative_api_secs)` captured the
+/// first time ezbar saw it. Every later rate is derived as a delta from this — so the meter measures
+/// what it has *observed since it started*, like Recount records from the moment you open it.
+pub type Damage = (i64, f64, f64);
+
+/// **DPS** in $/hr: cost spent **per hour of active model time**, averaged from the `anchor` (the
+/// session's first sample when ezbar started watching) to the latest `(cost, api_secs)`. This is
+/// the *overall* average since the meter started — `Δcost / Δactive_time` over the whole watched
+/// span, exactly like Recount's overall segment (total damage ÷ time-in-combat), NOT a recent
+/// window. Active-time normalisation is the whole point: wall-clock idle (waiting on you) neither
+/// inflates nor dilutes it, and the number is steady — it converges as the session runs rather than
+/// twitching on the last turn. `0` until there's a measurable sliver of active time since the
+/// anchor; cost only rises, so any non-increase clamps to 0 rather than going negative.
+pub fn dps(anchor: Damage, cost: f64, api_secs: f64) -> f64 {
+    let (_, c0, a0) = anchor;
+    let dcost = (cost - c0).max(0.0);
+    let dactive = api_secs - a0;
+    if dactive <= 0.0 {
+        return 0.0;
+    }
+    (dcost / dactive) * 3600.0
 }
 
 /// Account rate-limit usage, parsed from Claude Code's statusline JSON. `*_used` is percent
@@ -43,24 +80,6 @@ pub fn parse_limits(json: &str, now: i64) -> Option<Limits> {
         five_reset_in: reset_in("five_hour"),
         week_used: rl["seven_day"]["used_percentage"].as_f64(),
         week_reset_in: reset_in("seven_day"),
-    })
-}
-
-/// Parse the active block out of `ccusage blocks --active --json`. `None` when the JSON is
-/// malformed or no block is currently active. Missing numeric fields default to 0 (a partial
-/// block still renders).
-pub fn parse_block(json: &[u8]) -> Option<Block> {
-    let v: Value = serde_json::from_slice(json).ok()?;
-    let b = v["blocks"]
-        .as_array()?
-        .iter()
-        .find(|b| b["isActive"].as_bool().unwrap_or(false))?;
-    Some(Block {
-        cost: b["costUSD"].as_f64().unwrap_or(0.0),
-        burn: b["burnRate"]["costPerHour"].as_f64().unwrap_or(0.0),
-        mins_left: b["projection"]["remainingMinutes"].as_i64().unwrap_or(0),
-        projected: b["projection"]["totalCost"].as_f64().unwrap_or(0.0),
-        model: b["models"][0].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -432,31 +451,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_block_picks_the_active_one() {
-        let json = br#"{"blocks":[
-            {"isActive":false,"costUSD":1.0},
-            {"isActive":true,"costUSD":52.26,"burnRate":{"costPerHour":37.0},
-             "projection":{"remainingMinutes":180,"totalCost":185.0},
-             "models":["claude-opus-4-8","claude-haiku"]}]}"#;
-        let b = parse_block(json).unwrap();
-        assert_eq!(b.cost, 52.26);
-        assert_eq!(b.burn, 37.0);
-        assert_eq!(b.mins_left, 180);
-        assert_eq!(b.projected, 185.0);
-        assert_eq!(b.model, "claude-opus-4-8"); // first model
+    fn parse_session_reads_cost_and_active_time() {
+        let json = r#"{"session_id":"abc","cost":{"total_cost_usd":52.26,"total_api_duration_ms":120000},"model":{"id":"claude-opus-4-8"}}"#;
+        let s = parse_session(json).unwrap();
+        assert_eq!(s.cost, 52.26);
+        assert_eq!(s.api_secs, 120.0); // 120000 ms
+        assert_eq!(parse_session(r#"{"cost":{}}"#), None); // no cost figure
+        assert_eq!(parse_session("not json"), None);
+        // cost present, active-time absent ⇒ valid session, api_secs 0 (DPS just stays 0).
+        let s2 = parse_session(r#"{"cost":{"total_cost_usd":1.0}}"#).unwrap();
+        assert_eq!(s2.api_secs, 0.0);
     }
 
     #[test]
-    fn parse_block_none_or_partial() {
-        assert!(parse_block(br#"{"blocks":[{"isActive":false}]}"#).is_none()); // none active
-        assert!(parse_block(br#"{"blocks":[]}"#).is_none());
-        assert!(parse_block(b"garbage").is_none());
-        // active but sparse → missing numbers default to 0, still renders.
-        let b = parse_block(br#"{"blocks":[{"isActive":true,"costUSD":3.5}]}"#).unwrap();
-        assert_eq!(b.cost, 3.5);
-        assert_eq!(b.burn, 0.0);
-        assert_eq!(b.mins_left, 0);
-        assert_eq!(b.model, "");
+    fn dps_is_overall_cost_per_active_hour_since_anchor() {
+        // anchor at session start ($0, 0s active): $6 across 360s active ⇒ $60 per active hour.
+        assert!((dps((0, 0.0, 0.0), 6.0, 360.0) - 60.0).abs() < 1e-6);
+        // anchored mid-session ($2 over 120s already): delta $4 over 240s active ⇒ $60/active-hr.
+        assert!((dps((100, 2.0, 120.0), 6.0, 360.0) - 60.0).abs() < 1e-6);
+        // no active time accrued since the anchor (idle, or just started) ⇒ 0, not a divide-by-zero.
+        assert_eq!(dps((0, 5.0, 100.0), 5.0, 100.0), 0.0);
+        // cost can't sit below the anchor (cost only rises); a drop clamps to 0, never negative.
+        assert_eq!(dps((0, 9.0, 10.0), 5.0, 20.0), 0.0);
+        // it's the OVERALL average, not a window — an old anchor keeps the whole span averaged:
+        // anchor $0/0s; now $100 over 1000s active ⇒ $360/active-hr, however long ago that started.
+        assert!((dps((0, 0.0, 0.0), 100.0, 1000.0) - 360.0).abs() < 1e-6);
     }
 
     #[test]

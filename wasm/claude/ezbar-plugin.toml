@@ -1,15 +1,14 @@
-# ezbar plugin manifest. `fs` + `exec` are the DANGEROUS tier (RFC 0015): the user grants them
-# by hand (or `[plugins] yolo`). fs is read-only; exec runs only `bunx` (for `ccusage`).
+# ezbar plugin manifest. `fs` is the DANGEROUS tier (RFC 0015): the user grants it by hand (or
+# `[plugins] yolo`). Read-only. No `exec` — cost comes from the statusline snapshot, not a tool.
 id = "claude"
 name = "Claude Code"
 version = "0.1.0"
 wit = "0.4.0"
 publisher = "birdayz"
-description = "Claude Code agent dashboard — running agents (waiting-for-you first), 5h usage cost/burn, rate-limit bars."
+description = "Claude Code agent dashboard + spend meter — running agents (waiting-for-you first), a Recount-style per-agent $/hr meter, and rate-limit bars."
 
 [capabilities]
 fs = [
     { path = "/proc", at = "/proc", mode = "r" },
     { path = "~/.claude", at = "/claude", mode = "r" },
 ]
-exec = ["bunx"]

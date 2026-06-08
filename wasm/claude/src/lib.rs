@@ -1,11 +1,10 @@
-//! ezbar WASM plugin: `claude` — a Claude Code **agent dashboard**.
+//! ezbar WASM plugin: `claude` — a Claude Code **agent dashboard + spend meter**.
 //!
-//! The genuinely useful signal when you run several agents at once: **which one has been
-//! idle the longest** (idle agents are usually waiting for you = wasted time), and **are you
-//! near a rate limit**. The chip stays calm until an agent goes quiet, then it escalates with
-//! idle time (amber → red). The popup is a btop-style panel: idle agents first (longest on
-//! top, with how long), then the 5h block (cost / burn / projection / a spend-rate sparkline),
-//! then limit bars with a "you'll hit the wall before it resets" projection.
+//! Running several agents at once, two things matter: **which one is waiting on you** (an idle
+//! agent is wasted time) and **how fast you're burning money**. The chip shows the live count,
+//! the worst idle (escalating amber → red), the combined **$/hr** (the "raid DPS"), and the
+//! 5h/7d rate-limit usage. The popup is a **Recount-style meter**: one bar per agent, biggest
+//! spender on top, plus the account $/hr trend and the limit bars.
 //!
 //! ## Detection (robust, race-free, zero-config)
 //! `idle` is `now − mtime(newest transcript .jsonl)` under `~/.claude/projects/<cwd>/` — the
@@ -13,15 +12,25 @@
 //! is no in-memory dwell state to get wrong and nothing to install. A **worker-descendant**
 //! check over `/proc` (any non-shell child = actively running a tool) suppresses the false
 //! "waiting" when an agent is grinding a long build/render that simply isn't writing yet.
-//! (The old `notify-send` sniff was a lost race — that process lives milliseconds.)
 //!
-//! Data: `/proc` (live `claude` procs + their cwd + process tree) and `~/.claude` (transcripts
-//! + `ezbar-status.json` rate limits) over read-only **fs**; `bunx ccusage` over **exec**.
+//! ## DPS (a real damage meter — no external tool, no `exec`)
+//! Per agent we sample two cumulative counters from Claude Code's own per-session statusline
+//! snapshot (`~/.claude/ezbar/sessions/<id>.json`, written by the ezbar wrapper): `total_cost_usd`
+//! (the "damage") and `total_api_duration_ms` (the seconds the model was actually working). The
+//! first time ezbar sees a session it **anchors** that pair; DPS is then `Δcost / Δactive` from the
+//! anchor to now — the *overall* average since the meter started, exactly like Recount's overall
+//! segment (total damage ÷ time-in-combat), not a recent window. Cost per hour of *active* model
+//! time, so wall-clock idle (an agent parked waiting for you) neither inflates nor dilutes it, and
+//! the number is steady rather than twitching on the last turn. The combined $/hr is one coherent
+//! number everywhere — the chip, the popup header, the sum of the rows, and the trend sparkline all
+//! show it. No `ccusage`, no token-pricing math — just `fs`.
+//!
+//! Data: `/proc` + `~/.claude` (transcripts, per-session cost, `ezbar-status.json` rate limits)
+//! over read-only **fs**. No `exec`.
 //!
 //! ```toml
 //! [modules.claude]
 //! fs = [{ path = "/proc", at = "/proc", mode = "r" }, { path = "~/.claude", at = "/claude", mode = "r" }]
-//! exec = ["bunx"]
 //! ```
 
 use std::collections::HashMap;
@@ -30,12 +39,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // Pure, host-unit-tested logic (proc parsing, project-dir encoding, projection, JSON parsing, …)
 // lives in a sibling crate so it can run under `cargo test` even though this plugin is wasm-only.
-use claude_logic::{human_dur, idle_str, Block, Level, Limits};
+use claude_logic::{human_dur, idle_str, Damage, Level, Limits};
 use ezbar_plugin_wasm::prelude::*;
 
 // Idle escalation (seconds since last transcript write, when not actively working):
 const ATTN_SECS: i64 = 60; // quiet this long ⇒ "waiting for you" (amber)
 const RED_SECS: i64 = 300; // quiet 5 min ⇒ red "go now"
+
+// Past this, an agent isn't "waiting for you" — it's abandoned. A session left open overnight
+// shouldn't pin the always-on chip red for a day and desensitise you to real alerts, so beyond the
+// cutoff it drops out of the waiting alarm and reads as a dim "parked" row instead.
+const STALE_SECS: i64 = 4 * 3600; // 4h quiet ⇒ parked, not waiting
 
 // A process counts as "doing work" only above this CPU rate (clock ticks/sec; ticks are USER_HZ
 // = 100/s regardless of kernel HZ). Measured: an *idle* Node/Ink process still drips ~1 tick/s
@@ -49,22 +63,33 @@ struct Agent {
     cwd: String,
     /// Display label (basename, or parent/basename when basenames collide).
     label: String,
+    /// This agent's session id (its newest transcript's filename) — keys the cost lookup.
+    session: String,
     /// Seconds since this agent last wrote to its transcript.
     idle: i64,
     /// Quiet past the attention threshold and not actively running a tool ⇒ wants you.
     waiting: bool,
+    /// Cumulative session cost in $ (Claude Code's own figure, via the statusline snapshot) — this
+    /// agent's total "damage done".
+    cost: f64,
+    /// Cumulative seconds of API-active model time — the DPS denominator (active combat time).
+    api_secs: f64,
+    /// Spend rate in $/hr — this agent's "DPS", `Δcost / Δactive` averaged since its anchor.
+    dps: f64,
 }
 
 #[derive(Default)]
 struct Claude {
     agents: Vec<Agent>,
-    block: Option<Block>,
     limits: Option<Limits>,
-    /// per-block spend-rate samples (Δcost between block polls) for the sparkline.
-    burn_hist: Vec<f64>,
-    prev_cost: Option<f64>,
     /// sparse `(epoch, five_hour_remaining%)` samples to project time-to-limit.
     limit_hist: Vec<(i64, f64)>,
+    /// per-session **anchor** — the first `(epoch, cost, active_secs)` ezbar saw for each session.
+    /// DPS is the average from here to now, so the meter measures everything since it started (like
+    /// Recount's overall segment), not a recent window. O(1) per session — no growing time series.
+    anchors: HashMap<String, Damage>,
+    /// account $/hr over time — the meter's trend sparkline ("raid DPS").
+    dps_hist: Vec<f64>,
     /// `pid → cpu ticks` from the last poll, to tell a *busy* child from an idle resident one.
     prev_cpu: HashMap<i32, u64>,
     /// epoch of the last poll, so the CPU delta is normalised to a rate (jitter-proof).
@@ -78,8 +103,6 @@ struct Claude {
     scanned: bool,
     /// epoch of the first tick — anchors the warm-up grace.
     started: i64,
-    /// epoch of the last ccusage block read — paces it to ~60s without a tick counter.
-    last_block: i64,
 }
 
 fn now_secs() -> i64 {
@@ -97,8 +120,7 @@ impl Plugin for Claude {
                 if self.started == 0 {
                     self.started = now;
                 }
-                let was_scanned = self.scanned;
-                self.refresh_agents();
+                self.refresh_agents(now);
                 self.limits = read_limits();
                 self.sample_limit();
 
@@ -110,24 +132,15 @@ impl Plugin for Claude {
                     self.scanned = true;
                 }
 
-                // Read the ccusage block (popup-only) every ~60s — but ONLY once the chip is
-                // already painting a populated frame (`was_scanned`, i.e. scanned on a prior
-                // tick). It's a blocking `exec` that parks the fiber for seconds (cold `bunx` is
-                // slow); running it before the chip has painted would freeze a half-loaded chip.
-                if was_scanned && (self.last_block == 0 || now - self.last_block >= 60) {
-                    self.last_block = now;
-                    let block = read_block(ctx);
-                    if let Some(b) = &block {
-                        // sparkline plots the *spend rate* (Δcost), not cumulative cost.
-                        if let Some(prev) = self.prev_cost {
-                            self.burn_hist.push((b.cost - prev).max(0.0));
-                            if self.burn_hist.len() > 60 {
-                                self.burn_hist.remove(0);
-                            }
-                        }
-                        self.prev_cost = Some(b.cost);
+                // Trend of the account's combined live $/hr (the "raid DPS") for the meter
+                // sparkline — the SAME quantity the chip and popup header show (`live_dps`),
+                // sampled each settled tick so the graph, the header number, and the sum of the
+                // Accent rows are one coherent metric rather than subtly different windows.
+                if self.scanned {
+                    self.dps_hist.push(self.live_dps());
+                    if self.dps_hist.len() > 60 {
+                        self.dps_hist.remove(0);
                     }
-                    self.block = block;
                 }
 
                 // Poll FAST until the scan settles (warms the cold cap-std `/proc` enumeration up
@@ -168,16 +181,35 @@ impl Plugin for Claude {
                 Token::FgDim
             }),
         ];
+        // The live spend rate — the whole team's combined $/hr (the "raid DPS"). It's the meter's
+        // headline, so it's ALWAYS on the bar whenever agents exist: Accent while money is moving,
+        // dim "$0/hr" when the raid's gone quiet. (A DPS meter shows the DPS even when it's zero —
+        // a vanished number reads as "broken", a $0 reads as "idle".)
+        let total_dps: f64 = self.live_dps();
+        if total > 0 {
+            parts.push(
+                text(format!("${total_dps:.0}/hr"))
+                    .size(13.0)
+                    .color(if total_dps >= 1.0 {
+                        Token::Accent
+                    } else {
+                        Token::FgDim
+                    }),
+            );
+        }
         // the loud bit: agents waiting for you, with the worst idle — escalates amber → red.
         if let Some(d) = worst {
             let n = self.agents.iter().filter(|a| a.waiting).count();
             let c = idle_color(d);
             parts.push(Icon::Alert.view(13.0, c));
-            parts.push(
-                text(format!("{n}\u{00b7}{}", idle_str(d)))
-                    .size(13.0)
-                    .color(c),
-            );
+            // lead with the worst idle (the part that makes you act); prefix the count only when
+            // more than one waits. The middot is spaced so "3 · 25h" can't read as decimal "3.25h".
+            let txt = if n == 1 {
+                idle_str(d)
+            } else {
+                format!("{n} \u{00b7} {}", idle_str(d))
+            };
+            parts.push(text(txt).size(13.0).color(c));
         }
         // 5h then 7d limit *used* — labelled so a glance isn't a guess. Each label+value is
         // bound tighter (3px) than the chip's 5px inter-element gap, so the two read as two
@@ -193,6 +225,11 @@ impl Plugin for Claude {
             .align(Align::Center)
         };
         if let Some(l) = self.limits.as_ref() {
+            // a wider gap fences the account rate-limit cluster off from the agent/DPS cluster, so
+            // the chip reads as two groups rather than a run of equal-spaced tokens.
+            if l.five_used.is_some() || l.week_used.is_some() {
+                parts.push(spacer(7.0));
+            }
             if let Some(p) = l.five_used {
                 parts.push(limit_pill("5h", p));
             }
@@ -218,105 +255,101 @@ impl Plugin for Claude {
             );
         }
         let total = self.agents.len();
-        let waiting = self.agents.iter().filter(|a| a.waiting).count();
+        let total_dps: f64 = self.live_dps();
+        let total_cost: f64 = self.agents.iter().map(|a| a.cost).sum();
         let mut col: Vec<Render> = Vec::new();
 
-        // ── header ──
-        col.push(
-            row([
-                Icon::Bot.view(15.0, Token::Accent),
-                text("Claude Code").size(15.0).color(Token::Fg),
-                text(format!("\u{00b7} {total} running"))
+        // ── header: title + agent count + the raid DPS (combined live $/hr) ──
+        // The count is the TOTAL — it always equals the chip's count, so the two surfaces can't
+        // contradict each other. Who's working / waiting / parked is carried by the per-row dot
+        // colours and idle times (and the chip's ⚠ alarm), not by a separate summary line.
+        let mut hdr = vec![
+            Icon::Bot.view(15.0, Token::Accent),
+            text("Claude Code").size(15.0).color(Token::Fg),
+            text(format!(
+                "\u{00b7} {total} agent{}",
+                if total == 1 { "" } else { "s" }
+            ))
+            .size(12.0)
+            .color(Token::FgDim),
+        ];
+        if total > 0 {
+            hdr.push(
+                text(format!("\u{00b7} ${total_dps:.0}/hr"))
                     .size(12.0)
-                    .color(Token::FgDim),
-            ])
-            .spacing(8.0)
-            .align(Align::Center),
-        );
-        if waiting > 0 {
-            let c = self.worst_idle().map(idle_color).unwrap_or(Token::Warn);
-            col.push(
-                row([
-                    Icon::Alert.view(13.0, c),
-                    text(format!("{waiting} waiting for you"))
-                        .size(13.0)
-                        .color(c),
-                ])
-                .spacing(6.0)
-                .align(Align::Center),
+                    .color(if total_dps >= 1.0 {
+                        Token::Accent
+                    } else {
+                        Token::FgDim
+                    }),
             );
         }
+        col.push(row(hdr).spacing(8.0).align(Align::Center));
 
-        // ── agents (longest-idle first) ──
+        // ── the meter: one bar per agent, biggest spender on top (Recount Damage-Done mode) ──
         if total == 0 {
             col.push(text("no agents running").size(13.0).color(Token::FgDim));
         } else {
+            let max_cost = self.agents.iter().map(|a| a.cost).fold(0.0_f64, f64::max);
+            // Recount's row is (total, DPS) with the bar ∝ total: the bar gives the at-a-glance
+            // ranking, the printed $total the exact money (this is a *spend* meter — you want to
+            // read the dollars), and the $/hr the live burn rate. $/hr is the one Accent, but only
+            // when the agent is actually burning *now* — a parked agent's last rate stays dim.
             for a in &self.agents {
-                // One glyph for every row (shared advance ⇒ names align flush); colour carries
-                // state: green = active, amber/red = idle-and-waiting by how long.
-                let c = if a.waiting {
+                // dot state: green working, amber/red waiting-on-you, dim when parked (gone stale).
+                let dot_c = if a.waiting {
                     idle_color(a.idle)
+                } else if a.idle >= STALE_SECS {
+                    Token::FgDim
                 } else {
                     Token::Ok
                 };
+                // Each row shows THIS agent's own overall average $/hr (its DPS since ezbar
+                // anchored it) — like Recount, where a player's overall DPS stays on their row even
+                // after they stop. Accent when it's still burning now, dim once it's idle/parked
+                // (the number persists, the colour drops). Every cell is the same `$N/hr` shape, so
+                // the column still aligns; the Accent rows are exactly the ones summed into the
+                // header (`live_dps`), so the bright values still foot to the headline.
+                let live = burning(a);
+                let rate = format!("${:.0}/hr", a.dps);
+                let total = format!("${:.0}", a.cost);
                 let mut r = vec![
-                    Icon::Dot.view(12.0, c),
-                    text(a.label.clone()).size(13.0).color(Token::Fg),
-                ];
-                // Show the idle time when it's notable (waiting, or quiet ≥30s); a freshly
-                // active agent stays clean (name + green dot). No extra spacer — the row's
-                // 8px spacing already sets the gap, on-grid with every other tag in the panel.
-                if a.waiting || a.idle >= 30 {
-                    r.push(text(idle_str(a.idle)).size(11.0).color(if a.waiting {
-                        c
+                    Icon::Dot.view(12.0, dot_c),
+                    meter_bar(a.cost, max_cost),
+                    text(pad_num(&rate, 7)).size(13.0).color(if live {
+                        Token::Accent
                     } else {
                         Token::FgDim
-                    }));
+                    }),
+                    text(pad_num(&total, 6)).size(11.0).color(Token::FgDim),
+                    text(a.label.clone()).size(13.0).color(Token::Fg),
+                ];
+                // a waiting agent also shows how long it's been quiet, in its escalation colour.
+                if a.waiting {
+                    r.push(text(idle_str(a.idle)).size(11.0).color(dot_c));
                 }
                 col.push(row(r).spacing(8.0).align(Align::Center));
             }
         }
 
-        // ── 5-hour block ──
-        if let Some(b) = &self.block {
+        // ── spend: total across the running agents, + the account $/hr trend ──
+        if total > 0 {
             col.push(rule());
-            col.push(text("5-hour block").size(12.0).color(Token::Accent));
             col.push(
                 row([
-                    text(format!("${:.2}", b.cost)).size(13.0).color(Token::Fg),
-                    text(format!("${:.0}/hr", b.burn))
+                    text(format!("${total_cost:.0}"))
                         .size(13.0)
                         .color(Token::Fg),
-                    text(format!("{} left", human_dur(b.mins_left * 60)))
-                        .size(13.0)
-                        .color(Token::FgDim),
+                    text("total spent").size(12.0).color(Token::FgDim),
                 ])
-                .spacing(10.0)
+                .spacing(6.0)
                 .align(Align::Center),
             );
-            col.push(
-                text(format!(
-                    "projected ${:.0} \u{00b7} {}",
-                    b.projected,
-                    short_model(&b.model)
-                ))
-                .size(12.0)
-                .color(Token::FgDim),
-            );
-            if self.burn_hist.len() >= 3 {
-                // line colour reads the *risk*, not the brand: green while healthy, amber/red as
-                // the 5h limit tightens — so the sparkline says "you're burning toward the wall"
-                // and never double-duties Accent (which is the header's job).
-                let line = self
-                    .limits
-                    .as_ref()
-                    .and_then(|l| l.five_used)
-                    .map(usage_token)
-                    .unwrap_or(Token::Ok);
+            if self.dps_hist.len() >= 3 {
                 col.push(
                     Chart {
-                        values: self.burn_hist.clone(),
-                        line: line.into(),
+                        values: self.dps_hist.clone(),
+                        line: Token::Accent.into(),
                         width: 248.0,
                         height: 34.0,
                     }
@@ -328,7 +361,7 @@ impl Plugin for Claude {
         // ── limits ──
         if let Some(l) = &self.limits {
             col.push(rule());
-            col.push(text("Limits").size(12.0).color(Token::Accent));
+            col.push(text("Limits").size(12.0).color(Token::FgDim));
             if let Some(p) = l.five_used {
                 col.push(limit_row("5h", p, l.five_reset_in));
             }
@@ -362,10 +395,9 @@ impl Plugin for Claude {
 }
 
 impl Claude {
-    /// Read live agents from `/proc`, derive idle time from each one's transcript, flag the
-    /// quiet-and-not-working ones, and sort longest-idle first.
-    fn refresh_agents(&mut self) {
-        let now = now_secs();
+    /// Read live agents from `/proc`, derive idle from each transcript, read each one's session
+    /// cost + compute its live $/hr, and sort the meter biggest-spender first.
+    fn refresh_agents(&mut self, now: i64) {
         let (procs, children) = read_procs();
 
         // Never publish an empty snapshot from a failed scan. `/proc` always holds hundreds of
@@ -432,23 +464,26 @@ impl Claude {
             })
             .collect();
 
-        // Idle comes from transcript mtime, but a cwd's project dir is shared by every session
-        // that ran there — so we can't map a pid to a file. Instead, per cwd, hand the freshest
-        // mtimes to the *busy* agents (streaming or tool-running — they own the recent writes)
-        // and the older ones to the rest. That way a busy sibling can't reset idle for a
-        // genuinely-waiting one: the stale file lands on the idle agent and correctly flags it
-        // (ai-agent-pro #2).
+        // Idle + the session id come from the transcript files. A cwd's project dir is shared by
+        // every session that ran there, so per cwd hand the freshest transcripts to the *busy*
+        // agents (they own the recent writes) and the older to the rest — a busy sibling then
+        // can't reset a genuinely-waiting one's idle, and each agent gets its own session id
+        // (the transcript filename) for the cost lookup (ai-agent-pro #2).
         let mut by_cwd: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, r) in raws.iter().enumerate() {
             by_cwd.entry(r.cwd.clone()).or_default().push(i);
         }
         let mut idle = vec![0i64; raws.len()];
+        let mut session = vec![String::new(); raws.len()];
         for (cwd, idxs) in &by_cwd {
-            let mtimes = transcript_mtimes(cwd); // newest first
+            let sessions = transcript_sessions(cwd); // (session_id, mtime), newest first
             let mut order = idxs.clone();
             order.sort_by_key(|&i| !raws[i].busy); // busy agents claim the fresh writes first
             for (k, &i) in order.iter().enumerate() {
-                idle[i] = mtimes.get(k).map(|&m| (now - m).max(0)).unwrap_or(0);
+                if let Some((sid, m)) = sessions.get(k) {
+                    idle[i] = (now - m).max(0);
+                    session[i] = sid.clone();
+                }
             }
         }
 
@@ -458,11 +493,15 @@ impl Claude {
             .map(|(i, r)| Agent {
                 label: String::new(), // filled by disambiguate_labels below
                 // Detector gates on `working` ALONE — a parked agent (no tool child) flags after
-                // ATTN_SECS even though its idle render loop nudges CPU. `busy` only steered the
-                // mtime hand-out above.
-                waiting: !r.working && idle[i] >= ATTN_SECS,
+                // ATTN_SECS even though its idle render loop nudges CPU. Above STALE_SECS it's no
+                // longer "waiting for you" (abandoned), so it leaves the alarm and reads as parked.
+                waiting: !r.working && (ATTN_SECS..STALE_SECS).contains(&idle[i]),
                 idle: idle[i],
+                session: std::mem::take(&mut session[i]),
                 cwd: r.cwd,
+                cost: 0.0,
+                api_secs: 0.0,
+                dps: 0.0,
             })
             .collect();
 
@@ -485,13 +524,50 @@ impl Claude {
         {
             a.label = label;
         }
+
+        // DPS per agent: read this session's cumulative `(cost, active_secs)` from its statusline
+        // snapshot, anchor it the first time we see it, and take the average from the anchor to now
+        // — Δcost/Δactive over the whole watched span (Recount's overall segment). Nothing
+        // pre-divided, and just one stored sample per session.
+        for a in &mut agents {
+            if let Some(s) = read_session(&a.session) {
+                a.cost = s.cost;
+                a.api_secs = s.api_secs;
+                let anchor = *self
+                    .anchors
+                    .entry(a.session.clone())
+                    .or_insert((now, s.cost, s.api_secs));
+                a.dps = claude_logic::dps(anchor, s.cost, s.api_secs);
+            }
+        }
+        // Drop anchors for sessions no longer live so the map can't grow unbounded.
+        let live: std::collections::HashSet<&str> =
+            agents.iter().map(|a| a.session.as_str()).collect();
+        self.anchors.retain(|sid, _| live.contains(sid.as_str()));
+
+        // Recount order: biggest spender on top. We rank by *total* spend ("damage done"), not
+        // by $/hr — all-opus agents burn at nearly the same per-active-hour rate (the rate is
+        // model-bound), so a $/hr ranking would be a near-flat, uninformative meter, while total
+        // spend spreads wide and gives the bars real hierarchy. Exactly Recount's default mode.
+        // Tiebreak by $/hr, then name, for a stable order.
         agents.sort_by(|a, b| {
-            b.waiting
-                .cmp(&a.waiting)
-                .then(b.idle.cmp(&a.idle))
+            cmp_desc(a.cost, b.cost)
+                .then(cmp_desc(a.dps, b.dps))
                 .then(a.label.cmp(&b.label))
         });
         self.agents = agents;
+    }
+
+    /// Combined **live** $/hr — the team's "raid DPS" — counting only agents that are burning
+    /// right now (the Accent rows). A waiting/parked agent's overall average still shows on its own
+    /// row, but it isn't money leaving the account this second, so it doesn't inflate the headline.
+    /// The bright rows therefore sum to this. One coherent number for the chip, header, sparkline.
+    fn live_dps(&self) -> f64 {
+        self.agents
+            .iter()
+            .filter(|a| burning(a))
+            .map(|a| a.dps)
+            .sum()
     }
 
     fn worst_idle(&self) -> Option<i64> {
@@ -522,6 +598,13 @@ impl Claude {
     fn project_five(&self) -> Option<i64> {
         claude_logic::project_to_full(&self.limit_hist, 60, 0.5)
     }
+}
+
+/// Is this agent **burning right now** — actively spending, not waiting on you or parked? Its
+/// overall-average $/hr then counts toward the live headline and paints Accent. Idle agents still
+/// show their average on their own row, just dim and out of the live total.
+fn burning(a: &Agent) -> bool {
+    a.dps >= 1.0 && !a.waiting && a.idle < STALE_SECS
 }
 
 // ── rendering helpers ────────────────────────────────────────────────────────
@@ -576,11 +659,43 @@ fn rule() -> Render {
     text("\u{2500}".repeat(60)).size(8.0).color(Token::FgDim)
 }
 
-fn short_model(m: &str) -> String {
-    m.strip_prefix("claude-").unwrap_or(m).to_string()
+/// A fixed-width block-char meter bar (Recount-style): `value/max` of the cells filled, the rest
+/// dim. Scaled by total spend, so the biggest spender's bar is full and the rest rank against it.
+/// Filled cells are **Fg** (neutral structure), NOT Accent — Accent is reserved for the one live
+/// signal, the $/hr; the bar encodes *how much* (cumulative, already spent), which is not "money
+/// moving now". An all-dim bar (value 0) reads as "nothing spent yet".
+fn meter_bar(value: f64, max: f64) -> Render {
+    const W: usize = 10;
+    // Any nonzero spender gets at least a one-cell sliver (a raider in the meter is never blank),
+    // even when dwarfed by the top bar; only a true zero renders empty.
+    let n = if max > 0.0 && value > 0.0 {
+        (((value / max) * W as f64).round() as usize).clamp(1, W)
+    } else {
+        0
+    };
+    row([
+        text("\u{2588}".repeat(n)).size(13.0).color(Token::Fg),
+        text("\u{2591}".repeat(W - n))
+            .size(13.0)
+            .color(Token::FgDim),
+    ])
+    .spacing(0.0)
 }
 
-// ── data (fs + exec) ─────────────────────────────────────────────────────────
+/// Descending `f64` comparison for the Recount sort (NaN sorts as equal, never panics).
+fn cmp_desc(a: f64, b: f64) -> std::cmp::Ordering {
+    b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Right-align a short numeric string in a fixed `width`-char cell with figure-spaces (U+2007
+/// shares a digit's advance), so a stack of `$/hr` (or `$total`) values forms a clean right-edged
+/// column even in the bar's proportional font — same trick the limit rows use for their percents.
+fn pad_num(s: &str, width: usize) -> String {
+    let pad = width.saturating_sub(s.chars().count());
+    format!("{}{}", "\u{2007}".repeat(pad), s)
+}
+
+// ── data (fs) ────────────────────────────────────────────────────────────────
 
 struct Proc {
     pid: i32,
@@ -639,28 +754,31 @@ fn proc_cwd(pid: i32) -> String {
     "?".into()
 }
 
-/// True if `pid` has any descendant that is *actively working* (`active` set) — runnable/in-IO
-/// Epoch mtimes of `cwd`'s transcript `.jsonl` files, **newest first** — one per session that
-/// ran there. Claude stores transcripts under `~/.claude/projects/<encode_project(cwd)>`, mapped
-/// here to `/claude/projects/…`. Empty when there's no transcript yet.
-fn transcript_mtimes(cwd: &str) -> Vec<i64> {
+/// `(session_id, mtime)` for `cwd`'s transcript `.jsonl` files, **newest first** — one per
+/// session that ran there. The session id is the filename stem (the session UUID), which is also
+/// the key for the per-session cost snapshot. Claude stores transcripts under
+/// `~/.claude/projects/<encode_project(cwd)>`, mapped here to `/claude/projects/…`.
+fn transcript_sessions(cwd: &str) -> Vec<(String, i64)> {
     let dir = format!("/claude/projects/{}", claude_logic::encode_project(cwd));
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let mut mtimes: Vec<i64> = entries
+    let mut out: Vec<(String, i64)> = entries
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
         .filter_map(|e| {
-            e.metadata()
+            let name = e.file_name().to_string_lossy().to_string();
+            let sid = name.strip_suffix(".jsonl")?.to_string();
+            let mtime = e
+                .metadata()
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
+                .map(|d| d.as_secs() as i64)?;
+            Some((sid, mtime))
         })
         .collect();
-    mtimes.sort_unstable_by(|a, b| b.cmp(a)); // newest first
-    mtimes
+    out.sort_unstable_by(|a, b| b.1.cmp(&a.1)); // newest first
+    out
 }
 
 fn read_limits() -> Option<Limits> {
@@ -668,14 +786,12 @@ fn read_limits() -> Option<Limits> {
     claude_logic::parse_limits(&data, now_secs())
 }
 
-fn read_block(ctx: &mut dyn Ctx) -> Option<Block> {
-    let o = ctx
-        .exec("bunx", &["ccusage", "blocks", "--active", "--json"], None)
-        .ok()?;
-    if o.code != 0 {
-        return None;
-    }
-    claude_logic::parse_block(&o.stdout)
+/// This session's cumulative damage counters (`cost`, `api_secs`), from its per-session statusline
+/// snapshot (`~/.claude/ezbar/sessions/<id>.json`) written by the ezbar statusline wrapper. No
+/// external tool — Claude Code already computed the figures; we just read them.
+fn read_session(session_id: &str) -> Option<claude_logic::Session> {
+    let data = fs::read_to_string(format!("/claude/ezbar/sessions/{session_id}.json")).ok()?;
+    claude_logic::parse_session(&data)
 }
 
 export_plugin!(Claude);
