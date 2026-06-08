@@ -185,7 +185,8 @@ impl Plugin for Claude {
         // headline, so it's ALWAYS on the bar whenever agents exist: Accent while money is moving,
         // dim "$0/hr" when the raid's gone quiet. (A DPS meter shows the DPS even when it's zero —
         // a vanished number reads as "broken", a $0 reads as "idle".)
-        let total_dps: f64 = self.live_dps();
+        // `.max(0.0)` normalises a float -0.0 / sub-dollar negative so it never prints "$-0/hr".
+        let total_dps: f64 = self.live_dps().max(0.0);
         if total > 0 {
             parts.push(
                 text(format!("${total_dps:.0}/hr"))
@@ -255,7 +256,7 @@ impl Plugin for Claude {
             );
         }
         let total = self.agents.len();
-        let total_dps: f64 = self.live_dps();
+        let total_dps: f64 = self.live_dps().max(0.0);
         let total_cost: f64 = self.agents.iter().map(|a| a.cost).sum();
         let mut col: Vec<Render> = Vec::new();
 
@@ -311,7 +312,7 @@ impl Plugin for Claude {
                 // the column still aligns; the Accent rows are exactly the ones summed into the
                 // header (`live_dps`), so the bright values still foot to the headline.
                 let live = burning(a);
-                let rate = format!("${:.0}/hr", a.dps);
+                let rate = format!("${:.0}/hr", a.dps.max(0.0));
                 let total = format!("${:.0}", a.cost);
                 let mut r = vec![
                     Icon::Dot.view(12.0, dot_c),
