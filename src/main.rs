@@ -1393,7 +1393,17 @@ impl Bar {
                         self.module_popup_size = Some(size);
                         // Anchor under the pill (ground-truth geometry) when it was host-tagged;
                         // otherwise (module-internal hover, e.g. stock) fall back to the cursor.
-                        let anchor_x = bounds.map_or(self.cursor_x, |b| b.center_x());
+                        // BUT the pill's `Id` is the same on every output's bar surface, so the
+                        // bounds-finding widget operation returns *some* output's pill, not
+                        // necessarily this one — useless across >1 surface, where it would anchor a
+                        // popup on the cursor's output using a different output's x (popup lands
+                        // mid-screen). With multiple bar surfaces, fall back to the cursor, which is
+                        // tracked per-surface in the cursor_output's own local space and is correct.
+                        let anchor_x = if self.bars.len() > 1 {
+                            self.cursor_x
+                        } else {
+                            bounds.map_or(self.cursor_x, |b| b.center_x())
+                        };
                         let left = self.popup_left_margin_at(size.0, anchor_x);
                         Task::done(Message::NewLayerShell {
                             settings: self.popup_settings(
