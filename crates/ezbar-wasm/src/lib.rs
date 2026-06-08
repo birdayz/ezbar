@@ -24,6 +24,7 @@ use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use ezbar_plugin::iced::advanced::subscription::{from_recipe, EventStream, Hasher, Recipe};
+use ezbar_plugin::iced::widget::text::Wrapping;
 use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
 use ezbar_plugin::iced::{alignment, Color, Element, Length, Subscription};
 use ezbar_plugin::ui::graph::{Graph, GraphKind, MiniTrend};
@@ -1817,7 +1818,10 @@ impl Module for WasmModule {
             return None;
         }
         let w = (w + 32.0).clamp(96.0, 720.0);
-        let h = (h + 28.0).clamp(40.0, 560.0);
+        // Ceiling raised well past the old 560 so a many-agent meter (one row per agent, plus the
+        // spend/limit sections) isn't capped and clipped at the bottom. ~1080 fits a 1440p screen
+        // with room; beyond that many agents the popup would want scrolling, not a taller surface.
+        let h = (h + 28.0).clamp(40.0, 1080.0);
         Some((w as u32, h as u32))
     }
 
@@ -1946,7 +1950,10 @@ fn measure(l: &Lifted, idx: u32) -> (f32, f32) {
         LNode::Text { content, size, .. } => {
             let px = size.unwrap_or(14.0);
             let cols = content.chars().count().max(1) as f32;
-            (cols * px * 0.55, px * 1.4)
+            // Rough off-thread metrics: ~0.6em average advance (generous, so a wrapping-disabled
+            // row gets a wide-enough surface and doesn't clip on the right), and a line box a touch
+            // over iced's 1.3 line-height for vertical headroom.
+            (cols * px * 0.6, px * 1.45)
         }
         LNode::Row {
             children, spacing, ..
@@ -1988,7 +1995,13 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
             color,
             size,
         } => {
-            let mut t = text(content.clone()).color(paint_color(color, ctx));
+            // Never wrap: a bar popup is single-line by design. With the default word-wrap, a row
+            // a hair wider than the (estimated) surface would fold onto a second line and grow the
+            // column past the height `measure` predicted — clipping the bottom, and worse the more
+            // rows there are. `Wrapping::None` keeps every line one line, so height stays measurable.
+            let mut t = text(content.clone())
+                .wrapping(Wrapping::None)
+                .color(paint_color(color, ctx));
             if let Some(s) = size {
                 t = t.size(*s);
             }
@@ -2207,17 +2220,17 @@ mod tests {
             root: 2,
         };
         let (w, h) = measure(&l, 2);
-        // per text: 2 * 10 * 0.55 = 11.0 wide, 10 * 1.4 = 14.0 tall.
-        assert!((w - (11.0 + 11.0 + 5.0)).abs() < 1e-3, "w={w}");
-        assert!((h - 14.0).abs() < 1e-3, "h={h}");
+        // per text: 2 * 10 * 0.6 = 12.0 wide, 10 * 1.45 = 14.5 tall.
+        assert!((w - (12.0 + 12.0 + 5.0)).abs() < 1e-3, "w={w}");
+        assert!((h - 14.5).abs() < 1e-3, "h={h}");
     }
 
     #[test]
     fn measure_column_stacks_height_and_takes_max_width() {
         let l = Lifted {
             nodes: vec![
-                txt("a", Some(10.0)),   // 1*10*0.55 = 5.5 wide
-                txt("abc", Some(10.0)), // 3*10*0.55 = 16.5 wide
+                txt("a", Some(10.0)),   // 1*10*0.6 = 6.0 wide
+                txt("abc", Some(10.0)), // 3*10*0.6 = 18.0 wide
                 LNode::Column {
                     children: vec![0, 1],
                     spacing: 4.0,
@@ -2227,8 +2240,8 @@ mod tests {
             root: 2,
         };
         let (w, h) = measure(&l, 2);
-        assert!((w - 16.5).abs() < 1e-3, "w={w}"); // widest child
-        assert!((h - (14.0 + 14.0 + 4.0)).abs() < 1e-3, "h={h}"); // stacked + spacing
+        assert!((w - 18.0).abs() < 1e-3, "w={w}"); // widest child
+        assert!((h - (14.5 + 14.5 + 4.0)).abs() < 1e-3, "h={h}"); // stacked + spacing
     }
 
     #[test]

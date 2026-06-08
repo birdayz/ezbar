@@ -686,6 +686,11 @@ struct Bar {
     bars: Vec<BarSurface>,
     popup: Option<(window::Id, PopupKind)>,
     module_popup: Option<(window::Id, u64, PopupMode)>,
+    /// The size the open module popup's surface was last given. A module whose popup is open keeps
+    /// updating (a new agent row, a toggled section); when its re-measured size changes we resize
+    /// the live surface to it (RFC 0001) so a content-grew popup doesn't clip until re-hovered.
+    /// Reset on every open by `PlaceModulePopup`; only read while `module_popup` is `Some`.
+    module_popup_size: Option<(u32, u32)>,
     /// RFC 0018: the open native picker (`ctx.pick`), if any. One at a time; folded into the
     /// one-popup discipline (opening it closes other popups; teardown closes it).
     picker: Option<Picker>,
@@ -1222,6 +1227,7 @@ impl Bar {
             bars,
             popup: None,
             module_popup: None,
+            module_popup_size: None,
             picker: None,
             modules: build_modules(&config, &rt),
             cursor_x: 0.0,
@@ -1383,6 +1389,8 @@ impl Bar {
                             .find(|e| e.id == instance)
                             .and_then(|e| e.module.popup_size())
                             .unwrap_or(MODULE_POPUP_SIZE);
+                        // Remember it so a later content change can resize the live surface.
+                        self.module_popup_size = Some(size);
                         // Anchor under the pill (ground-truth geometry) when it was host-tagged;
                         // otherwise (module-internal hover, e.g. stock) fall back to the cursor.
                         let anchor_x = bounds.map_or(self.cursor_x, |b| b.center_x());
@@ -1470,6 +1478,19 @@ impl Bar {
                     .map(move |m| Message::ModuleMsg { instance, msg: m })];
                 for req in resp.requests {
                     tasks.push(self.handle_host_request(instance, req));
+                }
+                // Keep an OPEN popup sized to its (possibly grown) content: if this module owns the
+                // open popup and its re-measured size changed — a new agent row appeared, a section
+                // toggled — resize the live surface so it doesn't clip until the user re-hovers.
+                if let Some((pid, inst, _)) = self.module_popup {
+                    if inst == instance {
+                        if let Some(size) = self.modules[idx].module.popup_size() {
+                            if self.module_popup_size != Some(size) {
+                                self.module_popup_size = Some(size);
+                                tasks.push(Task::done(Message::SizeChange { id: pid, size }));
+                            }
+                        }
+                    }
                 }
                 Task::batch(tasks)
             }
