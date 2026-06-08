@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{SinkExt, Stream};
@@ -154,16 +154,26 @@ struct ModuleEntry {
     /// The resolved config this instance was last (re)built/reconfigured with, so a
     /// reconcile can tell "unchanged" (keep state) from "changed" (reconfigure).
     cfg: toml::Value,
+    /// For a wasm plugin, the `.wasm` mtime when this instance was built — so a reconcile can
+    /// notice the bytes were replaced in place and reload them. `None` for built-in modules.
+    wasm_sig: Option<SystemTime>,
     disabled: bool,
 }
 
 impl ModuleEntry {
-    fn new(id: u64, name: String, module: Box<dyn Module>, cfg: toml::Value) -> Self {
+    fn new(
+        id: u64,
+        name: String,
+        module: Box<dyn Module>,
+        cfg: toml::Value,
+        wasm_sig: Option<SystemTime>,
+    ) -> Self {
         ModuleEntry {
             id,
             name,
             module,
             cfg,
+            wasm_sig,
             disabled: false,
         }
     }
@@ -1104,8 +1114,9 @@ fn build_modules(config: &Config, rt: &tokio::runtime::Handle) -> Vec<ModuleEntr
         .into_iter()
         .filter_map(|s| {
             let id = stable_id(&s.key);
+            let sig = modules::wasm_plugin_sig(&s.type_id);
             modules::build(&s.type_id, id, &s.cfg, rt)
-                .map(|m| ModuleEntry::new(id, s.key, m, s.cfg))
+                .map(|m| ModuleEntry::new(id, s.key, m, s.cfg, sig))
         })
         .collect()
 }
@@ -2547,26 +2558,38 @@ impl Bar {
         let mut next: Vec<ModuleEntry> = Vec::with_capacity(specs.len());
         for s in specs {
             let id = stable_id(&s.key);
+            // Current on-disk signature of this id's `.wasm` (None for built-ins). A change means
+            // the plugin was re-deployed in place — reload it even though the config is identical.
+            let sig = modules::wasm_plugin_sig(&s.type_id);
             match live.remove(&s.key) {
-                // unchanged: keep the instance, its state, and its subscriptions.
-                Some(entry) if entry.cfg == s.cfg => next.push(entry),
-                // same key, changed config: adopt in place or rebuild.
-                Some(mut entry) => match entry.module.reconfigure(&s.cfg) {
-                    Reconfigure::Applied { resubscribe } => {
-                        entry.cfg = s.cfg;
-                        if resubscribe {
-                            self.bump_generation(id);
+                // unchanged config AND unchanged bytes: keep the instance, its state and subs.
+                Some(entry) if entry.cfg == s.cfg && entry.wasm_sig == sig => next.push(entry),
+                // same key — config changed and/or the plugin's `.wasm` was swapped on disk.
+                Some(mut entry) => {
+                    // A content swap can't be adopted in place (the loaded module IS the old
+                    // bytes) — it must rebuild. A pure config change tries `reconfigure` first.
+                    let action = if entry.wasm_sig != sig {
+                        Reconfigure::Reconstruct
+                    } else {
+                        entry.module.reconfigure(&s.cfg)
+                    };
+                    match action {
+                        Reconfigure::Applied { resubscribe } => {
+                            entry.cfg = s.cfg;
+                            if resubscribe {
+                                self.bump_generation(id);
+                            }
+                            next.push(entry);
                         }
-                        next.push(entry);
-                    }
-                    Reconfigure::Reconstruct => {
-                        entry.module.shutdown();
-                        if let Some(m) = modules::build(&s.type_id, id, &s.cfg, &rt) {
-                            self.bump_generation(id);
-                            next.push(ModuleEntry::new(id, s.key, m, s.cfg));
+                        Reconfigure::Reconstruct => {
+                            entry.module.shutdown();
+                            if let Some(m) = modules::build(&s.type_id, id, &s.cfg, &rt) {
+                                self.bump_generation(id);
+                                next.push(ModuleEntry::new(id, s.key, m, s.cfg, sig));
+                            }
                         }
                     }
-                },
+                }
                 // added. Bump generation unconditionally so the new instance's
                 // recipe key is fresh — startup-built instances run at generation 0
                 // without ever being recorded in the map, so a remove→re-add must
@@ -2574,7 +2597,7 @@ impl Bar {
                 None => {
                     if let Some(m) = modules::build(&s.type_id, id, &s.cfg, &rt) {
                         self.bump_generation(id);
-                        next.push(ModuleEntry::new(id, s.key, m, s.cfg));
+                        next.push(ModuleEntry::new(id, s.key, m, s.cfg, sig));
                     }
                 }
             }

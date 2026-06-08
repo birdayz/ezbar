@@ -112,6 +112,18 @@ fn wasm_plugin_path(id: &str) -> Option<PathBuf> {
         .cloned()
 }
 
+/// Content signature of a wasm plugin's `.wasm` — its mtime. A reconcile compares this against the
+/// loaded instance's to notice that the *bytes were replaced in place* (same id, same path, same
+/// config) and rebuild the module, so re-deploying a plugin is picked up on the next config reload
+/// without a full bar restart. `None` for a built-in module (no file) or if the file can't be
+/// stat'd. mtime is the cheap, reliable signal here: `cp`/`mv` of a fresh build bump it; the
+/// capability grant is still bound to the content *hash* (RFC 0014), so a swapped binary that
+/// changes behaviour can't silently inherit caps — this only governs *when to reload*.
+pub fn wasm_plugin_sig(id: &str) -> Option<std::time::SystemTime> {
+    let path = wasm_plugin_path(id)?;
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
 /// Ids of all registered wasm plugins, sorted — for default placement injection.
 pub fn wasm_plugin_ids() -> Vec<String> {
     let mut ids: Vec<String> = plugins()
