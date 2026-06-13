@@ -18,7 +18,7 @@ members = ["crates/ezbar-plugin", "crates/ezbar-harness", "crates/ezbar-wasm", "
 exclude = ["crates/ezbar-plugin-wasm", "wasm"]
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/birdayz/ezbar"
