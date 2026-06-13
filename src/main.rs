@@ -759,6 +759,21 @@ fn desired_outputs(cfg: &Config) -> Vec<OutputInfo> {
         .collect()
 }
 
+/// Whether a reconcile should be **deferred** rather than acted on, because the desired-output
+/// set came back empty while surfaces are still tracked. `sway_outputs()` returns `[]` on an IPC
+/// hiccup (a busy/relaunching compositor, a monitor mid-DPMS-reprobe) exactly as it would for a
+/// genuine zero-monitor state — and on a desktop the former is overwhelmingly the likely cause.
+/// Acting on it is **unrecoverable**: the surfaces close, but a self-initiated close doesn't
+/// re-reconcile (`WindowClosed` only fires the recreate path for *compositor*-initiated closes),
+/// and no fresh `Output` event is owed when the outputs never actually changed — so the bar
+/// vanishes for good. Keep last-good and re-check shortly instead (mirrors the `claude` plugin's
+/// "never publish an empty snapshot from a failed scan"). A real "all monitors unplugged" still
+/// resolves correctly via the compositor-initiated `WindowClosed` path; this only suppresses the
+/// *proactive* teardown over a transient.
+fn reconcile_is_transient_empty(desired_len: usize, tracked_len: usize) -> bool {
+    desired_len == 0 && tracked_len > 0
+}
+
 /// The pure output-churn decision (RFC 0004): given the `desired` output names and the
 /// currently-`tracked` `(output, surface-id)` pairs, return `(close, create)` — the surface
 /// ids to close (their output is gone or de-selected) and the output names that need a new
@@ -2513,6 +2528,24 @@ impl Bar {
                 .map(|b| (b.output.as_str(), b.id))
                 .collect::<Vec<_>>()
         );
+
+        // Never tear a working bar down over an empty reading. An empty `desired` while we still
+        // track surfaces is almost always a transient sway-IPC/compositor glitch (see
+        // `reconcile_is_transient_empty`), and the teardown would be permanent. Keep the surfaces
+        // and re-check shortly — a genuine zero-output state still arrives via the
+        // compositor-initiated `WindowClosed` path.
+        if reconcile_is_transient_empty(desired.len(), self.bars.len()) {
+            log::warn!(
+                "reconcile: empty output set while {} surface(s) tracked — treating as a transient \
+                 (keeping last-good, re-checking shortly)",
+                self.bars.len()
+            );
+            return Task::perform(
+                async { tokio::time::sleep(Duration::from_millis(750)).await },
+                |()| Message::OutputsChanged,
+            );
+        }
+
         let mut tasks = Vec::new();
 
         // The pure close/create decision (deduped against the two-bars saga).
@@ -2973,6 +3006,21 @@ mod tests {
         assert_eq!(plan(&["DP-1", "DP-1"], &[]), (vec![], vec!["DP-1".into()]));
         // and never a second surface for an already-tracked output (even if double-listed)
         assert_eq!(plan(&["DP-1", "DP-1"], &[("DP-1", 1)]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn empty_reading_with_tracked_surfaces_is_deferred_not_torn_down() {
+        // The bar-vanish regression: a transient sway-IPC failure yields an empty `desired`.
+        // While surfaces are tracked we must DEFER (keep last-good), never tear down — the
+        // teardown is permanent (self-closes don't reconcile; no Output event is owed).
+        assert!(reconcile_is_transient_empty(0, 1));
+        assert!(reconcile_is_transient_empty(0, 3));
+        // A genuine zero-output state at startup (nothing tracked yet) is NOT deferred — there's
+        // no working bar to protect, and the outputs_stream still creates surfaces as they appear.
+        assert!(!reconcile_is_transient_empty(0, 0));
+        // Any non-empty reading is real churn → let `plan_surfaces` decide normally.
+        assert!(!reconcile_is_transient_empty(1, 1));
+        assert!(!reconcile_is_transient_empty(2, 0));
     }
 
     #[test]
