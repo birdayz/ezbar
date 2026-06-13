@@ -730,48 +730,38 @@ struct OutputInfo {
     width: u32,
 }
 
-/// All active sway outputs (name + logical width), via sway IPC. `rect` is in
-/// sway's logical layout coordinates — the same space as iced's logical cursor —
-/// so widths are scale-correct for popup clamping. Empty on failure (e.g. not
-/// under sway) — the bar then simply has no surfaces until one appears.
-fn sway_outputs() -> Vec<OutputInfo> {
-    swayipc::Connection::new()
-        .ok()
-        .and_then(|mut c| c.get_outputs().ok())
-        .map(|outs| {
-            outs.into_iter()
-                .filter(|o| o.active)
-                .map(|o| OutputInfo {
-                    name: o.name,
-                    width: o.rect.width.max(0) as u32,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Active sway outputs (name + logical width), via sway IPC. `rect` is in sway's logical layout
+/// coordinates — the same space as iced's logical cursor — so widths are scale-correct for popup
+/// clamping.
+///
+/// **`None` means the IPC query itself failed** (sway unreachable/busy, a mid-reprobe stall) —
+/// the caller must NOT read that as "zero outputs" and tear surfaces down. `Some(list)` means the
+/// query succeeded; `list` may be legitimately empty (every output inactive). Conflating these two
+/// is exactly what let a transient IPC hiccup permanently kill the bar.
+fn sway_outputs() -> Option<Vec<OutputInfo>> {
+    let outs = swayipc::Connection::new().ok()?.get_outputs().ok()?;
+    Some(
+        outs.into_iter()
+            .filter(|o| o.active)
+            .map(|o| OutputInfo {
+                name: o.name,
+                width: o.rect.width.max(0) as u32,
+            })
+            .collect(),
+    )
 }
 
-/// The outputs a bar should occupy: active outputs matching `[bar].outputs`
-/// (RFC 0004). `"all"` ⇒ every output; `["DP-1", …]` ⇒ just the named ones.
-fn desired_outputs(cfg: &Config) -> Vec<OutputInfo> {
-    sway_outputs()
-        .into_iter()
-        .filter(|o| cfg.bar.outputs.matches(&o.name))
-        .collect()
-}
-
-/// Whether a reconcile should be **deferred** rather than acted on, because the desired-output
-/// set came back empty while surfaces are still tracked. `sway_outputs()` returns `[]` on an IPC
-/// hiccup (a busy/relaunching compositor, a monitor mid-DPMS-reprobe) exactly as it would for a
-/// genuine zero-monitor state — and on a desktop the former is overwhelmingly the likely cause.
-/// Acting on it is **unrecoverable**: the surfaces close, but a self-initiated close doesn't
-/// re-reconcile (`WindowClosed` only fires the recreate path for *compositor*-initiated closes),
-/// and no fresh `Output` event is owed when the outputs never actually changed — so the bar
-/// vanishes for good. Keep last-good and re-check shortly instead (mirrors the `claude` plugin's
-/// "never publish an empty snapshot from a failed scan"). A real "all monitors unplugged" still
-/// resolves correctly via the compositor-initiated `WindowClosed` path; this only suppresses the
-/// *proactive* teardown over a transient.
-fn reconcile_is_transient_empty(desired_len: usize, tracked_len: usize) -> bool {
-    desired_len == 0 && tracked_len > 0
+/// The outputs a bar should occupy: active outputs matching `[bar].outputs` (RFC 0004).
+/// `"all"` ⇒ every output; `["DP-1", …]` ⇒ just the named ones. `None` propagates an IPC failure;
+/// `Some(list)` is the (possibly empty) filtered set — empty is a **valid** result when a named
+/// filter matches no connected output, and must be honoured (close those surfaces), not deferred.
+fn desired_outputs(cfg: &Config) -> Option<Vec<OutputInfo>> {
+    Some(
+        sway_outputs()?
+            .into_iter()
+            .filter(|o| cfg.bar.outputs.matches(&o.name))
+            .collect(),
+    )
 }
 
 /// The pure output-churn decision (RFC 0004): given the `desired` output names and the
@@ -1215,7 +1205,9 @@ impl Bar {
         let theme = config.theme_tokens();
         // One surface per matching output (RFC 0004). Empty is valid — the
         // output-event subscription will add surfaces as outputs appear.
-        let outputs = desired_outputs(&config);
+        // At startup an IPC failure (`None`) just means "no surfaces yet" — outputs_stream emits a
+        // synthetic reconcile on (re)connect, so the bar converges once sway answers.
+        let outputs = desired_outputs(&config).unwrap_or_default();
         let screen_w = outputs.first().map(|o| o.width).unwrap_or(1920);
         let mut bars = Vec::new();
         let mut opens = Vec::new();
@@ -2517,7 +2509,28 @@ impl Bar {
     /// and a bar surface closing. This — not re-roll — is the only create/destroy
     /// path; geometry-only changes mutate live surfaces in place.
     fn reconcile_surfaces(&mut self) -> Task<Message> {
-        let desired = desired_outputs(&self.config);
+        // `None` = the sway IPC query FAILED (not "zero outputs"). Tearing live surfaces down over
+        // that is unrecoverable — a self-initiated close doesn't re-reconcile and no fresh Output
+        // event is owed — so keep last-good and re-check shortly. With no surfaces there's nothing
+        // to protect and outputs_stream's reconnect path converges, so don't spin. A *successful*
+        // empty read (`Some([])`, e.g. a named `outputs` filter matching nothing) falls through and
+        // is honoured normally — those surfaces close.
+        let desired = match desired_outputs(&self.config) {
+            Some(d) => d,
+            None => {
+                if self.bars.is_empty() {
+                    return Task::none();
+                }
+                log::warn!(
+                    "reconcile: sway output query failed — keeping {} live surface(s), re-checking",
+                    self.bars.len()
+                );
+                return Task::perform(
+                    async { tokio::time::sleep(Duration::from_millis(750)).await },
+                    |()| Message::OutputsChanged,
+                );
+            }
+        };
         let desired_names: std::collections::HashSet<&str> =
             desired.iter().map(|o| o.name.as_str()).collect();
         log::info!(
@@ -2528,23 +2541,6 @@ impl Bar {
                 .map(|b| (b.output.as_str(), b.id))
                 .collect::<Vec<_>>()
         );
-
-        // Never tear a working bar down over an empty reading. An empty `desired` while we still
-        // track surfaces is almost always a transient sway-IPC/compositor glitch (see
-        // `reconcile_is_transient_empty`), and the teardown would be permanent. Keep the surfaces
-        // and re-check shortly — a genuine zero-output state still arrives via the
-        // compositor-initiated `WindowClosed` path.
-        if reconcile_is_transient_empty(desired.len(), self.bars.len()) {
-            log::warn!(
-                "reconcile: empty output set while {} surface(s) tracked — treating as a transient \
-                 (keeping last-good, re-checking shortly)",
-                self.bars.len()
-            );
-            return Task::perform(
-                async { tokio::time::sleep(Duration::from_millis(750)).await },
-                |()| Message::OutputsChanged,
-            );
-        }
 
         let mut tasks = Vec::new();
 
@@ -3009,18 +3005,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_reading_with_tracked_surfaces_is_deferred_not_torn_down() {
-        // The bar-vanish regression: a transient sway-IPC failure yields an empty `desired`.
-        // While surfaces are tracked we must DEFER (keep last-good), never tear down — the
-        // teardown is permanent (self-closes don't reconcile; no Output event is owed).
-        assert!(reconcile_is_transient_empty(0, 1));
-        assert!(reconcile_is_transient_empty(0, 3));
-        // A genuine zero-output state at startup (nothing tracked yet) is NOT deferred — there's
-        // no working bar to protect, and the outputs_stream still creates surfaces as they appear.
-        assert!(!reconcile_is_transient_empty(0, 0));
-        // Any non-empty reading is real churn → let `plan_surfaces` decide normally.
-        assert!(!reconcile_is_transient_empty(1, 1));
-        assert!(!reconcile_is_transient_empty(2, 0));
+    fn genuine_empty_desired_closes_all_tracked() {
+        // The IPC-failure-vs-genuine-empty distinction now lives in `desired_outputs() -> Option`
+        // (None = IPC failed → reconcile_surfaces defers; Some([]) = a successful read that a
+        // named `outputs` filter emptied → honour it). Here we lock in the *honour* half: a
+        // genuine empty desired set MUST close every tracked surface, not defer (codex P2 —
+        // otherwise switching to `outputs = ["DP-1"]` with only eDP-1 connected would leave a
+        // stale bar up and spin a retry loop forever).
+        assert_eq!(plan(&[], &[("DP-1", 1)]), (vec![1], vec![]));
+        assert_eq!(plan(&[], &[("DP-1", 1), ("DP-2", 2)]), (vec![1, 2], vec![]));
+        // empty desired with nothing tracked: a clean no-op.
+        assert_eq!(plan(&[], &[]), (vec![], vec![]));
     }
 
     #[test]
