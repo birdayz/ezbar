@@ -88,6 +88,35 @@ Each bet runs the drill: RFC → review (2 subagents) → implement → review �
   the domain-separated `hash(wasm ‖ manifest)` + "declared caps ≤ consented caps" — needs the
   `wasm-tools` emit step (Rust + TinyGo). (`src/grants.rs`, `src/modules/mod.rs`, `src/main.rs`.)
 
+- [ ] **HIGH — re-grant UX: a rebuilt plugin silently plays dead.** Hash-keyed consent
+  (above) works as designed, but the failure mode is invisible: rebuild `claude.wasm` → new
+  sha256 → host withholds every grant → the plugin still runs sandboxed and renders a
+  *plausible* empty state ("0 agents", $0) — indistinguishable from a healthy idle machine.
+  Hit live (Jun 12): the chip sat on "0" while 4 agents ran; took a manual hash-diff of
+  `grants.toml` to diagnose. A security mechanism whose trip state looks like normal operation
+  trains the user to ignore it. Fix in escalating order, not mutually exclusive:
+  1. **Surface the withheld state (do this first, it's cheap).** The host already knows
+     declared-but-withheld at `build()` (`grants::decide` + the manifest reader's warning) —
+     don't hand the plugin a silently-empty sandbox and let it render a lie. Paint the chip in
+     a distinct host-drawn "⚠ re-grant needed" state (urgent token + the plugin id), bypassing
+     the plugin's own view. A denied mount just reads as an empty dir from inside the guest, so
+     the plugin *cannot* self-report this — only the host can.
+  2. **One-click re-approve from the bar.** Click the degraded chip → popup shows the declared
+     caps (the `ezbar inspect` block: fs mounts, exec list, hosts) + an Approve button → host
+     rewrites `grants.toml` and **re-instantiates the plugin in place**. Note the current CLI
+     flow is worse than documented: `ezbar grant <id>` says "reload the bar", but grants are
+     only read at instantiation and the config-watch reload does NOT re-apply them — it takes a
+     full restart today. The click path must actually tear down + rebuild the instance.
+  3. **(Maybe) dev-mode sticky grants.** Auto-persisting consent across rebuilds re-opens
+     exactly the confused-deputy RFC 0014 closed — a swapped `.wasm` under a granted id
+     inherits everything — so a blanket "persist across versions" is off the table. The
+     defensible variant: key consent on the **declared-capability set** (the manifest hash)
+     instead of the wasm bytes, per-plugin opt-in (`[modules.<id>] sticky_grants = true`),
+     never default, never for registry installs — a rebuild that asks for *the same* caps
+     keeps consent; one that asks for more re-prompts. With (1)+(2) shipped this may not be
+     worth its security surface; decide after living with one-click for a week.
+  (`src/grants.rs`, `src/modules/mod.rs`, `src/main.rs:bar_view`)
+
 ### P1 (cont.) — read-only sway IPC: **designed, ready to implement**
 - [ ] **Read-only sway state** — **RFC 0013 Accepted** (both reviewers ACK after folding
   push→**pull**). Completes "safe capabilities": a plugin reads the workspace list + focused
@@ -142,6 +171,51 @@ features and config keys that silently do nothing.
 behaviour · `MED` wanted feature / real gap · `LOW` polish / nice-to-have.
 
 ---
+
+## Audit findings — codex review + 2-agent sweep (Jun 14)
+
+Triggered by the bar vanishing twice (transient empty output read → fixed in v0.1.12/v0.1.13).
+A `codex review` of the fix + two subagent audits (surface/popup lifecycle; wasm-host + grants)
+surfaced these. Validated against real code; not yet fixed (user chose to ship v0.1.13 first).
+
+- [ ] **CRIT — `OpenPopup` orphans an open plugin picker.** `Message::OpenPopup` closes the
+  module popup but never resolves `self.picker`. A plugin's `pick()` opens a keyboard-grabbing
+  picker; clicking the switcher pill (pointer still hits the bar) opens the switcher *over* it —
+  the picker stays mapped, the guest's `pick().await` is parked forever, and `PENDING_PICKS`
+  never drains so every later `pick()` hangs too. Stuck keyboard grab. Fix: resolve/close the
+  picker in `OpenPopup` (as `DismissPopups` does) + drain. (`src/main.rs:Message::OpenPopup`)
+- [ ] **HIGH — redirect SSRF in `http_get`.** The network grant is checked against the *initial*
+  URL host only; the shared `reqwest::Client` has no redirect policy, so it follows up to 10 hops
+  and never re-checks. A grant for `api.example.com` → 302 → `169.254.169.254`/localhost/anywhere.
+  Fix: `redirect::Policy::custom` re-applying `host_matches` per hop. (`crates/ezbar-wasm/src/lib.rs:245,986`)
+- [ ] **HIGH — `yolo=false` doesn't revoke running plugins.** `set_yolo` flips an atomic read only
+  at `build()` time; reconcile keeps an instance unless its `[modules.<id>]` cfg or `.wasm` mtime
+  changes. Turning yolo off + reload leaves plugins with full fs/net/exec until a full restart.
+  Same shape breaks `ezbar grant <id>` + reload (documented re-consent silently no-ops). Fix: a
+  consent/yolo generation the reconcile keep-condition observes. (`src/modules/mod.rs:432`, `src/main.rs:reconcile_modules`)
+- [ ] **HIGH — bar can map on the wrong output and `self.bars` lies permanently.** `self.bars.push`
+  is optimistic (before `NewLayerShell` maps), there's no map/bind-result event, and the late-
+  `wl_output` race binds to the compositor-default output. `plan_surfaces` then sees it "tracked"
+  and never corrects. Benign on a single output (default == the one output); bites multi-output.
+  Real fix needs an upstream bind-result API. (`src/main.rs:reconcile_surfaces`, `outputs_stream`)
+- [ ] **MED — hot-reloaded plugin gets no feed samples.** The feed `Sub` is keyed on the
+  deterministic `stable_id`; the new instance's `feed-subscribe` finds the stale entry and only
+  updates `min_period`, dropping the new sender. Permanent for plugins that subscribe once. Fix:
+  replace the sender on every re-subscribe. (`crates/ezbar-wasm/src/lib.rs:1017`)
+- [ ] **MED — `exec` not bounded by WALL.** A hanging child leaks a `spawn_blocking` thread + the
+  child forever (uncancellable); repeats exhaust the blocking pool. Fix: real timeout + `child.kill()`.
+  (`crates/ezbar-wasm/src/lib.rs:395`)
+- [ ] **LOW — stale `PENDING_PICKS` ghost picker.** Queued `pick()` from a torn-down plugin is
+  never purged → later opens a keyboard-grabbing picker for a dead guest. Drain by live instance.
+  (`src/main.rs:PENDING_PICKS`)
+
+**Monitor-wake recurrence (Jun 14):** the bar vanished again after an overnight screen-off on the
+v0.1.12 binary (the cruder length-based guard, which *defers* on any empty `desired` and so kept a
+stale tracked surface across the night → morning reconcile saw "already tracked", never rebuilt).
+v0.1.13's `Option` distinction treats a real output-gone as actionable (clears tracking → rebuilds
+on return). Now running v0.1.13 with `RUST_LOG=warn,ezbar=info` to `~/.ezbar.log` so a recurrence
+captures the exact reconcile trace. If it still recurs, the remaining suspect is the bind-race above
+or a missed Output event on cold display wake — consider a low-frequency safety reconcile.
 
 ## Config & theming (RFC 0002)
 
