@@ -421,6 +421,12 @@ pub trait Ctx {
     /// [`exec`](Ctx::exec), the guest parks here while the user interacts, so call it from
     /// `update` (an event handler), not `view`. Needs no capability grant (it reads/runs nothing).
     fn pick(&mut self, prompt: &str, items: &[&str], current: Option<usize>) -> Option<String>;
+    /// The machine's **local IANA timezone** name (e.g. `"Europe/Berlin"`), as the host sees it
+    /// (RFC 0019). Best-effort: returns `"UTC"` if the host can't determine the zone. The WASI
+    /// sandbox has no `/etc/localtime` or `TZ`, so a plugin that renders wall-clock time gets
+    /// the zone here and converts UTC (`SystemTime::now`) itself with chrono-tz. Needs no
+    /// capability grant (it reads nothing sensitive and runs nothing).
+    fn local_timezone(&mut self) -> String;
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are

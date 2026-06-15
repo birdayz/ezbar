@@ -188,10 +188,125 @@ pub fn decide(id: &str, wasm_path: &Path) -> Decision {
     }
 }
 
-/// Record explicit consent for `id` from its current on-disk bytes (the `ezbar grant`
-/// CLI path). Resolves the `.wasm` via the same discovery the bar uses, so the id is
-/// exactly what the user places. Returns a human-facing line on success.
-pub fn grant_cli(id: &str) -> Result<String, String> {
+/// What `apply_to_config` did to `[modules.<id>]`, for the human summary.
+#[derive(Default)]
+pub struct Applied {
+    /// Capability keys newly written.
+    pub written: Vec<String>,
+    /// Capability keys left untouched because the user already set them.
+    pub present: Vec<String>,
+    /// Dangerous-tier keys (`fs`/`exec`) the manifest declared but we withheld without `--dangerous`.
+    pub skipped_dangerous: Vec<String>,
+}
+
+/// Merge the capabilities `m` declares into `[modules.<id>]` in the user's `config.toml`, in
+/// place and **format-preserving** (comments and ordering survive — that's why this uses
+/// `toml_edit`, not the value crate). Existing keys are never clobbered: if the user already set
+/// `network`/`fs`/… we leave their value alone and just report it. The dangerous tier (`fs`,
+/// `exec`) is only written when `include_dangerous` is set; otherwise it's reported as skipped.
+///
+/// This is the one place that writes `config.toml`. RFC 0014's "print, never auto-write" still
+/// holds for `ezbar inspect` (a look); `ezbar grant` is the explicit, affirmative act that opts
+/// into the write — the whole point of "easy to ack".
+pub fn apply_to_config(
+    id: &str,
+    m: &ezbar_wasm::manifest::Manifest,
+    include_dangerous: bool,
+) -> Result<Applied, String> {
+    let path = crate::config::path().ok_or("no config dir (set HOME or XDG_CONFIG_HOME)")?;
+    let src = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc = src
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let a = apply_to_doc(&mut doc, id, m, include_dangerous)?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    write_atomic(&path, &doc.to_string()).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(a)
+}
+
+/// The pure, format-preserving document edit behind [`apply_to_config`] — no I/O, so it's
+/// unit-testable. Descends to (or creates) `[modules.<id>]`, writes each declared capability
+/// the user hasn't already set, and withholds the dangerous tier unless `include_dangerous`.
+fn apply_to_doc(
+    doc: &mut toml_edit::DocumentMut,
+    id: &str,
+    m: &ezbar_wasm::manifest::Manifest,
+    include_dangerous: bool,
+) -> Result<Applied, String> {
+    use toml_edit::{value, Array, InlineTable, Item, Table, Value};
+
+    let modules = doc
+        .as_table_mut()
+        .entry("modules")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("[modules] in config.toml is not a table")?;
+    modules.set_implicit(true); // render `[modules.<id>]`, not a bare `[modules]`
+    let m_tbl = modules
+        .entry(id)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("[modules.{id}] in config.toml is not a table"))?;
+
+    let mut a = Applied::default();
+    // Set `key` to `val` only if the user hasn't already set it (never clobber their config).
+    fn put(tbl: &mut Table, key: &str, val: Item, a: &mut Applied) {
+        if tbl.contains_key(key) {
+            a.present.push(key.to_string());
+        } else {
+            tbl.insert(key, val);
+            a.written.push(key.to_string());
+        }
+    }
+    let str_array = |xs: &[String]| {
+        let mut arr = Array::new();
+        for x in xs {
+            arr.push(x.as_str());
+        }
+        arr
+    };
+
+    if !m.network.is_empty() {
+        put(m_tbl, "network", value(str_array(&m.network)), &mut a);
+    }
+    if !m.feeds.is_empty() {
+        put(m_tbl, "feeds", value(str_array(&m.feeds)), &mut a);
+    }
+    if m.sway {
+        put(m_tbl, "sway", value(true), &mut a);
+    }
+    if !m.fs.is_empty() {
+        if include_dangerous {
+            let mut arr = Array::new();
+            for p in &m.fs {
+                let mut it = InlineTable::new();
+                it.insert("path", p.as_str().into());
+                it.insert("mode", "r".into());
+                arr.push(Value::InlineTable(it));
+            }
+            put(m_tbl, "fs", value(arr), &mut a);
+        } else {
+            a.skipped_dangerous.push("fs".to_string());
+        }
+    }
+    if !m.exec.is_empty() {
+        if include_dangerous {
+            put(m_tbl, "exec", value(str_array(&m.exec)), &mut a);
+        } else {
+            a.skipped_dangerous.push("exec".to_string());
+        }
+    }
+    Ok(a)
+}
+
+/// `ezbar grant <id> [--dangerous]` — the one-command ack. Resolves the installed `.wasm`,
+/// merges the capabilities its manifest declares into `[modules.<id>]` in `config.toml`
+/// (format-preserving; `fs`/`exec` only with `include_dangerous`), then records consent for the
+/// current bytes. Returns a human-facing summary. With no embedded manifest it just records
+/// consent (the old behaviour) — there's nothing to auto-grant.
+pub fn grant_cli(id: &str, include_dangerous: bool) -> Result<String, String> {
     let dir = crate::config::plugins_dir().ok_or("no config dir (set HOME or XDG_CONFIG_HOME)")?;
     let path = ezbar_wasm::discover(&dir)
         .into_iter()
@@ -200,17 +315,39 @@ pub fn grant_cli(id: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no plugin '{id}' in {}", dir.display()))?;
     let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let hex = sha256_hex(&bytes);
-    if record(id, &hex) {
-        Ok(format!(
-            "ezbar: approved '{id}' (sha256 {}…). Reload the bar to apply.",
-            &hex[..hex.len().min(12)]
-        ))
-    } else {
-        Err(format!(
-            "couldn't write consent for '{id}' to {:?}",
-            grants_path()
-        ))
+    let short = &hex[..hex.len().min(12)];
+
+    let mut lines = vec![format!("ezbar: approved '{id}' (sha256 {short}…).")];
+    match ezbar_wasm::manifest::read(&bytes) {
+        Some(m) => {
+            let a = apply_to_config(id, &m, include_dangerous)?;
+            if a.written.is_empty() && a.present.is_empty() {
+                lines.push(format!("  [modules.{id}] needs no capabilities."));
+            } else if a.written.is_empty() {
+                lines.push(format!("  [modules.{id}] already configured ({}).", a.present.join(", ")));
+            } else {
+                lines.push(format!("  wrote [modules.{id}]: {}", a.written.join(", ")));
+            }
+            if !a.skipped_dangerous.is_empty() {
+                lines.push(format!(
+                    "  withheld DANGEROUS: {} — re-run `ezbar grant {id} --dangerous` to grant them",
+                    a.skipped_dangerous.join(", ")
+                ));
+            }
+        }
+        None => lines.push(format!(
+            "  no embedded manifest — grant capabilities by hand in [modules.{id}] if it needs any."
+        )),
     }
+
+    if !record(id, &hex) {
+        return Err(format!(
+            "wrote config but couldn't record consent for '{id}' to {:?}",
+            grants_path()
+        ));
+    }
+    lines.push("  Reload the bar to apply.".to_string());
+    Ok(lines.join("\n"))
 }
 
 /// Format the `[modules.<id>]` grant block a user pastes into `config.toml` to grant a
@@ -390,6 +527,59 @@ mod tests {
         );
         // a plugin that declares nothing → just the header (nothing to grant)
         assert_eq!(grant_block("x", &Manifest::default()), "[modules.x]\n");
+    }
+
+    fn manifest() -> ezbar_wasm::manifest::Manifest {
+        ezbar_wasm::manifest::Manifest {
+            network: vec!["calendar.google.com".into()],
+            fs: vec!["~/.config/ezbar".into()],
+            exec: vec!["xdg-open".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn apply_writes_safe_tier_and_withholds_dangerous() {
+        let mut doc = "".parse::<toml_edit::DocumentMut>().unwrap();
+        let a = apply_to_doc(&mut doc, "calendar", &manifest(), false).unwrap();
+        assert_eq!(a.written, ["network"]);
+        assert_eq!(a.skipped_dangerous, ["fs", "exec"]);
+        let out = doc.to_string();
+        assert!(out.contains("[modules.calendar]"));
+        assert!(out.contains("network = [\"calendar.google.com\"]"));
+        assert!(!out.contains("exec"), "exec must be withheld without --dangerous");
+        assert!(!out.contains("fs ="), "fs must be withheld without --dangerous");
+    }
+
+    #[test]
+    fn apply_dangerous_writes_fs_and_exec() {
+        let mut doc = "".parse::<toml_edit::DocumentMut>().unwrap();
+        let a = apply_to_doc(&mut doc, "calendar", &manifest(), true).unwrap();
+        assert_eq!(a.written, ["network", "fs", "exec"]);
+        assert!(a.skipped_dangerous.is_empty());
+        let out = doc.to_string();
+        assert!(out.contains("exec = [\"xdg-open\"]"));
+        assert!(out.contains("path = \"~/.config/ezbar\""));
+        assert!(out.contains("mode = \"r\""));
+    }
+
+    #[test]
+    fn apply_never_clobbers_existing_keys_and_preserves_comments() {
+        // The user already tuned `network` (an extra host) and left a comment — both must survive,
+        // and the pre-set key is reported `present`, not overwritten.
+        let src = "\
+# my bar config — keep me!
+[modules.calendar]
+network = [\"calendar.google.com\", \"extra.example.com\"]
+";
+        let mut doc = src.parse::<toml_edit::DocumentMut>().unwrap();
+        let a = apply_to_doc(&mut doc, "calendar", &manifest(), true).unwrap();
+        assert_eq!(a.present, ["network"]);
+        assert_eq!(a.written, ["fs", "exec"]);
+        let out = doc.to_string();
+        assert!(out.contains("# my bar config — keep me!"), "comment preserved");
+        assert!(out.contains("extra.example.com"), "user's extra host preserved");
+        assert!(out.contains("exec = [\"xdg-open\"]"), "new dangerous cap added");
     }
 
     #[test]

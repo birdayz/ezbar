@@ -94,6 +94,24 @@ mod v4 {
     });
 }
 
+// RFC 0019: the v0.5.0 world (adds `host.local-timezone`). Same version-window trick:
+// `types`/`ui`/`events` are byte-identical to v0.1.0 and remap to its generated modules, so
+// `Tree`/`Event` and the whole drive loop stay shared; only `Plugin` + the `host` trait fork.
+// `local-timezone` is a host import, so this is purely additive (no event/ui fork).
+mod v5 {
+    wasmtime::component::bindgen!({
+        world: "plugin",
+        path: "../../wit/since-v0.5.0",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "ezbar:plugin/types@0.5.0": crate::ezbar::plugin::types,
+            "ezbar:plugin/ui@0.5.0": crate::ezbar::plugin::ui,
+            "ezbar:plugin/events@0.5.0": crate::ezbar::plugin::events,
+        },
+    });
+}
+
 // `Tree` is re-exported at the bindgen root by the world's `use`.
 use ezbar::plugin::events::{FeedSample, PointerEvent, PointerKind};
 use ezbar::plugin::ui::Node;
@@ -517,6 +535,85 @@ impl v4::ezbar::plugin::host::Host for Host {
     }
 }
 
+// RFC 0019: the v0.5.0 host — identical to v4 plus `local_timezone`. Every shared-typed method
+// delegates straight to v4; the two forked `host`-interface records (`SwayState`/`ExecOut`) are
+// re-wrapped into their v5 shapes (byte-identical fields).
+impl v5::ezbar::plugin::host::Host for Host {
+    async fn log(&mut self, msg: String) {
+        ezbar::plugin::host::Host::log(self, msg).await
+    }
+    async fn text_size(&mut self) -> f32 {
+        ezbar::plugin::host::Host::text_size(self).await
+    }
+    async fn fg(&mut self) -> ezbar::plugin::types::Paint {
+        ezbar::plugin::host::Host::fg(self).await
+    }
+    async fn set_timeout(&mut self, ms: u32) {
+        ezbar::plugin::host::Host::set_timeout(self, ms).await
+    }
+    async fn subscribe(&mut self, kinds: Vec<ezbar::plugin::types::EventKind>) {
+        ezbar::plugin::host::Host::subscribe(self, kinds).await
+    }
+    async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::http_get(self, url).await
+    }
+    async fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::read_file(self, path).await
+    }
+    async fn feed_subscribe(&mut self, feed: ezbar::plugin::types::FeedKind, min: u32) {
+        ezbar::plugin::host::Host::feed_subscribe(self, feed, min).await
+    }
+    async fn sway_snapshot(&mut self) -> Result<v5::ezbar::plugin::host::SwayState, String> {
+        let snap = v4::ezbar::plugin::host::Host::sway_snapshot(self).await?;
+        Ok(v5::ezbar::plugin::host::SwayState {
+            workspaces: snap
+                .workspaces
+                .into_iter()
+                .map(|w| v5::ezbar::plugin::host::SwayWorkspace {
+                    name: w.name,
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: snap.title,
+        })
+    }
+    async fn exec(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<v5::ezbar::plugin::host::ExecOut, String> {
+        let out = v4::ezbar::plugin::host::Host::exec(self, program, args, stdin).await?;
+        Ok(v5::ezbar::plugin::host::ExecOut {
+            code: out.code,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+    async fn pick(
+        &mut self,
+        prompt: String,
+        items: Vec<String>,
+        current: Option<u32>,
+    ) -> Option<String> {
+        v4::ezbar::plugin::host::Host::pick(self, prompt, items, current).await
+    }
+    // RFC 0019: the machine's local IANA timezone, best-effort ("UTC" if undeterminable). No
+    // grant — it reads nothing sensitive and runs nothing.
+    async fn local_timezone(&mut self) -> String {
+        match iana_time_zone::get_timezone() {
+            Ok(tz) if !tz.is_empty() => tz,
+            Ok(_) => "UTC".into(),
+            Err(e) => {
+                log::warn!("ezbar-wasm: local timezone unavailable ({e}); falling back to UTC");
+                "UTC".into()
+            }
+        }
+    }
+}
+
 // ── the lifted (Send) widget arena, decoupled from the wasmtime types ────────
 
 #[derive(Clone, Debug)]
@@ -775,6 +872,7 @@ struct Reactor {
     linker_v2: Linker<Host>, // v0.2.0 host interface (RFC 0013 version window)
     linker_v3: Linker<Host>, // v0.3.0 host interface (RFC 0015: + exec)
     linker_v4: Linker<Host>, // v0.4.0 host interface (RFC 0018: + pick)
+    linker_v5: Linker<Host>, // v0.5.0 host interface (RFC 0019: + local-timezone)
     client: reqwest::Client,
     rt: Handle,
     // Shared feed hubs, keyed by metric (RFC 0012). One sampler task per active kind fans a
@@ -982,6 +1080,10 @@ impl Reactor {
         add_to_linker_async(&mut linker_v4).expect("ezbar-wasm: wasi async linker (v4)");
         v4::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v4, |h: &mut Host| h)
             .expect("ezbar-wasm: plugin linker (v4)");
+        let mut linker_v5: Linker<Host> = Linker::new(&engine);
+        add_to_linker_async(&mut linker_v5).expect("ezbar-wasm: wasi async linker (v5)");
+        v5::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v5, |h: &mut Host| h)
+            .expect("ezbar-wasm: plugin linker (v5)");
         // ONE async client shared by every plugin (Arc-cheap clone into each Host).
         let client = reqwest::Client::builder()
             .user_agent("ezbar-wasm")
@@ -993,6 +1095,7 @@ impl Reactor {
             linker_v2,
             linker_v3,
             linker_v4,
+            linker_v5,
             client,
             rt,
             feeds: Mutex::new(HashMap::new()),
@@ -1197,6 +1300,12 @@ impl Reactor {
         // matching world, and wrap it in `DrivenPlugin` so the rest of the loop is version-blind.
         let version = plugin_version(&self.engine, &component);
         let instantiated = match version {
+            5 => tokio::time::timeout(
+                WALL,
+                v5::Plugin::instantiate_async(&mut store, &component, &self.linker_v5),
+            )
+            .await
+            .map(|r| r.map(DrivenPlugin::V5)),
             4 => tokio::time::timeout(
                 WALL,
                 v4::Plugin::instantiate_async(&mut store, &component, &self.linker_v4),
@@ -1345,6 +1454,7 @@ enum DrivenPlugin {
     V2(v2::Plugin),
     V3(v3::Plugin),
     V4(v4::Plugin),
+    V5(v5::Plugin),
 }
 
 impl DrivenPlugin {
@@ -1358,6 +1468,7 @@ impl DrivenPlugin {
             DrivenPlugin::V2(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V3(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V4(p) => p.call_init(store, cfg).await,
+            DrivenPlugin::V5(p) => p.call_init(store, cfg).await,
         }
     }
     async fn call_update(&self, store: &mut Store<Host>, ev: &Event) -> wasmtime::Result<bool> {
@@ -1366,6 +1477,7 @@ impl DrivenPlugin {
             DrivenPlugin::V2(p) => p.call_update(store, ev).await,
             DrivenPlugin::V3(p) => p.call_update(store, ev).await,
             DrivenPlugin::V4(p) => p.call_update(store, ev).await,
+            DrivenPlugin::V5(p) => p.call_update(store, ev).await,
         }
     }
     async fn call_view(&self, store: &mut Store<Host>) -> wasmtime::Result<Tree> {
@@ -1374,6 +1486,7 @@ impl DrivenPlugin {
             DrivenPlugin::V2(p) => p.call_view(store).await,
             DrivenPlugin::V3(p) => p.call_view(store).await,
             DrivenPlugin::V4(p) => p.call_view(store).await,
+            DrivenPlugin::V5(p) => p.call_view(store).await,
         }
     }
     async fn call_popup(&self, store: &mut Store<Host>) -> wasmtime::Result<Option<Tree>> {
@@ -1382,6 +1495,7 @@ impl DrivenPlugin {
             DrivenPlugin::V2(p) => p.call_popup(store).await,
             DrivenPlugin::V3(p) => p.call_popup(store).await,
             DrivenPlugin::V4(p) => p.call_popup(store).await,
+            DrivenPlugin::V5(p) => p.call_popup(store).await,
         }
     }
 }
@@ -1391,6 +1505,9 @@ impl DrivenPlugin {
 /// version simply won't link against either linker and is disabled at instantiate.
 fn plugin_version(engine: &Engine, component: &Component) -> u8 {
     for (name, _) in component.component_type().imports(engine) {
+        if name.starts_with("ezbar:plugin/host@0.5") {
+            return 5;
+        }
         if name.starts_with("ezbar:plugin/host@0.4") {
             return 4;
         }

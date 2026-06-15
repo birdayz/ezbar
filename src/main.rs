@@ -140,7 +140,7 @@ mod registry;
 const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
     &["cpu", "memory", "temperature"], // machine vitals
     &["ping", "github"],               // connectivity + dev
-    &["calendar", "spotify"],          // work + media (kube context lives in the WASM plugin)
+    &["spotify"],                      // media (calendar + kube context live in WASM plugins)
     &["stock", "volume", "battery"],   // status
     &["clock"],                        // time — a dedicated end-cap (switcher trails)
 ];
@@ -353,10 +353,16 @@ fn main() -> iced_layershell::Result {
             return Ok(());
         }
         Some("grant") => {
-            // Record explicit consent for a plugin's current bytes (RFC 0014 Phase A) —
-            // the re-approval path after a legitimate rebuild/update changed its hash.
-            match std::env::args().nth(2) {
-                Some(id) => match ezbar::grants::grant_cli(&id) {
+            // Record explicit consent for a plugin's current bytes (RFC 0014 Phase A) AND merge
+            // the capabilities its manifest declares into `[modules.<id>]` in config.toml — the
+            // one-command ack. The dangerous tier (fs/exec) is only written with `--dangerous`.
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let dangerous = args
+                .iter()
+                .any(|a| a == "--dangerous" || a == "--yes" || a == "-y");
+            let id = args.iter().find(|a| !a.starts_with('-')).cloned();
+            match id {
+                Some(id) => match ezbar::grants::grant_cli(&id, dangerous) {
                     Ok(msg) => println!("{msg}"),
                     Err(e) => {
                         eprintln!("ezbar: {e}");
@@ -364,7 +370,7 @@ fn main() -> iced_layershell::Result {
                     }
                 },
                 None => {
-                    eprintln!("ezbar grant: usage: ezbar grant <plugin-id>");
+                    eprintln!("ezbar grant: usage: ezbar grant <plugin-id> [--dangerous]");
                     std::process::exit(2);
                 }
             }

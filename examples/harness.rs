@@ -10,7 +10,7 @@
 //! `ezbar_harness::run(Box::new(MyModule::new(0)))`. See the `ezbar-plugin-author`
 //! skill and `crates/ezbar-harness/examples/counter.rs`.
 
-use ezbar::modules::{calendar::Calendar, clock::Clock, cpu::Cpu, github::GitHub};
+use ezbar::modules::{clock::Clock, cpu::Cpu, github::GitHub};
 use ezbar_plugin::Module;
 
 fn main() -> ezbar_plugin::iced::Result {
@@ -19,7 +19,6 @@ fn main() -> ezbar_plugin::iced::Result {
     let modules: Vec<Box<dyn Module>> = match which.as_str() {
         "cpu" => vec![Box::new(Cpu::new(0, &cfg))],
         "github" => vec![Box::new(GitHub::new(0))],
-        "calendar" => vec![Box::new(Calendar::new(0))],
         "clock" => {
             // CLOCK_CAL=hover|click picks which popup to preview (default click = full grid).
             let mut t = toml::value::Table::new();
@@ -31,7 +30,7 @@ fn main() -> ezbar_plugin::iced::Result {
         }
         "all" => vec![Box::new(Cpu::new(0, &cfg)), Box::new(GitHub::new(1))],
         other => {
-            eprintln!("unknown module '{other}'. try one of: cpu, github, calendar, all");
+            eprintln!("unknown module '{other}'. try one of: cpu, github, clock, all");
             std::process::exit(2);
         }
     };

@@ -1,0 +1,14 @@
+[package]
+name = "calendar-logic"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure, host-testable logic for the ezbar `calendar` WASM plugin: iCal (RFC 5545) parsing into today's events, next-meeting/countdown/urgency derivation, and the Zoom 'join from browser' URL heuristic. Parameterized by an explicit `now` + IANA timezone (the WASI sandbox has no local clock zone — the host hands it over via `local-timezone`, RFC 0019), so it has no clock dependency and unit-tests on the host even though the plugin itself only builds for wasm32-wasip2."
+
+[lib]
+
+[dependencies]
+# no `clock` feature — the logic never reads the system clock or local zone; `now` is passed in.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
+ical = "0.11.0"

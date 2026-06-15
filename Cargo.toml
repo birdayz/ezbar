@@ -12,7 +12,7 @@ keywords = ["sway", "wayland", "statusbar", "wlroots", "iced"]
 categories = ["gui"]
 
 [workspace]
-members = ["crates/ezbar-plugin", "crates/ezbar-harness", "crates/ezbar-wasm", "crates/claude-logic"]
+members = ["crates/ezbar-plugin", "crates/ezbar-harness", "crates/ezbar-wasm", "crates/claude-logic", "crates/calendar-logic"]
 # WASM plugin SDK + example plugins build for wasm32-wasip2 (RFC 0006), and the
 # host's wasmtime stack is heavy — keep them out of the default `cargo build`.
 exclude = ["crates/ezbar-plugin-wasm", "wasm"]
@@ -32,17 +32,20 @@ iced_layershell = "0.18"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
+# NOTE: iCal parsing + tz conversion moved to the `calendar` WASM plugin (crates/calendar-logic);
+# the bar binary no longer depends on `ical`/`chrono-tz`.
 serde_json = "1"
 regex = "1"
 swayipc = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 base64 = "0.22"
 toml = "0.8"
+# format-preserving TOML editing — `ezbar grant` merges a plugin's grant block into the user's
+# config.toml without clobbering their comments/ordering (the `toml` value crate can't).
+toml_edit = "0.22"
 notify = "6"
 log = "0.4"
 env_logger = "0.11"
-ical = "0.11.0"
-chrono-tz = "0.10.4"
 libc = "0.2"                     # malloc_trim — hand glibc's retained-free pages back to the OS
 # jemalloc returns freed pages to the OS continuously (background-thread purge),
 # instead of glibc hoarding them in arenas until a manual trim — flattens the bar's

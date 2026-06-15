@@ -1,7 +1,6 @@
 //! Compile-in modules implementing `ezbar_plugin::Module` (RFC 0001, phase 1).
 
 pub mod battery;
-pub mod calendar;
 pub mod clock;
 pub mod cpu;
 pub mod custom;
@@ -310,7 +309,6 @@ pub fn is_module(id: &str) -> bool {
                 | "clock"
                 | "volume"
                 | "battery"
-                | "calendar"
                 | "stock"
                 | "spotify"
         )
@@ -421,7 +419,6 @@ pub fn build(
         "clock" => Some(Box::new(clock::Clock::new(instance, cfg))),
         "volume" => Some(Box::new(volume::Volume::new(instance))),
         "battery" => Some(Box::new(battery::Battery::new(instance))),
-        "calendar" => Some(Box::new(calendar::Calendar::new(instance))),
         "stock" => Some(Box::new(stock::Stock::new(instance))),
         "spotify" => Some(Box::new(spotify::Spotify::new(instance))),
         // a registered WASM plugin (RFC 0006): load the `.wasm` as a Module.

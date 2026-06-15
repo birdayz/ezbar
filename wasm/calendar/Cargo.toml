@@ -1,0 +1,23 @@
+[package]
+name = "calendar"
+version = "0.1.0"
+edition = "2021"
+description = "ezbar WASM plugin: next meeting + countdown chip, with a hover agenda whose Zoom events are click-to-join (xdg-open straight to the browser web client)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
+calendar-logic = { path = "../../crates/calendar-logic" }
+# no `clock` feature — the plugin gets UTC from SystemTime and the zone from the host
+# (`ctx.local_timezone`), never the system's local zone (the WASI sandbox has none).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
+
+# keep the .wasm small
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

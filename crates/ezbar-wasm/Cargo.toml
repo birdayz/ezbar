@@ -24,6 +24,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 wasmparser = "0.248"
 toml = "0.8"
+# RFC 0019: the host hands the guest the machine's local IANA timezone (`host.local-timezone`),
+# since the WASI sandbox has no `/etc/localtime`/`TZ`. Reads the host's zone once per call.
+iana-time-zone = "0.1"
 
 # `examples/preview.rs` renders a `.wasm` plugin in the real themed harness window
 # (same loop the bar uses) — a dev-only render-preview, kept out of the bar build.

@@ -1,0 +1,18 @@
+# ezbar plugin manifest (see `ezbar package`). `fs` + `exec` are the DANGEROUS tier (RFC 0015):
+# the user must grant them by hand (or `ezbar grant calendar`) — `ezbar add` won't auto-activate
+# them. `network` is the normal tier.
+id = "calendar"
+name = "Calendar"
+version = "0.1.0"
+wit = "0.5.0"
+publisher = "birdayz"
+description = "Next meeting + countdown; hover for the day's agenda, click a Zoom event to join in the browser."
+
+[capabilities]
+# the secret iCal feed (Google Calendar's private .ics host)
+network = ["calendar.google.com"]
+# read the secret iCal URL out of ~/.config/ezbar/calendar_url (mounts read-only at /ezbar).
+# declared in the grant shape the host parses: a list of { path, … } tables.
+fs = [{ path = "~/.config/ezbar" }]
+# open a meeting's web-client URL in the browser
+exec = ["xdg-open"]

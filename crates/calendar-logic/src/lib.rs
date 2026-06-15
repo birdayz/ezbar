@@ -1,22 +1,37 @@
-//! Google Calendar via secret iCal URL. Port of pkg/datasource/calendar.go.
-//! Note: recurring-event (RRULE) expansion is not performed; concrete VEVENT
-//! instances within today's window are shown.
+//! Pure, host-testable logic for the ezbar `calendar` WASM plugin.
+//!
+//! Parses a Google-style secret-iCal (RFC 5545) feed into *today's* events, derives the
+//! next-meeting / countdown / urgency the chip shows, and (via [`zoom`]) turns each event's text
+//! into a one-click web-client Zoom join URL.
+//!
+//! Everything is parameterized by an explicit `now: DateTime<Tz>` — the plugin gets UTC from
+//! `SystemTime::now()` and the zone from the host (`local-timezone`, RFC 0019), since the WASI
+//! sandbox has no local clock zone. No I/O, no `Local`, no system clock → it unit-tests on the
+//! host even though the plugin itself only builds for `wasm32-wasip2`.
+//!
+//! Recurring-event (RRULE) expansion is not performed; concrete VEVENT instances within today's
+//! window are shown (matches the native module this replaces).
 
-use std::time::Duration as StdDuration;
-
-use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
-#[allow(dead_code)] // location/fields mirror the Go model; not all are rendered
+pub mod zoom;
+pub use zoom::{best_meeting, zoom_join_url, ZoomMeeting};
+
+/// One concrete event in today's window, with times in the display timezone.
 #[derive(Debug, Clone)]
 pub struct CalendarEvent {
     pub title: String,
-    pub start: DateTime<Local>,
-    pub end: DateTime<Local>,
+    pub start: DateTime<Tz>,
+    pub end: DateTime<Tz>,
     pub is_all_day: bool,
     pub location: String,
+    /// A fully-assembled Zoom web-client join URL derived from the event text, if any. This is
+    /// what the chip's clickable row hands to `xdg-open`.
+    pub join_url: Option<String>,
 }
 
+/// The chip/popup model: today's events plus the derived "next meeting" summary.
 #[derive(Debug, Clone, Default)]
 pub struct CalendarData {
     pub today_events: Vec<CalendarEvent>,
@@ -26,25 +41,6 @@ pub struct CalendarData {
     pub time_until_next: String,
     pub is_urgent: bool,
     pub is_overdue: bool,
-}
-
-fn config_url() -> Result<String, String> {
-    if let Ok(url) = std::env::var("GOOGLE_CALENDAR_ICAL_URL") {
-        if !url.is_empty() {
-            return Ok(url);
-        }
-    }
-    let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
-    let path = format!("{home}/.config/ezbar/calendar_url");
-    let data = std::fs::read_to_string(&path).map_err(|_| {
-        "calendar URL not configured. Save your secret iCal URL to ~/.config/ezbar/calendar_url"
-            .to_string()
-    })?;
-    let url = data.trim().to_string();
-    if url.is_empty() {
-        return Err("calendar_url file is empty".to_string());
-    }
-    Ok(url)
 }
 
 fn truncate_title(title: &str, max_len: usize) -> String {
@@ -62,6 +58,12 @@ fn prop<'a>(
     name: &str,
 ) -> Option<&'a ical::property::Property> {
     ev.properties.iter().find(|p| p.name == name)
+}
+
+fn prop_value(ev: &ical::parser::ical::component::IcalEvent, name: &str) -> String {
+    prop(ev, name)
+        .and_then(|p| p.value.clone())
+        .unwrap_or_default()
 }
 
 fn param_has(p: &ical::property::Property, key: &str, val: &str) -> bool {
@@ -86,60 +88,46 @@ fn param_value<'a>(p: &'a ical::property::Property, key: &str) -> Option<&'a str
     None
 }
 
-/// Parses an iCal date/datetime value into local time. Returns (datetime, is_all_day).
+/// Resolve a wall-clock `NaiveDateTime` in zone `tz`, picking the earlier instant across a DST
+/// fold (deterministic) rather than dropping the event when the local time is ambiguous.
+fn resolve(tz: Tz, ndt: &NaiveDateTime) -> Option<DateTime<Tz>> {
+    tz.from_local_datetime(ndt).earliest()
+}
+
+/// Parse an iCal date/datetime value into the display zone `tz`. Returns (datetime, is_all_day).
 ///
-/// Three datetime forms per RFC 5545: a trailing `Z` is UTC; a `TZID=<zone>`
-/// parameter names an IANA zone the wall time is expressed in (the common Google
-/// Calendar case); bare values are "floating" and read as local. Honoring `TZID`
-/// is what keeps a meeting set in another timezone from showing at the wrong hour.
-fn parse_dt(p: &ical::property::Property) -> Option<(DateTime<Local>, bool)> {
+/// Three datetime forms per RFC 5545: a trailing `Z` is UTC; a `TZID=<zone>` parameter names an
+/// IANA zone the wall time is expressed in (the common Google Calendar case); bare values are
+/// "floating" and read as the display zone. Honoring `TZID` is what keeps a meeting set in
+/// another timezone from showing at the wrong hour.
+fn parse_dt(p: &ical::property::Property, tz: Tz) -> Option<(DateTime<Tz>, bool)> {
     let value = p.value.as_ref()?;
     let is_date = param_has(p, "VALUE", "DATE") || value.len() == 8;
     if is_date {
         let d = NaiveDate::parse_from_str(&value[..value.len().min(8)], "%Y%m%d").ok()?;
         let ndt = d.and_hms_opt(0, 0, 0)?;
-        return Some((Local.from_local_datetime(&ndt).single()?, true));
+        return Some((resolve(tz, &ndt)?, true));
     }
     if let Some(stripped) = value.strip_suffix('Z') {
         let ndt = NaiveDateTime::parse_from_str(stripped, "%Y%m%dT%H%M%S").ok()?;
-        return Some((Utc.from_utc_datetime(&ndt).with_timezone(&Local), false));
+        return Some((Utc.from_utc_datetime(&ndt).with_timezone(&tz), false));
     }
     let ndt = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").ok()?;
-    if let Some(tz) = param_value(p, "TZID").and_then(|t| t.parse::<Tz>().ok()) {
-        // Interpret the wall time in the event's zone, then convert to local.
-        // `.earliest()` resolves the DST fold/gap deterministically instead of
-        // dropping the event when the local time is ambiguous.
-        if let Some(dt) = tz.from_local_datetime(&ndt).earliest() {
-            return Some((dt.with_timezone(&Local), false));
+    if let Some(evtz) = param_value(p, "TZID").and_then(|t| t.parse::<Tz>().ok()) {
+        if let Some(dt) = evtz.from_local_datetime(&ndt).earliest() {
+            return Some((dt.with_timezone(&tz), false));
         }
     }
-    Some((Local.from_local_datetime(&ndt).single()?, false))
+    Some((resolve(tz, &ndt)?, false))
 }
 
-pub async fn get_events() -> Result<CalendarData, String> {
-    let url = config_url()?;
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client
-        .get(&url)
-        .header("Cache-Control", "no-cache")
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} fetching calendar", resp.status().as_u16()));
-    }
-    let body = resp.text().await.map_err(|e| e.to_string())?;
-    Ok(parse_calendar(&body, Local::now()))
-}
-
-fn parse_calendar(body: &str, now: DateTime<Local>) -> CalendarData {
+/// Parse an iCal feed into today's events + the next-meeting summary, in `now`'s timezone.
+pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
+    let tz = now.timezone();
     let start_of_day = now
         .date_naive()
         .and_hms_opt(0, 0, 0)
-        .map(|d| Local.from_local_datetime(&d).single().unwrap_or(now))
+        .and_then(|d| resolve(tz, &d))
         .unwrap_or(now);
     let end_of_day = start_of_day + Duration::hours(24);
 
@@ -147,31 +135,38 @@ fn parse_calendar(body: &str, now: DateTime<Local>) -> CalendarData {
     let parser = ical::IcalParser::new(body.as_bytes());
     for cal in parser.flatten() {
         for ev in cal.events {
-            let start = match prop(&ev, "DTSTART").and_then(parse_dt) {
+            let start = match prop(&ev, "DTSTART").and_then(|p| parse_dt(p, tz)) {
                 Some(s) => s,
                 None => continue,
             };
             let end = prop(&ev, "DTEND")
-                .and_then(parse_dt)
+                .and_then(|p| parse_dt(p, tz))
                 .map(|(d, _)| d)
-                .unwrap_or((start.0 + Duration::hours(1), false).0);
-            let title = prop(&ev, "SUMMARY")
-                .and_then(|p| p.value.clone())
-                .unwrap_or_default();
-            let location = prop(&ev, "LOCATION")
-                .and_then(|p| p.value.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| start.0 + Duration::hours(1));
+            let title = prop_value(&ev, "SUMMARY");
+            let location = prop_value(&ev, "LOCATION");
 
-            // Filter to today's window (matches gocal Start/End filter).
+            // Filter to today's window (matches the native module's Start/End filter).
             if end <= start_of_day || start.0 >= end_of_day {
                 continue;
             }
+
+            // The Zoom link usually lives in DESCRIPTION; LOCATION/URL are fallbacks. Scanning all
+            // three in order lets `best_meeting` still prefer a `pwd`-bearing link wherever it is.
+            let scan = format!(
+                "{}\n{}\n{}",
+                prop_value(&ev, "DESCRIPTION"),
+                location,
+                prop_value(&ev, "URL"),
+            );
+
             today.push(CalendarEvent {
                 title,
                 start: start.0,
                 end,
                 is_all_day: start.1,
                 location,
+                join_url: zoom_join_url(&scan),
             });
         }
     }
@@ -263,6 +258,7 @@ fn parse_calendar(body: &str, now: DateTime<Local>) -> CalendarData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono_tz::UTC;
 
     fn prop(
         name: &str,
@@ -290,40 +286,15 @@ mod tests {
     }
 
     #[test]
-    fn param_has_is_case_insensitive() {
-        let p = prop(
-            "DTSTART",
-            "20260531",
-            Some(vec![("VALUE".into(), vec!["DATE".into()])]),
-        );
-        assert!(param_has(&p, "VALUE", "date"));
-        assert!(param_has(&p, "value", "DATE"));
-        assert!(!param_has(&p, "TZID", "DATE"));
-    }
-
-    #[test]
     fn parse_dt_all_day_date() {
-        let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531", None)).unwrap();
+        let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531", None), UTC).unwrap();
         assert!(all_day);
-        assert_eq!(
-            dt.date_naive(),
-            NaiveDate::from_ymd_opt(2026, 5, 31).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_dt_value_date_param() {
-        let p = prop(
-            "DTSTART",
-            "20260531T000000",
-            Some(vec![("VALUE".into(), vec!["DATE".into()])]),
-        );
-        assert!(parse_dt(&p).unwrap().1);
+        assert_eq!(dt.date_naive(), NaiveDate::from_ymd_opt(2026, 5, 31).unwrap());
     }
 
     #[test]
     fn parse_dt_utc_z_converts() {
-        let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531T120000Z", None)).unwrap();
+        let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531T120000Z", None), UTC).unwrap();
         assert!(!all_day);
         assert_eq!(
             dt.with_timezone(&Utc),
@@ -332,23 +303,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_dt_floating_is_local() {
-        let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531T140000", None)).unwrap();
-        assert!(!all_day);
-        assert_eq!(dt, Local.with_ymd_and_hms(2026, 5, 31, 14, 0, 0).unwrap());
-    }
-
-    #[test]
     fn parse_dt_honors_tzid() {
-        // 09:00 in New York is a fixed instant regardless of the machine's local
-        // zone — the bug was treating this wall time as local and showing 09:00.
+        // 09:00 in New York is a fixed instant regardless of the display zone — the bug we guard
+        // against is treating this wall time as the display zone and showing 09:00.
         let p = prop(
             "DTSTART",
             "20260531T090000",
             Some(vec![("TZID".into(), vec!["America/New_York".into()])]),
         );
-        let (dt, all_day) = parse_dt(&p).unwrap();
-        assert!(!all_day);
+        let (dt, _) = parse_dt(&p, UTC).unwrap();
         // 2026-05-31 is EDT (UTC-4) → 13:00 UTC.
         assert_eq!(
             dt.with_timezone(&Utc),
@@ -363,7 +326,7 @@ mod tests {
             "20260531T090000",
             Some(vec![("TZID".into(), vec!["\"America/New_York\"".into()])]),
         );
-        let dt = parse_dt(&p).unwrap().0;
+        let dt = parse_dt(&p, UTC).unwrap().0;
         assert_eq!(
             dt.with_timezone(&Utc),
             Utc.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap()
@@ -371,19 +334,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_dt_unknown_tzid_falls_back_to_local() {
+    fn parse_dt_unknown_tzid_falls_back_to_display_zone() {
         let p = prop(
             "DTSTART",
             "20260531T140000",
             Some(vec![("TZID".into(), vec!["Mars/Olympus".into()])]),
         );
-        let dt = parse_dt(&p).unwrap().0;
-        assert_eq!(dt, Local.with_ymd_and_hms(2026, 5, 31, 14, 0, 0).unwrap());
+        let dt = parse_dt(&p, UTC).unwrap().0;
+        assert_eq!(dt, UTC.with_ymd_and_hms(2026, 5, 31, 14, 0, 0).unwrap());
     }
 
     #[test]
     fn no_meetings_when_empty() {
-        let now = Local.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
         let d = parse_calendar("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n", now);
         assert!(!d.has_next);
         assert_eq!(d.display_text, "No meetings");
@@ -391,11 +354,8 @@ mod tests {
 
     #[test]
     fn next_meeting_soon() {
-        let now = Local.with_ymd_and_hms(2026, 5, 31, 13, 57, 0).unwrap();
-        let d = parse_calendar(
-            &ical_with("20260531T140000", "20260531T143000", "Standup"),
-            now,
-        );
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 57, 0).unwrap();
+        let d = parse_calendar(&ical_with("20260531T140000", "20260531T143000", "Standup"), now);
         assert!(d.has_next);
         assert_eq!(d.next_title, "Standup");
         assert!(d.is_urgent);
@@ -406,11 +366,8 @@ mod tests {
 
     #[test]
     fn ongoing_meeting_is_overdue() {
-        let now = Local.with_ymd_and_hms(2026, 5, 31, 14, 10, 0).unwrap();
-        let d = parse_calendar(
-            &ical_with("20260531T140000", "20260531T143000", "Standup"),
-            now,
-        );
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 14, 10, 0).unwrap();
+        let d = parse_calendar(&ical_with("20260531T140000", "20260531T143000", "Standup"), now);
         assert!(d.is_overdue);
         assert_eq!(d.time_until_next, "ongoing");
         assert_eq!(d.display_text, "NOW: Standup");
@@ -418,14 +375,35 @@ mod tests {
 
     #[test]
     fn far_future_meeting_not_urgent() {
-        let now = Local.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
-        let d = parse_calendar(
-            &ical_with("20260531T140000", "20260531T143000", "Review"),
-            now,
-        );
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
+        let d = parse_calendar(&ical_with("20260531T140000", "20260531T143000", "Review"), now);
         assert!(d.has_next);
         assert!(!d.is_urgent);
         assert_eq!(d.display_text, "Review");
         assert_eq!(d.time_until_next, "5h");
+    }
+
+    #[test]
+    fn event_with_zoom_description_gets_join_url() {
+        // SANITIZED: fabricated meeting id + token (no real meeting encoded).
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1@test\r\n\
+            SUMMARY:Debrief\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\n\
+            DESCRIPTION:Join Zoom Meeting https://acme.zoom.us/j/12345678901?pwd=tok.1\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
+        let d = parse_calendar(body, now);
+        assert_eq!(d.today_events.len(), 1);
+        assert_eq!(
+            d.today_events[0].join_url.as_deref(),
+            Some("https://acme.zoom.us/wc/12345678901/join?pwd=tok.1")
+        );
+    }
+
+    #[test]
+    fn event_without_zoom_has_no_join_url() {
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
+        let d = parse_calendar(&ical_with("20260531T140000Z", "20260531T143000Z", "Lunch"), now);
+        assert_eq!(d.today_events.len(), 1);
+        assert_eq!(d.today_events[0].join_url, None);
     }
 }

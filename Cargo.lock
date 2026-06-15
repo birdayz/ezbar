@@ -488,6 +488,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "calendar-logic"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "ical",
+]
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1426,12 +1435,10 @@ version = "0.1.13"
 dependencies = [
  "base64",
  "chrono",
- "chrono-tz",
  "env_logger",
  "ezbar-harness",
  "ezbar-plugin",
  "ezbar-wasm",
- "ical",
  "iced",
  "iced_layershell",
  "libc",
@@ -1446,6 +1453,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -1472,6 +1480,7 @@ dependencies = [
  "anyhow",
  "ezbar-harness",
  "ezbar-plugin",
+ "iana-time-zone",
  "log",
  "reqwest",
  "tokio",
