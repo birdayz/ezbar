@@ -84,7 +84,11 @@ fn unescape_ical(text: &str) -> String {
 /// trimmed so `…/join.` or `…/join,` doesn't swallow the dot into the URL.
 fn tokens(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| {
-        c.is_whitespace() || matches!(c, '\\' | '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']' | '|')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\\' | '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']' | '|'
+            )
     })
     .map(|t| t.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | '!' | '?')))
     .filter(|t| !t.is_empty())
@@ -190,7 +194,10 @@ Passcode: 000000
     fn bare_zoom_us_host() {
         let m = best_meeting("https://zoom.us/j/11122233344?pwd=tok.2").unwrap();
         assert_eq!(m.host, "zoom.us");
-        assert_eq!(m.web_join_url(), "https://zoom.us/wc/11122233344/join?pwd=tok.2");
+        assert_eq!(
+            m.web_join_url(),
+            "https://zoom.us/wc/11122233344/join?pwd=tok.2"
+        );
     }
 
     #[test]
@@ -224,8 +231,14 @@ Passcode: 000000
 
     #[test]
     fn non_zoom_links_ignored() {
-        assert_eq!(zoom_join_url("https://app.example-ats.test/guides/111"), None);
-        assert_eq!(zoom_join_url("https://notzoom.us.evil.test/j/12345678901"), None);
+        assert_eq!(
+            zoom_join_url("https://app.example-ats.test/guides/111"),
+            None
+        );
+        assert_eq!(
+            zoom_join_url("https://notzoom.us.evil.test/j/12345678901"),
+            None
+        );
     }
 
     #[test]
@@ -242,6 +255,9 @@ Passcode: 000000
     #[test]
     fn phone_one_tap_is_not_a_url() {
         // "+15551234567,,12345678901#" — a dial string, not an https URL.
-        assert_eq!(zoom_join_url("One tap mobile +15551234567,,12345678901# US"), None);
+        assert_eq!(
+            zoom_join_url("One tap mobile +15551234567,,12345678901# US"),
+            None
+        );
     }
 }

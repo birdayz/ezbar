@@ -412,8 +412,12 @@ pub trait Ctx {
     /// (`"*"` = any, or `[plugins] yolo`); returns `Err` if the program isn't granted, or
     /// couldn't be spawned. Like [`http_get`](Ctx::http_get), keep it on the timer path — the
     /// guest is parked while the command runs.
-    fn exec(&mut self, program: &str, args: &[&str], stdin: Option<&[u8]>)
-        -> Result<ExecOutput, String>;
+    fn exec(
+        &mut self,
+        program: &str,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Result<ExecOutput, String>;
     /// Open the bar's **native searchable picker** over `items` and block until the user picks
     /// one (returns it) or dismisses (returns `None`). `current` is the index of the item to
     /// mark `✓`. The picker — search field, fuzzy filtering, keyboard, focus, theming — is

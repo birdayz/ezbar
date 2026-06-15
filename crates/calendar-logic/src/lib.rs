@@ -289,7 +289,10 @@ mod tests {
     fn parse_dt_all_day_date() {
         let (dt, all_day) = parse_dt(&prop("DTSTART", "20260531", None), UTC).unwrap();
         assert!(all_day);
-        assert_eq!(dt.date_naive(), NaiveDate::from_ymd_opt(2026, 5, 31).unwrap());
+        assert_eq!(
+            dt.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 5, 31).unwrap()
+        );
     }
 
     #[test]
@@ -355,7 +358,10 @@ mod tests {
     #[test]
     fn next_meeting_soon() {
         let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 57, 0).unwrap();
-        let d = parse_calendar(&ical_with("20260531T140000", "20260531T143000", "Standup"), now);
+        let d = parse_calendar(
+            &ical_with("20260531T140000", "20260531T143000", "Standup"),
+            now,
+        );
         assert!(d.has_next);
         assert_eq!(d.next_title, "Standup");
         assert!(d.is_urgent);
@@ -367,7 +373,10 @@ mod tests {
     #[test]
     fn ongoing_meeting_is_overdue() {
         let now = UTC.with_ymd_and_hms(2026, 5, 31, 14, 10, 0).unwrap();
-        let d = parse_calendar(&ical_with("20260531T140000", "20260531T143000", "Standup"), now);
+        let d = parse_calendar(
+            &ical_with("20260531T140000", "20260531T143000", "Standup"),
+            now,
+        );
         assert!(d.is_overdue);
         assert_eq!(d.time_until_next, "ongoing");
         assert_eq!(d.display_text, "NOW: Standup");
@@ -376,7 +385,10 @@ mod tests {
     #[test]
     fn far_future_meeting_not_urgent() {
         let now = UTC.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
-        let d = parse_calendar(&ical_with("20260531T140000", "20260531T143000", "Review"), now);
+        let d = parse_calendar(
+            &ical_with("20260531T140000", "20260531T143000", "Review"),
+            now,
+        );
         assert!(d.has_next);
         assert!(!d.is_urgent);
         assert_eq!(d.display_text, "Review");
@@ -402,7 +414,10 @@ mod tests {
     #[test]
     fn event_without_zoom_has_no_join_url() {
         let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
-        let d = parse_calendar(&ical_with("20260531T140000Z", "20260531T143000Z", "Lunch"), now);
+        let d = parse_calendar(
+            &ical_with("20260531T140000Z", "20260531T143000Z", "Lunch"),
+            now,
+        );
         assert_eq!(d.today_events.len(), 1);
         assert_eq!(d.today_events[0].join_url, None);
     }

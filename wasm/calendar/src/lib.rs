@@ -218,7 +218,10 @@ impl Plugin for Calendar {
 
     fn popup(&self) -> Option<Render> {
         let body = if !self.configured {
-            empty_state("Calendar not set up", Some("Save your secret iCal URL to\n~/.config/ezbar/calendar_url"))
+            empty_state(
+                "Calendar not set up",
+                Some("Save your secret iCal URL to\n~/.config/ezbar/calendar_url"),
+            )
         } else if self.rows.is_empty() {
             empty_state("No meetings today", None)
         } else {
@@ -233,13 +236,19 @@ impl Plugin for Calendar {
             column(items).spacing(4.0)
         };
 
-        let evword = if self.rows.len() == 1 { "event" } else { "events" };
+        let evword = if self.rows.len() == 1 {
+            "event"
+        } else {
+            "events"
+        };
         let header = row([
             text(self.header_date.clone()).size(15.0).color(Token::Fg),
             text(format!("\u{b7}  {} {}", self.rows.len(), evword))
                 .size(13.0)
                 .color(Token::FgDim),
-            text(self.header_clock.clone()).size(15.0).color(Token::Accent),
+            text(self.header_clock.clone())
+                .size(15.0)
+                .color(Token::Accent),
         ])
         .spacing(10.0)
         .align(Align::Center);
@@ -314,7 +323,11 @@ impl Calendar {
             } else {
                 RowState::Upcoming
             };
-            let when = format!("{} \u{2013} {}", ev.start.format("%H:%M"), ev.end.format("%H:%M"));
+            let when = format!(
+                "{} \u{2013} {}",
+                ev.start.format("%H:%M"),
+                ev.end.format("%H:%M")
+            );
             let trailing = if ev.start > now {
                 rel(ev.start - now)
             } else if state == RowState::Ongoing {

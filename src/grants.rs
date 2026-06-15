@@ -324,7 +324,10 @@ pub fn grant_cli(id: &str, include_dangerous: bool) -> Result<String, String> {
             if a.written.is_empty() && a.present.is_empty() {
                 lines.push(format!("  [modules.{id}] needs no capabilities."));
             } else if a.written.is_empty() {
-                lines.push(format!("  [modules.{id}] already configured ({}).", a.present.join(", ")));
+                lines.push(format!(
+                    "  [modules.{id}] already configured ({}).",
+                    a.present.join(", ")
+                ));
             } else {
                 lines.push(format!("  wrote [modules.{id}]: {}", a.written.join(", ")));
             }
@@ -547,8 +550,14 @@ mod tests {
         let out = doc.to_string();
         assert!(out.contains("[modules.calendar]"));
         assert!(out.contains("network = [\"calendar.google.com\"]"));
-        assert!(!out.contains("exec"), "exec must be withheld without --dangerous");
-        assert!(!out.contains("fs ="), "fs must be withheld without --dangerous");
+        assert!(
+            !out.contains("exec"),
+            "exec must be withheld without --dangerous"
+        );
+        assert!(
+            !out.contains("fs ="),
+            "fs must be withheld without --dangerous"
+        );
     }
 
     #[test]
@@ -577,9 +586,18 @@ network = [\"calendar.google.com\", \"extra.example.com\"]
         assert_eq!(a.present, ["network"]);
         assert_eq!(a.written, ["fs", "exec"]);
         let out = doc.to_string();
-        assert!(out.contains("# my bar config — keep me!"), "comment preserved");
-        assert!(out.contains("extra.example.com"), "user's extra host preserved");
-        assert!(out.contains("exec = [\"xdg-open\"]"), "new dangerous cap added");
+        assert!(
+            out.contains("# my bar config — keep me!"),
+            "comment preserved"
+        );
+        assert!(
+            out.contains("extra.example.com"),
+            "user's extra host preserved"
+        );
+        assert!(
+            out.contains("exec = [\"xdg-open\"]"),
+            "new dangerous cap added"
+        );
     }
 
     #[test]
