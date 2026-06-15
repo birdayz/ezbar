@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# ezbar pre-commit — runs the exact checks CI enforces (the .github/workflows/ci.yml
+# `rustfmt` + `clippy + test` jobs), so a clean commit means a green pipeline.
+#
+# Enable it once per clone:
+#     git config core.hooksPath .githooks
+#
+# Skip in a pinch (WIP commit, etc.):
+#     git commit --no-verify
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+step() { printf '\033[1;34mpre-commit »\033[0m %s\n' "$*"; "$@"; }
+
+# rustfmt job
+step cargo fmt --all --check
+
+# clippy + test job
+step cargo clippy --workspace --all-targets -- -D warnings
+step cargo test --workspace --all-targets
+step cargo test --workspace --doc
+
+printf '\033[1;32mpre-commit » OK\033[0m\n'
