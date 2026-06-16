@@ -17,6 +17,7 @@
 //! network = ["calendar.google.com"]
 //! fs = [{ path = "~/.config/ezbar", mode = "r" }]   # mounts at /ezbar
 //! exec = ["xdg-open"]
+//! max_memory = "64M"                                # the feed is the whole history; see README
 //! ```
 //!
 //! All time math happens in `update`; `view`/`popup` stay pure — they only assemble the DSL from
@@ -24,7 +25,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use calendar_logic::{parse_calendar, CalendarData};
+use calendar_logic::{parse_calendar, slim_ical, CalendarData};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::{Tz, UTC};
 use ezbar_plugin_wasm::prelude::*;
@@ -67,7 +68,9 @@ struct Calendar {
     url: String,
     tz: Tz,
     tz_loaded: bool,
-    body: String,
+    /// The feed sliced to a few days around today (KB, not the MB the server sends) — see
+    /// `slim_ical`. We never keep the full feed: the sandbox memory cap can't hold it.
+    slim: String,
     last_fetch: i64,
     configured: bool,
     loaded: bool,
@@ -92,7 +95,7 @@ impl Default for Calendar {
             url: String::new(),
             tz: UTC,
             tz_loaded: false,
-            body: String::new(),
+            slim: String::new(),
             last_fetch: 0,
             configured: false,
             loaded: false,
@@ -142,10 +145,15 @@ impl Plugin for Calendar {
 
                 let now = now_secs();
                 let mut ok = true;
-                if self.body.is_empty() || now - self.last_fetch >= FETCH_INTERVAL_SECS {
+                if self.slim.is_empty() || now - self.last_fetch >= FETCH_INTERVAL_SECS {
                     match ctx.http_get(&self.url) {
                         Ok(bytes) => {
-                            self.body = String::from_utf8_lossy(&bytes).into_owned();
+                            // The feed is the user's whole history (tens of MB). Borrow the bytes
+                            // as &str (no copy) and slice to a few days around today *before* the
+                            // big buffer is dropped, so we only ever keep/parse a KB-sized window.
+                            let body = std::str::from_utf8(&bytes).unwrap_or("");
+                            let today = now_in(self.tz).date_naive();
+                            self.slim = slim_ical(body, today, 1, 2);
                             self.last_fetch = now;
                         }
                         Err(e) => {
@@ -271,10 +279,10 @@ impl Calendar {
     /// Rebuild the render model from the cached feed at the current instant.
     fn recompute(&mut self) {
         let now = now_in(self.tz);
-        let data: CalendarData = if self.body.is_empty() {
+        let data: CalendarData = if self.slim.is_empty() {
             CalendarData::default()
         } else {
-            parse_calendar(&self.body, now)
+            parse_calendar(&self.slim, now)
         };
 
         self.has_next = data.has_next;

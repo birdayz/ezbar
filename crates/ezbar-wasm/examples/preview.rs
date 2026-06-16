@@ -38,6 +38,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let mut grants_fs: Vec<ezbar_wasm::FsGrant> = Vec::new();
     let mut grants_exec: Vec<String> = Vec::new();
     let mut config: Vec<(String, String)> = Vec::new();
+    let mut mem_limit: usize = ezbar_wasm::MEM_LIMIT;
     let mut check = false;
 
     while let Some(arg) = args.next() {
@@ -86,6 +87,12 @@ fn main() -> ezbar_plugin::iced::Result {
                     None => fail("--set needs key=value, e.g. --set lat=52.52"),
                 },
                 None => fail("--set needs key=value, e.g. --set lat=52.52"),
+            },
+            // --max-memory <n>[K|M|G] — raise the plugin's linear-memory cap (mirrors
+            // `[modules.<id>].max_memory`); needed to preview a plugin that holds a big payload.
+            "--max-memory" => match args.next() {
+                Some(s) => mem_limit = parse_mem(&s),
+                None => fail("--max-memory needs a size, e.g. --max-memory 48M"),
             },
             "--check" => check = true,
             "-h" | "--help" => usage(0),
@@ -152,6 +159,7 @@ fn main() -> ezbar_plugin::iced::Result {
         grant_sway,
         grants_fs,
         grants_exec,
+        mem_limit,
     );
 
     // Headless smoke test: drive the plugin briefly and report what it rendered.
@@ -226,4 +234,24 @@ fn usage(code: i32) -> ! {
 fn fail(msg: &str) -> ! {
     eprintln!("preview: {msg}");
     exit(2)
+}
+
+/// Parse a `--max-memory` size like `48`, `48M`, `48MiB` into bytes (K/M/G are powers of 1024).
+fn parse_mem(s: &str) -> usize {
+    let t = s.trim();
+    let t = t
+        .strip_suffix("iB")
+        .or_else(|| t.strip_suffix('B'))
+        .unwrap_or(t)
+        .trim();
+    let (digits, mult) = match t.chars().last() {
+        Some('K' | 'k') => (&t[..t.len() - 1], 1usize << 10),
+        Some('M' | 'm') => (&t[..t.len() - 1], 1usize << 20),
+        Some('G' | 'g') => (&t[..t.len() - 1], 1usize << 30),
+        _ => (t, 1usize),
+    };
+    match digits.trim().parse::<usize>() {
+        Ok(n) => n.saturating_mul(mult).max(ezbar_wasm::MEM_LIMIT),
+        Err(_) => fail("--max-memory: bad size (try 48M)"),
+    }
 }

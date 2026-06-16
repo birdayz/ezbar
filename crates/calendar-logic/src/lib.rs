@@ -121,6 +121,56 @@ fn parse_dt(p: &ical::property::Property, tz: Tz) -> Option<(DateTime<Tz>, bool)
     Some((resolve(tz, &ndt)?, false))
 }
 
+/// Cheaply slice a (potentially huge) iCal feed down to just the VEVENT blocks whose `DTSTART`
+/// date falls within `[today - days_back, today + days_fwd]`, re-wrapped as a tiny VCALENDAR.
+///
+/// A secret Google feed is the user's *entire* calendar history — tens of MB, thousands of
+/// events — but a status bar only cares about the next day or two. The WASM sandbox can't even
+/// hold the full feed, so the plugin runs this single linear byte pass (no full parse, no
+/// per-event allocation) the moment it fetches, then parses only the KB-sized result. The window
+/// spans a couple of days so the chip rolls over at midnight without a refetch.
+pub fn slim_ical(body: &str, today: NaiveDate, days_back: i64, days_fwd: i64) -> String {
+    let lo = today - Duration::days(days_back.max(0));
+    let hi = today + Duration::days(days_fwd.max(0));
+    let mut out = String::with_capacity(8192);
+    out.push_str("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ezbar//slim//EN\r\n");
+    // Split on the event marker; segment 0 is the calendar preamble, the rest are event bodies.
+    // VALARM uses its own BEGIN/END:VALARM, so it never splits an event apart.
+    for seg in body.split("BEGIN:VEVENT").skip(1) {
+        let Some(end) = seg.find("END:VEVENT") else {
+            continue;
+        };
+        let event = &seg[..end];
+        if event_in_window(event, lo, hi) {
+            out.push_str("BEGIN:VEVENT");
+            out.push_str(event);
+            out.push_str("END:VEVENT\r\n");
+        }
+    }
+    out.push_str("END:VCALENDAR\r\n");
+    out
+}
+
+/// Is this VEVENT's `DTSTART` date within `[lo, hi]`? Reads the first property line that starts
+/// with `DTSTART` (property lines begin at column 0; folded continuations start with a space, so
+/// `starts_with` won't false-match a `DESCRIPTION` body) and parses its leading `YYYYMMDD`.
+fn event_in_window(event: &str, lo: NaiveDate, hi: NaiveDate) -> bool {
+    for line in event.lines() {
+        if !line.starts_with("DTSTART") {
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            return false;
+        };
+        let digits: String = line[colon + 1..].chars().take(8).collect();
+        return match NaiveDate::parse_from_str(&digits, "%Y%m%d") {
+            Ok(d) => d >= lo && d <= hi,
+            Err(_) => false,
+        };
+    }
+    false
+}
+
 /// Parse an iCal feed into today's events + the next-meeting summary, in `now`'s timezone.
 pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
     let tz = now.timezone();
@@ -276,6 +326,27 @@ mod tests {
         format!(
             "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1@test\r\nSUMMARY:{summary}\r\nDTSTART:{dtstart}\r\nDTEND:{dtend}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
         )
+    }
+
+    #[test]
+    fn slim_keeps_only_the_window_and_stays_parseable() {
+        let today = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+            BEGIN:VEVENT\r\nUID:old@x\r\nSUMMARY:OldOne\r\nDTSTART:20200101T100000Z\r\nDTEND:20200101T110000Z\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:t@x\r\nSUMMARY:TodayMtg\r\nDTSTART:20260616T140000Z\r\nDTEND:20260616T150000Z\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:m@x\r\nSUMMARY:TmrwMtg\r\nDTSTART;TZID=America/New_York:20260617T090000\r\nDTEND;TZID=America/New_York:20260617T100000\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:f@x\r\nSUMMARY:FarOne\r\nDTSTART;VALUE=DATE:20270101\r\nEND:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let slim = slim_ical(body, today, 1, 2);
+        assert!(slim.contains("TodayMtg"));
+        assert!(slim.contains("TmrwMtg"));
+        assert!(!slim.contains("OldOne"), "out-of-window past event dropped");
+        assert!(!slim.contains("FarOne"), "far-future event dropped");
+        assert!(slim.len() < body.len());
+        // the slim output is still valid iCal that parse_calendar consumes
+        let now = UTC.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let d = parse_calendar(&slim, now);
+        assert_eq!(d.next_title, "TodayMtg");
     }
 
     #[test]

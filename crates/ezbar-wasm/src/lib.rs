@@ -138,7 +138,10 @@ pub struct FsGrant {
 // resource bounds (RFC 0006 §1a / RFC 0008: fixed constants)
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 const DEADLINE_TICKS: u64 = 20; // ~200ms guest CPU before a cooperative epoch yield
-const MEM_LIMIT: usize = 2 << 20; // 2 MiB per plugin store (RFC 0008 §3.4: 8→2)
+/// Default per-plugin linear-memory cap (RFC 0008 §3.4: 8→2 MiB). Overridable per plugin via
+/// `[modules.<id>].max_memory` for the rare widget that must hold a large payload (e.g. the
+/// calendar plugin fetching a multi-megabyte iCal feed).
+pub const MEM_LIMIT: usize = 2 << 20; // 2 MiB
 const MAX_NODES: usize = 2_000;
 const MAX_DEPTH: usize = 32;
 // Legacy heartbeat: the wake cadence for a plugin that never calls `set-timeout` (RFC
@@ -1218,6 +1221,7 @@ impl Reactor {
         grant_sway: bool,
         grants_fs: Vec<FsGrant>,
         grants_exec: Vec<String>,
+        mem_limit: usize,
         token: u64,
         slot: Slot,
         input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -1232,6 +1236,7 @@ impl Reactor {
                     grant_sway,
                     grants_fs,
                     grants_exec,
+                    mem_limit,
                     token,
                     slot,
                     input,
@@ -1253,6 +1258,7 @@ impl Reactor {
         grant_sway: bool,
         grants_fs: Vec<FsGrant>,
         grants_exec: Vec<String>,
+        mem_limit: usize,
         token: u64,
         slot: Slot,
         mut input: tokio::sync::mpsc::Receiver<PointerEvent>,
@@ -1272,7 +1278,7 @@ impl Reactor {
             Host {
                 table: ResourceTable::new(),
                 wasi,
-                limits: StoreLimitsBuilder::new().memory_size(MEM_LIMIT).build(),
+                limits: StoreLimitsBuilder::new().memory_size(mem_limit).build(),
                 granted_network: grants,
                 client: self.client.clone(),
                 timer_request: None,
@@ -1809,6 +1815,7 @@ impl WasmModule {
         grant_sway: bool,
         grants_fs: Vec<FsGrant>,
         grants_exec: Vec<String>,
+        mem_limit: usize,
     ) -> Self {
         let slot: Slot = Arc::new(Shared {
             slots: Mutex::new(Slots::default()),
@@ -1823,6 +1830,7 @@ impl WasmModule {
             grant_sway,
             grants_fs,
             grants_exec,
+            mem_limit,
             instance, // feed-subscription token
             slot.clone(),
             rx,

@@ -157,6 +157,37 @@ fn exec_grants(cfg: &toml::Value) -> Vec<String> {
     string_or_array(cfg, "exec")
 }
 
+/// `[modules.<id>].max_memory` — the plugin's linear-memory cap, for the rare widget that must
+/// hold a large payload (e.g. the calendar plugin's multi-megabyte iCal feed). Accepts a byte
+/// count or a string with a K/M/G (optionally `i`/`B`) suffix, e.g. `"48M"`. Defaults to the host
+/// default (2 MiB) and is clamped to a sane ceiling so a typo can't grab all RAM.
+fn mem_limit(cfg: &toml::Value) -> usize {
+    const MAX: usize = 512 << 20; // 512 MiB hard ceiling
+    let bytes = match cfg.get("max_memory") {
+        Some(toml::Value::Integer(n)) if *n > 0 => *n as usize,
+        Some(toml::Value::String(s)) => parse_size(s).unwrap_or(ezbar_wasm::MEM_LIMIT),
+        _ => ezbar_wasm::MEM_LIMIT,
+    };
+    bytes.clamp(ezbar_wasm::MEM_LIMIT, MAX)
+}
+
+/// Parse a size like `48`, `48M`, `48MiB`, `48MB` into bytes. K/M/G are powers of 1024.
+fn parse_size(s: &str) -> Option<usize> {
+    let s = s.trim();
+    let s = s
+        .strip_suffix("iB")
+        .or_else(|| s.strip_suffix('B'))
+        .unwrap_or(s)
+        .trim();
+    let (digits, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1usize << 10),
+        'M' | 'm' => (&s[..s.len() - 1], 1usize << 20),
+        'G' | 'g' => (&s[..s.len() - 1], 1usize << 30),
+        _ => (s, 1usize),
+    };
+    digits.trim().parse::<usize>().ok()?.checked_mul(mult)
+}
+
 fn fs_grants(cfg: &toml::Value) -> Vec<ezbar_wasm::FsGrant> {
     let Some(arr) = cfg.get("fs").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -462,6 +493,7 @@ pub fn build(
                 sway,
                 fs,
                 exec,
+                mem_limit(cfg),
             ));
             m
         }),
@@ -474,6 +506,21 @@ mod tests {
 
     fn tbl(s: &str) -> toml::Value {
         s.parse::<toml::Value>().unwrap()
+    }
+
+    #[test]
+    fn mem_limit_parses_suffixes_and_clamps() {
+        assert_eq!(mem_limit(&tbl("")), ezbar_wasm::MEM_LIMIT); // default when unset
+        assert_eq!(mem_limit(&tbl("max_memory = \"48M\"")), 48 << 20);
+        assert_eq!(mem_limit(&tbl("max_memory = \"48MiB\"")), 48 << 20);
+        assert_eq!(mem_limit(&tbl("max_memory = \"48MB\"")), 48 << 20);
+        assert_eq!(mem_limit(&tbl("max_memory = 33554432")), 32 << 20); // raw bytes
+                                                                        // below the default floor clamps up; an absurd value clamps to the ceiling
+        assert_eq!(
+            mem_limit(&tbl("max_memory = \"1K\"")),
+            ezbar_wasm::MEM_LIMIT
+        );
+        assert_eq!(mem_limit(&tbl("max_memory = \"99G\"")), 512 << 20);
     }
 
     #[test]

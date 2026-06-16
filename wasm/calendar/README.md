@@ -26,11 +26,25 @@ but a sandboxed plugin must be **granted** access to it. Paste this into
 network = ["calendar.google.com"]               # the iCal feed host
 fs = [{ path = "~/.config/ezbar", mode = "r" }] # read calendar_url; mounts at /ezbar (DANGEROUS tier)
 exec = ["xdg-open"]                             # open the meeting in the browser (DANGEROUS tier)
+max_memory = "64M"                              # REQUIRED — see "Large feeds" below
 ```
 
 `fs` and `exec` are the dangerous tier (RFC 0015), so the one-command ack writes them only when
 you opt in: `ezbar grant calendar --dangerous`. Plain `ezbar grant calendar` writes just the safe
-`network` grant and tells you what it withheld.
+`network` grant and tells you what it withheld. `max_memory` is a resource knob, not a capability,
+so add that one line by hand.
+
+### Large feeds
+
+A secret Google iCal URL serves your **entire calendar history** — easily tens of MB and
+thousands of events — but the WASM sandbox caps a plugin at **2 MiB**, which can't even hold the
+response. Two things address this:
+
+- The plugin **slices the feed to a couple of days around today** the instant it fetches (one
+  byte pass — `calendar_logic::slim_ical`), then only keeps/parses that KB-sized window, so
+  steady-state memory and per-tick CPU stay tiny.
+- It still has to **receive** the full body first, so raise its cap with `max_memory` (e.g.
+  `"64M"`). Without it the plugin can't load the feed and the chip stays on its loading glyph.
 
 The display timezone comes from the host (`ctx.local_timezone()`, RFC 0019), so meetings render
 in your local wall-clock time without any extra config. `$GOOGLE_CALENDAR_ICAL_URL` is **not**
