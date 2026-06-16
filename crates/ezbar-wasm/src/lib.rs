@@ -266,23 +266,31 @@ impl ezbar::plugin::host::Host for Host {
         if !self.granted_network.iter().any(|g| host_matches(g, h)) {
             return Err(format!("capability denied: network host '{h}' not granted"));
         }
-        // Async fetch: this `await` suspends the guest's fiber, freeing the reactor
-        // worker to serve other plugins. The 8s timeout bounds the wait; the guest
-        // burns no epoch while parked here.
-        let resp = self
-            .client
-            .get(&url)
-            .timeout(Duration::from_secs(8))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("http {}", resp.status()));
+        // Async fetch: this `await` suspends the guest's fiber, freeing the reactor worker to
+        // serve other plugins; the guest burns no epoch while parked here. A large body (a
+        // multi-MB iCal feed downloads in ~10s on a modest link) can outlast the WALL backstop,
+        // so flag this as a blocking service (like `pick`) to suspend WALL while it streams —
+        // reqwest's own timeout is then the real bound, and a healthy slow download isn't trapped.
+        self.in_blocking_service.store(true, Ordering::SeqCst);
+        let out = async {
+            let resp = self
+                .client
+                .get(&url)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("http {}", resp.status()));
+            }
+            resp.bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| e.to_string())
         }
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| e.to_string())
+        .await;
+        self.in_blocking_service.store(false, Ordering::SeqCst);
+        out
     }
     async fn read_file(&mut self, _path: String) -> Result<Vec<u8>, String> {
         Err("capability denied: read-file not granted".into())
