@@ -184,7 +184,13 @@ run this on your graphical session to see the chip, or pass --check to verify he
 /// Poll the actor's rendered snapshot until the chip has nodes (or we give up),
 /// then report. Exits non-zero if nothing rendered — a CI-usable assertion.
 fn run_check(module: &WasmModule) -> ezbar_plugin::iced::Result {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // Default 8s; raise via EZBAR_PREVIEW_CHECK_SECS for a plugin whose first frame waits on a
+    // slow fetch (e.g. a multi-MB feed that takes ~10s to download).
+    let secs = std::env::var("EZBAR_PREVIEW_CHECK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         let (view, popup) = module.debug_snapshot();
         if view > 0 {
@@ -193,7 +199,7 @@ fn run_check(module: &WasmModule) -> ezbar_plugin::iced::Result {
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "preview: FAIL — the plugin produced no chip within 8s. It may have trapped \
+                "preview: FAIL — the plugin produced no chip within {secs}s. It may have trapped \
 (see warnings above), be waiting on a denied capability (pass --net), or its `view` returned \
 nothing. "
             );
