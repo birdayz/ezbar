@@ -1,10 +1,12 @@
 //! ezbar WASM plugin: `claude` — a Claude Code **agent dashboard + spend meter**.
 //!
 //! Running several agents at once, what matters is **how fast you're burning money**. The chip
-//! shows the live agent count, the combined **$/hr** (the "raid DPS"), and the 5h/7d rate-limit
-//! usage. The popup is a **Recount-style meter**: one bar per agent (titled by its session name),
-//! biggest spender on top, plus the account $/hr trend and the limit bars. (There is deliberately
-//! **no idle/"waiting for you" alarm** — a session waiting on you isn't actionable from the bar.)
+//! shows the live agent count, the combined **$/hr** (the "raid DPS"), the combined **tokens/s**,
+//! and the 5h/7d rate-limit usage. The popup is a **Recount-style meter**: one bar per agent
+//! (titled by its session name), biggest spender on top, each row showing its own $/hr and tok/s,
+//! plus the account $/hr trend, the limit bars, and a clickable **`All | Today | 1h`** selector at
+//! the bottom that re-windows every rate. (There is deliberately **no idle/"waiting for you"
+//! alarm** — a session waiting on you isn't actionable from the bar.)
 //!
 //! ## Detection (robust, race-free, zero-config)
 //! `idle` is `now − mtime(newest transcript .jsonl)` under `~/.claude/projects/<cwd>/` — the
@@ -25,12 +27,20 @@
 //! number everywhere — the chip, the popup header, the sum of the rows, and the trend sparkline all
 //! show it. No `ccusage`, no token-pricing math — just `fs`.
 //!
+//! ## Windowed rates (All / Today / 1h)
+//! The session snapshot has no token counter, so **tokens/s** is summed from the transcript files
+//! (main + `subagents/*.jsonl`) — read incrementally, deduped by `message.id`, bounded so a
+//! multi-MB tool-result line can't OOM the sandbox. Both $/hr and tok/s are windowable: the meter
+//! keeps a per-session **all-time anchor** plus a coarse 24h **sample ring**, and the popup's
+//! `All | Today | 1h` selector chooses which baseline the rates measure from.
+//!
 //! Data: `/proc` + `~/.claude` (transcripts, per-session cost, `ezbar-status.json` rate limits)
 //! over read-only **fs**. No `exec`.
 //!
 //! ```toml
 //! [modules.claude]
 //! fs = [{ path = "/proc", at = "/proc", mode = "r" }, { path = "~/.claude", at = "/claude", mode = "r" }]
+//! max_memory = "8M"  # headroom for chrono-tz (Today) + the 24h sample rings; a resource knob, set by hand
 //! ```
 
 use std::collections::HashMap;
@@ -39,7 +49,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // Pure, host-unit-tested logic (proc parsing, project-dir encoding, projection, JSON parsing, …)
 // lives in a sibling crate so it can run under `cargo test` even though this plugin is wasm-only.
-use claude_logic::{human_dur, idle_str, Damage, Level, Limits, TokenCounter};
+use chrono_tz::{Tz, UTC};
+use claude_logic::{human_dur, idle_str, Level, Limits, Sample, TokenCounter};
 use ezbar_plugin_wasm::prelude::*;
 
 // Quieter than this (and not actively working) ⇒ the popup row's dot dims and shows "Nm" idle
@@ -56,6 +67,65 @@ const STALE_SECS: i64 = 4 * 3600;
 // doing real work pulls 30–40 ticks/s. 10/s cuts cleanly between them, so neither an idle agent
 // nor an idle resident child gets mistaken for active.
 const CPU_BUSY_TPS: i64 = 10;
+
+// Sample ring for the windowed rates: one `(epoch, cost, api_secs, out_tokens)` per session at
+// ≈1-minute resolution, kept for the last day. The all-time baseline lives separately (`anchors`),
+// so the ring can be pruned freely — "All" still measures since ezbar started watching.
+const SAMPLE_SECS: i64 = 60;
+const RING_SECS: i64 = 24 * 3600;
+
+/// The rate window the popup selector chooses: the whole watched span, since local midnight, or the
+/// last hour. Changes which baseline `windowed_rate` measures from — and thus the headline numbers.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Window {
+    #[default]
+    All,
+    Today,
+    Hour,
+}
+
+impl Window {
+    /// Epoch the window starts at (`i64::MIN` for All ⇒ the anchor baseline).
+    fn start(self, now: i64, tz: Tz) -> i64 {
+        match self {
+            Window::All => i64::MIN,
+            Window::Hour => now - 3600,
+            Window::Today => local_midnight(now, tz),
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Window::All => "All",
+            Window::Today => "Today",
+            Window::Hour => "1h",
+        }
+    }
+    /// The mouse_area id for this window's selector chip.
+    fn id(self) -> &'static str {
+        match self {
+            Window::All => "win-all",
+            Window::Today => "win-today",
+            Window::Hour => "win-1h",
+        }
+    }
+}
+
+/// Epoch of the most recent local midnight in `tz` — the start of "Today". Falls back to `now` if
+/// the conversion can't be resolved (a degenerate DST gap), which just makes "Today" empty.
+fn local_midnight(now: i64, tz: Tz) -> i64 {
+    use chrono::TimeZone;
+    let Some(utc) = chrono::Utc.timestamp_opt(now, 0).single() else {
+        return now;
+    };
+    let local_date = utc.with_timezone(&tz).date_naive();
+    let Some(midnight) = local_date.and_hms_opt(0, 0, 0) else {
+        return now;
+    };
+    tz.from_local_datetime(&midnight)
+        .single()
+        .map(|m| m.timestamp())
+        .unwrap_or(now)
+}
 
 struct Agent {
     /// Full cwd path, so colliding basenames can be disambiguated.
@@ -88,17 +158,21 @@ struct Claude {
     limits: Option<Limits>,
     /// sparse `(epoch, five_hour_remaining%)` samples to project time-to-limit.
     limit_hist: Vec<(i64, f64)>,
-    /// per-session **anchor** — the first `(epoch, cost, active_secs)` ezbar saw for each session.
-    /// DPS is the average from here to now, so the meter measures everything since it started (like
-    /// Recount's overall segment), not a recent window. O(1) per session — no growing time series.
-    anchors: HashMap<String, Damage>,
+    /// per-session **all-time anchor** — the first `(cost, api_secs, out_tokens)` ezbar saw. The
+    /// baseline for the "All" window, so it measures everything since the meter started watching
+    /// (like Recount's overall segment). O(1) per session.
+    anchors: HashMap<String, (f64, f64, u64)>,
+    /// per-session **sample ring** — `(epoch, cost, api_secs, out_tokens)` at ≈1-min resolution for
+    /// the last 24h, the baselines for the "Today"/"1h" windows. Bounded + pruned to live sessions.
+    samples: HashMap<String, Vec<Sample>>,
+    /// Which window the popup selector has chosen — drives the displayed $/hr & tok/s.
+    window: Window,
+    /// Local timezone (RFC 0019), loaded once from the host; only "Today" needs it.
+    tz: Option<Tz>,
     /// Per-transcript-file incremental token state: `path → (byte offset already read, counter)`.
     /// Transcripts are append-only, so each tick reads only the bytes past `offset`. Covers a
     /// session's main `.jsonl` and every `subagents/*.jsonl`. Pruned to files seen this tick.
     token_files: HashMap<String, (u64, TokenCounter)>,
-    /// Per-session token anchor `(api_secs, out_tokens)` at first sight, so tok/s is the average
-    /// since the meter started (same model as the DPS anchor). Pruned with the agent set.
-    tok_anchors: HashMap<String, (f64, u64)>,
     /// account $/hr over time — the meter's trend sparkline ("raid DPS").
     dps_hist: Vec<f64>,
     /// `pid → cpu ticks` from the last poll, to tell a *busy* child from an idle resident one.
@@ -131,6 +205,9 @@ impl Plugin for Claude {
                 if self.started == 0 {
                     self.started = now;
                 }
+                if self.tz.is_none() {
+                    self.tz = Some(ctx.local_timezone().parse().unwrap_or(UTC));
+                }
                 self.refresh_agents(now);
                 self.limits = read_limits();
                 self.sample_limit();
@@ -158,6 +235,32 @@ impl Plugin for Claude {
                 // sooner so the agents appear in a second or two, not ~15), then the calm cadence.
                 ctx.set_timeout(if self.scanned { 3000 } else { 500 });
                 true
+            }
+            // Click the All / Today / 1h selector at the popup bottom → re-window the rates.
+            Event::Pointer {
+                id,
+                kind: PointerKind::Press,
+                ..
+            } => {
+                let w = match id.as_str() {
+                    "win-all" => Some(Window::All),
+                    "win-today" => Some(Window::Today),
+                    "win-1h" => Some(Window::Hour),
+                    _ => None,
+                };
+                match w {
+                    Some(w) => {
+                        if w != self.window {
+                            self.window = w;
+                            // The trend sparkline plots the windowed live $/hr; drop its history so
+                            // it doesn't blend the old window's points with the new one's.
+                            self.dps_hist.clear();
+                            self.recompute_rates(now_secs());
+                        }
+                        true
+                    }
+                    None => false,
+                }
             }
             _ => false,
         }
@@ -400,6 +503,24 @@ impl Plugin for Claude {
             }
         }
 
+        // Window selector — click to re-window every rate ($/hr & tok/s, chip + rows): All|Today|1h.
+        // The chosen one is Accent; the rest dim. Clicks reach `update` as `Pointer{Press}` by id.
+        col.push(rule());
+        let sel = |w: Window| {
+            let on = self.window == w;
+            mouse_area(
+                w.id(),
+                text(w.label())
+                    .size(12.0)
+                    .color(if on { Token::Accent } else { Token::FgDim }),
+            )
+        };
+        col.push(
+            row([sel(Window::All), sel(Window::Today), sel(Window::Hour)])
+                .spacing(16.0)
+                .align(Align::Center),
+        );
+
         Some(column(col).spacing(5.0))
     }
 }
@@ -534,19 +655,12 @@ impl Claude {
             a.label = label;
         }
 
-        // DPS per agent: read this session's cumulative `(cost, active_secs)` from its statusline
-        // snapshot, anchor it the first time we see it, and take the average from the anchor to now
-        // — Δcost/Δactive over the whole watched span (Recount's overall segment). Nothing
-        // pre-divided, and just one stored sample per session.
+        // Per agent: read this session's cumulative `(cost, active_secs)` from its statusline
+        // snapshot. The rate ($/hr) is derived later from the sample ring + window, not here.
         for a in &mut agents {
             if let Some(s) = read_session(&a.session) {
                 a.cost = s.cost;
                 a.api_secs = s.api_secs;
-                let anchor = *self
-                    .anchors
-                    .entry(a.session.clone())
-                    .or_insert((now, s.cost, s.api_secs));
-                a.dps = claude_logic::dps(anchor, s.cost, s.api_secs);
                 // Prefer the session's own title (what the user named the work) over the cwd
                 // basename; fall back to the disambiguated cwd label when the session is unnamed.
                 // Titles run long (40–60 chars), so clip to keep the popup row from blowing out.
@@ -581,32 +695,76 @@ impl Claude {
                 live_files.insert(path);
             }
             a.out_tokens = sum;
-            let (a_active, a_tok) = *self
-                .tok_anchors
-                .entry(a.session.clone())
-                .or_insert((a.api_secs, a.out_tokens));
-            a.tps = claude_logic::tps(a_tok, a_active, a.out_tokens, a.api_secs);
         }
 
-        // Drop anchors / token state for sessions (and transcript files) no longer live.
+        // Anchor each session's first-seen counters (the all-time "All" baseline) and append a
+        // coarse timestamped sample (≈1-min resolution, last 24h) — these feed the windowed rates.
+        for a in &agents {
+            if a.session.is_empty() {
+                continue;
+            }
+            self.anchors
+                .entry(a.session.clone())
+                .or_insert((a.cost, a.api_secs, a.out_tokens));
+            let ring = self.samples.entry(a.session.clone()).or_default();
+            if ring.last().is_none_or(|s| now - s.0 >= SAMPLE_SECS) {
+                ring.push((now, a.cost, a.api_secs, a.out_tokens));
+                let cutoff = now - RING_SECS;
+                if let Some(pos) = ring.iter().position(|s| s.0 >= cutoff) {
+                    if pos > 0 {
+                        ring.drain(0..pos);
+                    }
+                }
+            }
+        }
+
+        // Drop per-session state (anchor, ring) + transcript files no longer live.
         let live: std::collections::HashSet<&str> =
             agents.iter().map(|a| a.session.as_str()).collect();
         self.anchors.retain(|sid, _| live.contains(sid.as_str()));
-        self.tok_anchors
-            .retain(|sid, _| live.contains(sid.as_str()));
+        self.samples.retain(|sid, _| live.contains(sid.as_str()));
         self.token_files.retain(|p, _| live_files.contains(p));
 
-        // Recount order: biggest spender on top. We rank by *total* spend ("damage done"), not
-        // by $/hr — all-opus agents burn at nearly the same per-active-hour rate (the rate is
-        // model-bound), so a $/hr ranking would be a near-flat, uninformative meter, while total
-        // spend spreads wide and gives the bars real hierarchy. Exactly Recount's default mode.
-        // Tiebreak by $/hr, then name, for a stable order.
-        agents.sort_by(|a, b| {
+        self.agents = agents;
+        // Windowed $/hr & tok/s for the current window (also recomputed on a selector click).
+        self.recompute_rates(now);
+
+        // Recount order: biggest spender on top. We rank by *total* spend ("damage done"), not by
+        // $/hr — all-opus agents burn at nearly the same per-active-hour rate (model-bound), so a
+        // $/hr ranking would be a near-flat, uninformative meter, while total spend spreads wide
+        // and gives the bars real hierarchy. Tiebreak by the windowed $/hr, then name, for stability.
+        self.agents.sort_by(|a, b| {
             cmp_desc(a.cost, b.cost)
                 .then(cmp_desc(a.dps, b.dps))
                 .then(a.label.cmp(&b.label))
         });
-        self.agents = agents;
+    }
+
+    /// Recompute every agent's windowed $/hr & tok/s for the current `window`, from its sample ring
+    /// and all-time anchor. Called each tick and whenever the popup window selector is clicked, so
+    /// the chip and rows re-window instantly without waiting for the next poll.
+    fn recompute_rates(&mut self, now: i64) {
+        let win_start = self.window.start(now, self.tz.unwrap_or(UTC));
+        let empty: &[Sample] = &[];
+        let rates: Vec<(f64, f64)> = self
+            .agents
+            .iter()
+            .map(|a| {
+                let anchor = self
+                    .anchors
+                    .get(&a.session)
+                    .copied()
+                    .unwrap_or((a.cost, a.api_secs, a.out_tokens));
+                let ring = self.samples.get(&a.session).map_or(empty, |v| v.as_slice());
+                claude_logic::windowed_rate(
+                    ring, anchor, win_start, a.cost, a.api_secs, a.out_tokens,
+                )
+            })
+            .collect();
+        for (a, (d, t)) in self.agents.iter_mut().zip(rates) {
+            a.dps = d;
+            a.tps = t;
+        }
     }
 
     /// Combined **live** $/hr — the team's "raid DPS" — summing the agents that are spending (the
@@ -845,7 +1003,7 @@ fn transcript_sessions(cwd: &str) -> Vec<(String, i64)> {
             Some((sid, mtime))
         })
         .collect();
-    out.sort_unstable_by(|a, b| b.1.cmp(&a.1)); // newest first
+    out.sort_unstable_by_key(|&(_, mtime)| std::cmp::Reverse(mtime)); // newest first
     out
 }
 

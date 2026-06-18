@@ -108,6 +108,39 @@ pub fn tps(anchor_tokens: u64, anchor_active: f64, tokens: u64, active: f64) -> 
     dtok / dactive
 }
 
+/// One timestamped sample of a session's cumulative counters: `(epoch, cost, api_secs, out_tokens)`.
+pub type Sample = (i64, f64, f64, u64);
+
+/// Windowed **($/hr, tokens/s)** over `[win_start, now]`, both per *active* second like [`dps`]/
+/// [`tps`]. The baseline is the earliest `ring` sample at/after `win_start`; but when the window
+/// reaches at or before our oldest sample (e.g. the "All" window, or a session younger than the
+/// window) we use `anchor` — the true first-seen `(cost, api_secs, out_tokens)` — so "All" measures
+/// since ezbar started, not just since the ring's 24h horizon. `now`-side values are passed in.
+/// `(0.0, 0.0)` when there's no active-time delta.
+pub fn windowed_rate(
+    ring: &[Sample],
+    anchor: (f64, f64, u64),
+    win_start: i64,
+    cost: f64,
+    active: f64,
+    tokens: u64,
+) -> (f64, f64) {
+    let in_window = ring.iter().find(|s| s.0 >= win_start);
+    // Window reaches to/before our oldest sample (or ring empty) ⇒ the real baseline is the anchor.
+    let reaches_start = ring.first().map(|o| o.0 >= win_start).unwrap_or(true);
+    let (c0, a0, t0) = match in_window {
+        Some(s) if !reaches_start => (s.1, s.2, s.3),
+        _ => anchor,
+    };
+    let dactive = active - a0;
+    if dactive <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let dps = ((cost - c0).max(0.0) / dactive) * 3600.0;
+    let tps = (tokens.saturating_sub(t0) as f64) / dactive;
+    (dps, tps)
+}
+
 /// **DPS** in $/hr: cost spent **per hour of active model time**, averaged from the `anchor` (the
 /// session's first sample when ezbar started watching) to the latest `(cost, api_secs)`. This is
 /// the *overall* average since the meter started — `Δcost / Δactive_time` over the whole watched
@@ -394,6 +427,27 @@ mod tests {
         assert_eq!(tps(0, 0.0, 600, 10.0), 60.0); // 600 tok / 10s
         assert_eq!(tps(100, 5.0, 100, 5.0), 0.0); // no active delta
         assert_eq!(tps(50, 0.0, 40, 10.0), 0.0); // tokens below anchor clamps to 0
+    }
+
+    #[test]
+    fn windowed_rate_picks_baseline_by_window() {
+        let anchor = (0.0, 0.0, 0u64); // first-seen (cost, active_secs, tokens)
+        let ring = vec![
+            (1000i64, 1.0, 100.0, 1000u64),
+            (4600, 3.0, 200.0, 3000u64), // ~1h after the first
+            (5000, 4.0, 250.0, 4000u64), // newest
+        ];
+        let (cost, active, tokens) = (4.0, 250.0, 4000u64);
+        // All: window reaches before the oldest sample ⇒ baseline = anchor (since ezbar started).
+        let (dps_all, tps_all) = windowed_rate(&ring, anchor, i64::MIN, cost, active, tokens);
+        assert!((dps_all - (4.0 / 250.0 * 3600.0)).abs() < 1e-6);
+        assert!((tps_all - (4000.0 / 250.0)).abs() < 1e-6);
+        // 1h (win_start = 1400): baseline = first sample ≥ 1400 = (3.0, 200.0, 3000).
+        let (dps_1h, tps_1h) = windowed_rate(&ring, anchor, 1400, cost, active, tokens);
+        assert!((dps_1h - (1.0 / 50.0 * 3600.0)).abs() < 1e-6);
+        assert!((tps_1h - (1000.0 / 50.0)).abs() < 1e-6);
+        // empty ring ⇒ anchor baseline; no active delta ⇒ 0.
+        assert_eq!(windowed_rate(&[], anchor, 1400, 0.0, 0.0, 0), (0.0, 0.0));
     }
 
     #[test]

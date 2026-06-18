@@ -2,7 +2,7 @@
 name = "claude"
 version = "0.1.0"
 edition = "2021"
-description = "ezbar WASM plugin: Claude Code agent dashboard — running agents (waiting-for-you first), a Recount-style per-agent $/hr DPS meter derived from a stored damage log, and rate-limit bars. Reads /proc + ~/.claude (fs). No exec."
+description = "ezbar WASM plugin: Claude Code agent dashboard — a Recount-style per-agent $/hr + tokens/s meter (windowable All/Today/1h) over running agents, plus rate-limit bars. Reads /proc + ~/.claude (fs). No exec."
 
 [lib]
 crate-type = ["cdylib"]
@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 [dependencies]
 ezbar-plugin-wasm = { path = "../../crates/ezbar-plugin-wasm" }
 claude-logic = { path = "../../crates/claude-logic" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
 
 [profile.release]
 opt-level = "s"
