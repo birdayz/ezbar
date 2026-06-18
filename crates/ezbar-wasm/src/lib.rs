@@ -112,6 +112,24 @@ mod v5 {
     });
 }
 
+// RFC 0020: the v0.6.0 world (adds the `http-open`/`http-read`/`http-close` streaming trio). Same
+// version-window trick: `types`/`ui`/`events` are byte-identical to v0.1.0 and remap to its
+// generated modules, so `Tree`/`Event` and the whole drive loop stay shared; only `Plugin` + the
+// `host` trait fork. The streaming funcs are host imports, so this is purely additive.
+mod v6 {
+    wasmtime::component::bindgen!({
+        world: "plugin",
+        path: "../../wit/since-v0.6.0",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "ezbar:plugin/types@0.6.0": crate::ezbar::plugin::types,
+            "ezbar:plugin/ui@0.6.0": crate::ezbar::plugin::ui,
+            "ezbar:plugin/events@0.6.0": crate::ezbar::plugin::events,
+        },
+    });
+}
+
 // `Tree` is re-exported at the bindgen root by the world's `use`.
 use ezbar::plugin::events::{FeedSample, PointerEvent, PointerKind};
 use ezbar::plugin::ui::Node;
@@ -202,7 +220,24 @@ struct Host {
     // guards runaway guest *code* (a parked fiber runs none). Shared (not plain bool) so `step()`
     // can read it without borrowing the store the in-flight call holds.
     in_blocking_service: Arc<AtomicBool>,
+    // RFC 0020: open streaming-fetch responses, keyed by an opaque handle the guest holds. Each
+    // entry is a parked HTTP body the guest pulls in chunks (`http-read`); removed on EOF, error,
+    // `http-close`, or store teardown. A small per-plugin cap bounds leaked streams.
+    http_streams: HashMap<u64, HttpStream>,
+    next_stream_id: u64,
 }
+
+/// RFC 0020: an in-flight streaming fetch the guest pulls chunks from. `leftover`/`pos` buffer a
+/// chunk bigger than the guest's requested `max`, so no bytes are dropped between reads.
+struct HttpStream {
+    resp: reqwest::Response,
+    leftover: Vec<u8>,
+    pos: usize,
+}
+
+/// Cap on concurrently-open streaming fetches per plugin — a backstop against a buggy guest that
+/// opens streams without closing them (each holds a live connection + a chunk buffer).
+const MAX_HTTP_STREAMS: usize = 8;
 
 /// A guest's `set-timeout` request (RFC 0011). `After(d)` = one `Event::Timer` in `d`;
 /// `Cancel` (`ms == 0`) = no timer until re-armed.
@@ -625,6 +660,164 @@ impl v5::ezbar::plugin::host::Host for Host {
     }
 }
 
+// RFC 0020: the v0.6.0 host — v5 plus the streaming-fetch trio. Shared methods delegate to the
+// base impl; the forked `host` records (`SwayState`/`ExecOut`) re-wrap from v5; `pick`/
+// `local-timezone` delegate to v5; the three streaming funcs are implemented here against
+// `Host::http_streams`.
+impl v6::ezbar::plugin::host::Host for Host {
+    async fn log(&mut self, msg: String) {
+        ezbar::plugin::host::Host::log(self, msg).await
+    }
+    async fn text_size(&mut self) -> f32 {
+        ezbar::plugin::host::Host::text_size(self).await
+    }
+    async fn fg(&mut self) -> ezbar::plugin::types::Paint {
+        ezbar::plugin::host::Host::fg(self).await
+    }
+    async fn set_timeout(&mut self, ms: u32) {
+        ezbar::plugin::host::Host::set_timeout(self, ms).await
+    }
+    async fn subscribe(&mut self, kinds: Vec<ezbar::plugin::types::EventKind>) {
+        ezbar::plugin::host::Host::subscribe(self, kinds).await
+    }
+    async fn http_get(&mut self, url: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::http_get(self, url).await
+    }
+    async fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
+        ezbar::plugin::host::Host::read_file(self, path).await
+    }
+    async fn feed_subscribe(&mut self, feed: ezbar::plugin::types::FeedKind, min: u32) {
+        ezbar::plugin::host::Host::feed_subscribe(self, feed, min).await
+    }
+    async fn sway_snapshot(&mut self) -> Result<v6::ezbar::plugin::host::SwayState, String> {
+        let snap = v5::ezbar::plugin::host::Host::sway_snapshot(self).await?;
+        Ok(v6::ezbar::plugin::host::SwayState {
+            workspaces: snap
+                .workspaces
+                .into_iter()
+                .map(|w| v6::ezbar::plugin::host::SwayWorkspace {
+                    name: w.name,
+                    focused: w.focused,
+                    visible: w.visible,
+                    urgent: w.urgent,
+                })
+                .collect(),
+            title: snap.title,
+        })
+    }
+    async fn exec(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<v6::ezbar::plugin::host::ExecOut, String> {
+        let out = v5::ezbar::plugin::host::Host::exec(self, program, args, stdin).await?;
+        Ok(v6::ezbar::plugin::host::ExecOut {
+            code: out.code,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+    async fn pick(
+        &mut self,
+        prompt: String,
+        items: Vec<String>,
+        current: Option<u32>,
+    ) -> Option<String> {
+        v5::ezbar::plugin::host::Host::pick(self, prompt, items, current).await
+    }
+    async fn local_timezone(&mut self) -> String {
+        v5::ezbar::plugin::host::Host::local_timezone(self).await
+    }
+
+    // ── RFC 0020 streaming fetch ──────────────────────────────────────────────
+    /// Start a network-gated GET (same allow-list as `http_get`) and keep the body open, returning
+    /// an opaque handle. Parks on connect like `http_get` (WALL-exempt); reqwest's timeout bounds it.
+    async fn http_open(&mut self, url: String) -> Result<u64, String> {
+        let h = url.split("://").nth(1).unwrap_or(&url);
+        let h = h.split(['/', '?', '#']).next().unwrap_or(h);
+        if !self.granted_network.iter().any(|g| host_matches(g, h)) {
+            return Err(format!("capability denied: network host '{h}' not granted"));
+        }
+        if self.http_streams.len() >= MAX_HTTP_STREAMS {
+            return Err("too many open http streams".into());
+        }
+        let bs = self.in_blocking_service.clone();
+        bs.store(true, Ordering::SeqCst);
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await;
+        bs.store(false, Ordering::SeqCst);
+        let resp = resp.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("http {}", resp.status()));
+        }
+        let id = self.next_stream_id;
+        self.next_stream_id = self.next_stream_id.wrapping_add(1);
+        self.http_streams.insert(
+            id,
+            HttpStream {
+                resp,
+                leftover: Vec::new(),
+                pos: 0,
+            },
+        );
+        Ok(id)
+    }
+    /// Return the next ≤`max` bytes of a stream — buffered leftover first, else the next wire chunk.
+    /// An empty list means end of stream (the entry is dropped); `Err` on a gone stream or a wire error.
+    async fn http_read(&mut self, stream: u64, max: u32) -> Result<Vec<u8>, String> {
+        // Serve buffered leftover without awaiting.
+        match self.http_streams.get_mut(&stream) {
+            Some(s) if s.pos < s.leftover.len() => {
+                let end = (s.pos + max as usize).min(s.leftover.len());
+                let out = s.leftover[s.pos..end].to_vec();
+                s.pos = end;
+                return Ok(out);
+            }
+            Some(_) => {}
+            None => return Err("http_read: no such stream".into()),
+        }
+        // Pull the next chunk off the wire (parked, WALL-exempt). `bs` is a detached Arc clone so
+        // the flag write doesn't borrow `self` across the held `http_streams` borrow.
+        let bs = self.in_blocking_service.clone();
+        bs.store(true, Ordering::SeqCst);
+        let chunk = match self.http_streams.get_mut(&stream) {
+            Some(s) => s.resp.chunk().await,
+            None => {
+                bs.store(false, Ordering::SeqCst);
+                return Err("http_read: stream gone".into());
+            }
+        };
+        bs.store(false, Ordering::SeqCst);
+        match chunk {
+            Ok(Some(c)) => {
+                let s = self.http_streams.get_mut(&stream).unwrap();
+                s.leftover = c.to_vec();
+                s.pos = 0;
+                let end = (max as usize).min(s.leftover.len());
+                let out = s.leftover[..end].to_vec();
+                s.pos = end;
+                Ok(out)
+            }
+            Ok(None) => {
+                self.http_streams.remove(&stream); // EOF
+                Ok(Vec::new())
+            }
+            Err(e) => {
+                self.http_streams.remove(&stream);
+                Err(e.to_string())
+            }
+        }
+    }
+    async fn http_close(&mut self, stream: u64) {
+        self.http_streams.remove(&stream);
+    }
+}
+
 // ── the lifted (Send) widget arena, decoupled from the wasmtime types ────────
 
 #[derive(Clone, Debug)]
@@ -884,6 +1077,7 @@ struct Reactor {
     linker_v3: Linker<Host>, // v0.3.0 host interface (RFC 0015: + exec)
     linker_v4: Linker<Host>, // v0.4.0 host interface (RFC 0018: + pick)
     linker_v5: Linker<Host>, // v0.5.0 host interface (RFC 0019: + local-timezone)
+    linker_v6: Linker<Host>, // v0.6.0 host interface (RFC 0020: + streaming http)
     client: reqwest::Client,
     rt: Handle,
     // Shared feed hubs, keyed by metric (RFC 0012). One sampler task per active kind fans a
@@ -1095,6 +1289,10 @@ impl Reactor {
         add_to_linker_async(&mut linker_v5).expect("ezbar-wasm: wasi async linker (v5)");
         v5::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v5, |h: &mut Host| h)
             .expect("ezbar-wasm: plugin linker (v5)");
+        let mut linker_v6: Linker<Host> = Linker::new(&engine);
+        add_to_linker_async(&mut linker_v6).expect("ezbar-wasm: wasi async linker (v6)");
+        v6::Plugin::add_to_linker::<_, HasSelf<Host>>(&mut linker_v6, |h: &mut Host| h)
+            .expect("ezbar-wasm: plugin linker (v6)");
         // ONE async client shared by every plugin (Arc-cheap clone into each Host).
         let client = reqwest::Client::builder()
             .user_agent("ezbar-wasm")
@@ -1107,6 +1305,7 @@ impl Reactor {
             linker_v3,
             linker_v4,
             linker_v5,
+            linker_v6,
             client,
             rt,
             feeds: Mutex::new(HashMap::new()),
@@ -1296,6 +1495,8 @@ impl Reactor {
                 granted_exec: grants_exec,
                 instance: token,
                 in_blocking_service: Arc::new(AtomicBool::new(false)),
+                http_streams: HashMap::new(),
+                next_stream_id: 0,
             },
         );
         store.limiter(|h| &mut h.limits);
@@ -1314,6 +1515,12 @@ impl Reactor {
         // matching world, and wrap it in `DrivenPlugin` so the rest of the loop is version-blind.
         let version = plugin_version(&self.engine, &component);
         let instantiated = match version {
+            6 => tokio::time::timeout(
+                WALL,
+                v6::Plugin::instantiate_async(&mut store, &component, &self.linker_v6),
+            )
+            .await
+            .map(|r| r.map(DrivenPlugin::V6)),
             5 => tokio::time::timeout(
                 WALL,
                 v5::Plugin::instantiate_async(&mut store, &component, &self.linker_v5),
@@ -1469,6 +1676,7 @@ enum DrivenPlugin {
     V3(v3::Plugin),
     V4(v4::Plugin),
     V5(v5::Plugin),
+    V6(v6::Plugin),
 }
 
 impl DrivenPlugin {
@@ -1483,6 +1691,7 @@ impl DrivenPlugin {
             DrivenPlugin::V3(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V4(p) => p.call_init(store, cfg).await,
             DrivenPlugin::V5(p) => p.call_init(store, cfg).await,
+            DrivenPlugin::V6(p) => p.call_init(store, cfg).await,
         }
     }
     async fn call_update(&self, store: &mut Store<Host>, ev: &Event) -> wasmtime::Result<bool> {
@@ -1492,6 +1701,7 @@ impl DrivenPlugin {
             DrivenPlugin::V3(p) => p.call_update(store, ev).await,
             DrivenPlugin::V4(p) => p.call_update(store, ev).await,
             DrivenPlugin::V5(p) => p.call_update(store, ev).await,
+            DrivenPlugin::V6(p) => p.call_update(store, ev).await,
         }
     }
     async fn call_view(&self, store: &mut Store<Host>) -> wasmtime::Result<Tree> {
@@ -1501,6 +1711,7 @@ impl DrivenPlugin {
             DrivenPlugin::V3(p) => p.call_view(store).await,
             DrivenPlugin::V4(p) => p.call_view(store).await,
             DrivenPlugin::V5(p) => p.call_view(store).await,
+            DrivenPlugin::V6(p) => p.call_view(store).await,
         }
     }
     async fn call_popup(&self, store: &mut Store<Host>) -> wasmtime::Result<Option<Tree>> {
@@ -1510,6 +1721,7 @@ impl DrivenPlugin {
             DrivenPlugin::V3(p) => p.call_popup(store).await,
             DrivenPlugin::V4(p) => p.call_popup(store).await,
             DrivenPlugin::V5(p) => p.call_popup(store).await,
+            DrivenPlugin::V6(p) => p.call_popup(store).await,
         }
     }
 }
@@ -1519,6 +1731,9 @@ impl DrivenPlugin {
 /// version simply won't link against either linker and is disabled at instantiate.
 fn plugin_version(engine: &Engine, component: &Component) -> u8 {
     for (name, _) in component.component_type().imports(engine) {
+        if name.starts_with("ezbar:plugin/host@0.6") {
+            return 6;
+        }
         if name.starts_with("ezbar:plugin/host@0.5") {
             return 5;
         }

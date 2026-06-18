@@ -7,13 +7,13 @@
 use crate::{Align, GraphKind, Icon, Paint, Plugin, Render, Token, WireNode};
 use core::cell::RefCell;
 
-// The SDK targets the latest WIT (v0.5.0, RFC 0019) — a superset of the earlier versions, so
-// plugins built with it gain `local-timezone` (and `pick`/`exec`/`sway_snapshot`) while
-// everything else is unchanged. The host's version-window loads such a plugin against its
-// v0.5.0 linker; older prebuilt v0.1.0..v0.4.0 plugins still load too.
+// The SDK targets the latest WIT (v0.6.0, RFC 0020) — a superset of the earlier versions, so
+// plugins built with it gain streaming `http-open`/`http-read`/`http-close` (and
+// `local-timezone`/`pick`/`exec`/`sway_snapshot`) while everything else is unchanged. The host's
+// version-window loads such a plugin against its v0.6.0 linker; older prebuilt plugins still load.
 wit_bindgen::generate!({
     world: "plugin",
-    path: "../../wit/since-v0.5.0",
+    path: "../../wit/since-v0.6.0",
 });
 
 use ezbar::plugin as p;
@@ -78,6 +78,15 @@ impl crate::Ctx for HostCtx {
     }
     fn local_timezone(&mut self) -> String {
         p::host::local_timezone()
+    }
+    fn http_open(&mut self, url: &str) -> Result<u64, String> {
+        p::host::http_open(url)
+    }
+    fn http_read(&mut self, handle: u64, max: u32) -> Result<Vec<u8>, String> {
+        p::host::http_read(handle, max)
+    }
+    fn http_close(&mut self, handle: u64) {
+        p::host::http_close(handle)
     }
 }
 

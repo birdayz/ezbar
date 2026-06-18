@@ -17,15 +17,21 @@
 //! network = ["calendar.google.com"]
 //! fs = [{ path = "~/.config/ezbar", mode = "r" }]   # mounts at /ezbar
 //! exec = ["xdg-open"]
-//! max_memory = "64M"                                # the feed is the whole history; see README
+//! max_memory = "8M"                                 # fixed baseline (chrono-tz), feed-independent
 //! ```
+//!
+//! The feed (the user's whole calendar history, easily tens of MB) is **streamed** and sliced to
+//! a couple of days around today as it arrives (RFC 0020), so it never lands whole in the sandbox
+//! — memory is independent of feed size. The one fixed cost is the baseline: `chrono-tz` embeds
+//! the whole IANA tz database (~2.5 MiB, over the 2 MiB default), so a small *fixed* `max_memory`
+//! (8M) is set once and never has to grow.
 //!
 //! All time math happens in `update`; `view`/`popup` stay pure — they only assemble the DSL from
 //! precomputed strings (no `SystemTime`, no host calls).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use calendar_logic::{parse_calendar, slim_ical, CalendarData};
+use calendar_logic::{parse_calendar, CalendarData, Slimmer};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::{Tz, UTC};
 use ezbar_plugin_wasm::prelude::*;
@@ -146,14 +152,11 @@ impl Plugin for Calendar {
                 let now = now_secs();
                 let mut ok = true;
                 if self.slim.is_empty() || now - self.last_fetch >= FETCH_INTERVAL_SECS {
-                    match ctx.http_get(&self.url) {
-                        Ok(bytes) => {
-                            // The feed is the user's whole history (tens of MB). Borrow the bytes
-                            // as &str (no copy) and slice to a few days around today *before* the
-                            // big buffer is dropped, so we only ever keep/parse a KB-sized window.
-                            let body = std::str::from_utf8(&bytes).unwrap_or("");
-                            let today = now_in(self.tz).date_naive();
-                            self.slim = slim_ical(body, today, 1, 2);
+                    // Stream the feed and slim it to today's window as it arrives (RFC 0020): the
+                    // full multi-MB body never lands in the 2 MiB sandbox, so no OOM and no creep.
+                    match self.fetch_slim(ctx) {
+                        Ok(slim) => {
+                            self.slim = slim;
                             self.last_fetch = now;
                         }
                         Err(e) => {
@@ -274,6 +277,27 @@ impl Calendar {
                 self.url = trimmed.to_string();
             }
         }
+    }
+
+    /// Stream the iCal feed and slim it to today's window *as it arrives* (RFC 0020). We pull the
+    /// body in 64 KiB chunks and push each through the [`Slimmer`], so the multi-MB feed never
+    /// lands whole in the 2 MiB sandbox — only the KB-sized window survives. Returns the slim feed.
+    fn fetch_slim(&self, ctx: &mut dyn Ctx) -> Result<String, String> {
+        let today = now_in(self.tz).date_naive();
+        let mut slimmer = Slimmer::new(today, 1, 2);
+        let handle = ctx.http_open(&self.url)?;
+        loop {
+            match ctx.http_read(handle, 64 * 1024) {
+                Ok(chunk) if chunk.is_empty() => break, // end of stream (host already closed it)
+                Ok(chunk) => slimmer.push(&chunk),
+                Err(e) => {
+                    ctx.http_close(handle);
+                    return Err(e);
+                }
+            }
+        }
+        ctx.http_close(handle); // idempotent
+        Ok(slimmer.finish())
     }
 
     /// Rebuild the render model from the cached feed at the current instant.

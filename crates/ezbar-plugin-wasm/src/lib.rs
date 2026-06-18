@@ -431,6 +431,19 @@ pub trait Ctx {
     /// the zone here and converts UTC (`SystemTime::now`) itself with chrono-tz. Needs no
     /// capability grant (it reads nothing sensitive and runs nothing).
     fn local_timezone(&mut self) -> String;
+    /// Open a **streaming** HTTP GET (RFC 0020) and return an opaque stream handle. Uses the same
+    /// `network` grant as [`http_get`](Ctx::http_get) — it's the same request, just delivered in
+    /// chunks so you can filter/reduce a large body (a multi-MB feed, a log) without ever holding
+    /// it whole in the 2 MiB sandbox. Pull the body with [`http_read`](Ctx::http_read) until it
+    /// returns an empty `Vec` (end of stream), then it's closed for you; call
+    /// [`http_close`](Ctx::http_close) to abandon it early. Like `http_get`, the guest parks on I/O
+    /// during each call, so use it on the timer path.
+    fn http_open(&mut self, url: &str) -> Result<u64, String>;
+    /// Read the next chunk (≤ `max` bytes) of an open stream; an **empty `Vec` means end of
+    /// stream** (and the host has dropped it). `Err` on a wire error or an unknown handle.
+    fn http_read(&mut self, handle: u64, max: u32) -> Result<Vec<u8>, String>;
+    /// Release a stream early (idempotent; a stream read to EOF is already closed).
+    fn http_close(&mut self, handle: u64);
 }
 
 /// What a plugin implements. The host drives the Elm loop; `view`/`popup` are

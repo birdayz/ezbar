@@ -121,54 +121,109 @@ fn parse_dt(p: &ical::property::Property, tz: Tz) -> Option<(DateTime<Tz>, bool)
     Some((resolve(tz, &ndt)?, false))
 }
 
-/// Cheaply slice a (potentially huge) iCal feed down to just the VEVENT blocks whose `DTSTART`
-/// date falls within `[today - days_back, today + days_fwd]`, re-wrapped as a tiny VCALENDAR.
+/// A **streaming** slimmer: feed it the iCal feed in arbitrary byte chunks ([`Slimmer::push`]),
+/// and [`Slimmer::finish`] returns a tiny VCALENDAR containing only the VEVENT blocks whose
+/// `DTSTART` date falls within `[today - days_back, today + days_fwd]`.
 ///
-/// A secret Google feed is the user's *entire* calendar history — tens of MB, thousands of
-/// events — but a status bar only cares about the next day or two. The WASM sandbox can't even
-/// hold the full feed, so the plugin runs this single linear byte pass (no full parse, no
-/// per-event allocation) the moment it fetches, then parses only the KB-sized result. The window
-/// spans a couple of days so the chip rolls over at midnight without a refetch.
-pub fn slim_ical(body: &str, today: NaiveDate, days_back: i64, days_fwd: i64) -> String {
-    let lo = today - Duration::days(days_back.max(0));
-    let hi = today + Duration::days(days_fwd.max(0));
-    let mut out = String::with_capacity(8192);
-    out.push_str("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ezbar//slim//EN\r\n");
-    // Split on the event marker; segment 0 is the calendar preamble, the rest are event bodies.
-    // VALARM uses its own BEGIN/END:VALARM, so it never splits an event apart.
-    for seg in body.split("BEGIN:VEVENT").skip(1) {
-        let Some(end) = seg.find("END:VEVENT") else {
-            continue;
-        };
-        let event = &seg[..end];
-        if event_in_window(event, lo, hi) {
-            out.push_str("BEGIN:VEVENT");
-            out.push_str(event);
-            out.push_str("END:VEVENT\r\n");
-        }
-    }
-    out.push_str("END:VCALENDAR\r\n");
-    out
+/// A secret Google feed is the user's *entire* calendar history — tens of MB, thousands of events
+/// — but a status bar only cares about the next day or two, and the WASM sandbox can't hold the
+/// whole feed (RFC 0020). So the plugin pulls the body in chunks (`ctx.http_read`) and pushes each
+/// straight in here; the slimmer tracks the current VEVENT *across chunk boundaries* and keeps
+/// only in-window ones, so resident memory stays `O(one event + the window)`, never `O(feed)`.
+/// The window spans a couple of days so the chip rolls over at midnight without a refetch.
+pub struct Slimmer {
+    lo: NaiveDate,
+    hi: NaiveDate,
+    out: String,
+    /// Bytes after the last newline of the previous chunk — a line split across a chunk boundary.
+    pending: String,
+    in_event: bool,
+    /// The current VEVENT's raw lines (only flushed to `out` if it's in-window).
+    event_buf: String,
+    /// Window decision for the current event, set once its `DTSTART` line is seen.
+    keep: Option<bool>,
 }
 
-/// Is this VEVENT's `DTSTART` date within `[lo, hi]`? Reads the first property line that starts
-/// with `DTSTART` (property lines begin at column 0; folded continuations start with a space, so
-/// `starts_with` won't false-match a `DESCRIPTION` body) and parses its leading `YYYYMMDD`.
-fn event_in_window(event: &str, lo: NaiveDate, hi: NaiveDate) -> bool {
-    for line in event.lines() {
-        if !line.starts_with("DTSTART") {
-            continue;
+impl Slimmer {
+    pub fn new(today: NaiveDate, days_back: i64, days_fwd: i64) -> Self {
+        let mut out = String::with_capacity(8192);
+        out.push_str("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ezbar//slim//EN\r\n");
+        Slimmer {
+            lo: today - Duration::days(days_back.max(0)),
+            hi: today + Duration::days(days_fwd.max(0)),
+            out,
+            pending: String::new(),
+            in_event: false,
+            event_buf: String::new(),
+            keep: None,
         }
-        let Some(colon) = line.find(':') else {
-            return false;
-        };
-        let digits: String = line[colon + 1..].chars().take(8).collect();
-        return match NaiveDate::parse_from_str(&digits, "%Y%m%d") {
-            Ok(d) => d >= lo && d <= hi,
-            Err(_) => false,
-        };
     }
-    false
+
+    /// Feed the next raw chunk of the feed. iCal is ASCII/UTF-8; invalid bytes are lossily decoded.
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.pending.push_str(&String::from_utf8_lossy(chunk));
+        while let Some(nl) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=nl).collect(); // keeps the trailing '\n'
+            self.feed_line(&line);
+        }
+    }
+
+    /// Flush any trailing newline-less line and close the VCALENDAR; returns the slim feed.
+    pub fn finish(mut self) -> String {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.feed_line(&line);
+        }
+        self.out.push_str("END:VCALENDAR\r\n");
+        self.out
+    }
+
+    fn feed_line(&mut self, line: &str) {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        // VALARM uses its own BEGIN/END:VALARM, so this only ever matches a real event boundary.
+        if trimmed.starts_with("BEGIN:VEVENT") {
+            self.in_event = true;
+            self.keep = None;
+            self.event_buf.clear();
+            self.event_buf.push_str(line);
+            return;
+        }
+        if !self.in_event {
+            return; // VCALENDAR-level line (VERSION/PRODID/VTIMEZONE/…) — dropped; we emit our own.
+        }
+        self.event_buf.push_str(line);
+        // Property lines begin at column 0; a folded `DESCRIPTION` continuation starts with a
+        // space, so `starts_with` won't false-match one. First DTSTART decides the window.
+        if self.keep.is_none() && trimmed.starts_with("DTSTART") {
+            self.keep = Some(dtstart_in_window(trimmed, self.lo, self.hi));
+        }
+        if trimmed.starts_with("END:VEVENT") {
+            if self.keep == Some(true) {
+                self.out.push_str(&self.event_buf);
+            }
+            self.in_event = false;
+            self.event_buf.clear();
+        }
+    }
+}
+
+/// Is a `DTSTART…:YYYYMMDD…` property line's date within `[lo, hi]`? Parses the leading 8 digits
+/// of the value (after the first `:`), so it handles `DTSTART:`, `DTSTART;TZID=…:`, `;VALUE=DATE:`.
+fn dtstart_in_window(line: &str, lo: NaiveDate, hi: NaiveDate) -> bool {
+    let Some(colon) = line.find(':') else {
+        return false;
+    };
+    let digits: String = line[colon + 1..].chars().take(8).collect();
+    matches!(NaiveDate::parse_from_str(&digits, "%Y%m%d"), Ok(d) if d >= lo && d <= hi)
+}
+
+/// Slice a whole in-memory iCal feed to the `[today-back, today+fwd]` window — a thin wrapper over
+/// the streaming [`Slimmer`] (one `push` of the whole body). The plugin uses the `Slimmer`
+/// directly so it never holds the full feed; this stays for callers/tests with the body in hand.
+pub fn slim_ical(body: &str, today: NaiveDate, days_back: i64, days_fwd: i64) -> String {
+    let mut s = Slimmer::new(today, days_back, days_fwd);
+    s.push(body.as_bytes());
+    s.finish()
 }
 
 /// Parse an iCal feed into today's events + the next-meeting summary, in `now`'s timezone.
@@ -347,6 +402,27 @@ mod tests {
         let now = UTC.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
         let d = parse_calendar(&slim, now);
         assert_eq!(d.next_title, "TodayMtg");
+    }
+
+    #[test]
+    fn slimmer_handles_events_split_across_chunk_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+            BEGIN:VEVENT\r\nUID:old@x\r\nSUMMARY:OldOne\r\nDTSTART:20200101T100000Z\r\nDTEND:20200101T110000Z\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:t@x\r\nSUMMARY:TodayMtg\r\nDTSTART:20260616T140000Z\r\nDTEND:20260616T150000Z\r\nEND:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        // 7-byte chunks split lines (and the DTSTART value) across boundaries.
+        let mut s = Slimmer::new(today, 1, 2);
+        for chunk in body.as_bytes().chunks(7) {
+            s.push(chunk);
+        }
+        let slim = s.finish();
+        assert!(slim.contains("TodayMtg"));
+        assert!(!slim.contains("OldOne"));
+        // chunking is transparent: identical to feeding the whole body at once.
+        assert_eq!(slim, slim_ical(body, today, 1, 2));
+        let now = UTC.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        assert_eq!(parse_calendar(&slim, now).next_title, "TodayMtg");
     }
 
     #[test]
