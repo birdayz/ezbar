@@ -1,17 +1,17 @@
 //! ezbar WASM plugin: `claude` — a Claude Code **agent dashboard + spend meter**.
 //!
-//! Running several agents at once, two things matter: **which one is waiting on you** (an idle
-//! agent is wasted time) and **how fast you're burning money**. The chip shows the live count,
-//! the worst idle (escalating amber → red), the combined **$/hr** (the "raid DPS"), and the
-//! 5h/7d rate-limit usage. The popup is a **Recount-style meter**: one bar per agent, biggest
-//! spender on top, plus the account $/hr trend and the limit bars.
+//! Running several agents at once, what matters is **how fast you're burning money**. The chip
+//! shows the live agent count, the combined **$/hr** (the "raid DPS"), and the 5h/7d rate-limit
+//! usage. The popup is a **Recount-style meter**: one bar per agent (titled by its session name),
+//! biggest spender on top, plus the account $/hr trend and the limit bars. (There is deliberately
+//! **no idle/"waiting for you" alarm** — a session waiting on you isn't actionable from the bar.)
 //!
 //! ## Detection (robust, race-free, zero-config)
 //! `idle` is `now − mtime(newest transcript .jsonl)` under `~/.claude/projects/<cwd>/` — the
 //! filesystem is the source of truth for "time since this agent last did anything", so there
 //! is no in-memory dwell state to get wrong and nothing to install. A **worker-descendant**
-//! check over `/proc` (any non-shell child = actively running a tool) suppresses the false
-//! "waiting" when an agent is grinding a long build/render that simply isn't writing yet.
+//! check over `/proc` (any non-shell child = actively running a tool) keeps an agent's dot green
+//! while it grinds a long build/render that simply isn't writing the transcript yet.
 //!
 //! ## DPS (a real damage meter — no external tool, no `exec`)
 //! Per agent we sample two cumulative counters from Claude Code's own per-session statusline
@@ -42,14 +42,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use claude_logic::{human_dur, idle_str, Damage, Level, Limits};
 use ezbar_plugin_wasm::prelude::*;
 
-// Idle escalation (seconds since last transcript write, when not actively working):
-const ATTN_SECS: i64 = 60; // quiet this long ⇒ "waiting for you" (amber)
-const RED_SECS: i64 = 300; // quiet 5 min ⇒ red "go now"
+// Quieter than this (and not actively working) ⇒ the popup row's dot dims and shows "Nm" idle
+// info. Purely informational — no alarm.
+const ATTN_SECS: i64 = 60;
 
-// Past this, an agent isn't "waiting for you" — it's abandoned. A session left open overnight
-// shouldn't pin the always-on chip red for a day and desensitise you to real alerts, so beyond the
-// cutoff it drops out of the waiting alarm and reads as a dim "parked" row instead.
-const STALE_SECS: i64 = 4 * 3600; // 4h quiet ⇒ parked, not waiting
+// Past this an agent is abandoned (a session left open overnight), so it drops out of the live
+// $/hr headline (`burning`) and reads as a dim parked row rather than inflating the combined rate.
+const STALE_SECS: i64 = 4 * 3600;
 
 // A process counts as "doing work" only above this CPU rate (clock ticks/sec; ticks are USER_HZ
 // = 100/s regardless of kernel HZ). Measured: an *idle* Node/Ink process still drips ~1 tick/s
@@ -65,10 +64,11 @@ struct Agent {
     label: String,
     /// This agent's session id (its newest transcript's filename) — keys the cost lookup.
     session: String,
-    /// Seconds since this agent last wrote to its transcript.
+    /// Seconds since this agent last wrote to its transcript (shown as dim "Nm" info, not an alarm).
     idle: i64,
-    /// Quiet past the attention threshold and not actively running a tool ⇒ wants you.
-    waiting: bool,
+    /// Actively running a tool right now (a non-shell worker descendant in `/proc`) — the accurate
+    /// "working" signal, true even during a long build/render that isn't writing the transcript yet.
+    working: bool,
     /// Cumulative session cost in $ (Claude Code's own figure, via the statusline snapshot) — this
     /// agent's total "damage done".
     cost: f64,
@@ -164,10 +164,8 @@ impl Plugin for Claude {
             .align(Align::Center);
         }
         let total = self.agents.len();
-        let worst = self.worst_idle();
-        // The Bot stays calm — Accent when agents run, dim when none. Escalation is carried
-        // ONLY by the ⚠ + idle text below, so a single agent going quiet can't double-paint
-        // the whole chip amber (one signal, one colour).
+        // The Bot is Accent when agents run, dim when none. (Idle agents are no longer alarmed —
+        // a session waiting on you isn't actionable from the bar, so there's no ⚠ escalation.)
         let bot = if total > 0 {
             Token::Accent
         } else {
@@ -197,20 +195,6 @@ impl Plugin for Claude {
                         Token::FgDim
                     }),
             );
-        }
-        // the loud bit: agents waiting for you, with the worst idle — escalates amber → red.
-        if let Some(d) = worst {
-            let n = self.agents.iter().filter(|a| a.waiting).count();
-            let c = idle_color(d);
-            parts.push(Icon::Alert.view(13.0, c));
-            // lead with the worst idle (the part that makes you act); prefix the count only when
-            // more than one waits. The middot is spaced so "3 · 25h" can't read as decimal "3.25h".
-            let txt = if n == 1 {
-                idle_str(d)
-            } else {
-                format!("{n} \u{00b7} {}", idle_str(d))
-            };
-            parts.push(text(txt).size(13.0).color(c));
         }
         // 5h then 7d limit *used* — labelled so a glance isn't a guess. Each label+value is
         // bound tighter (3px) than the chip's 5px inter-element gap, so the two read as two
@@ -262,8 +246,8 @@ impl Plugin for Claude {
 
         // ── header: title + agent count + the raid DPS (combined live $/hr) ──
         // The count is the TOTAL — it always equals the chip's count, so the two surfaces can't
-        // contradict each other. Who's working / waiting / parked is carried by the per-row dot
-        // colours and idle times (and the chip's ⚠ alarm), not by a separate summary line.
+        // contradict each other. Who's working vs idle/parked is carried by the per-row dot
+        // colour and the dim idle time, not by a separate summary line.
         let mut hdr = vec![
             Icon::Bot.view(15.0, Token::Accent),
             text("Claude Code").size(15.0).color(Token::Fg),
@@ -297,13 +281,12 @@ impl Plugin for Claude {
             // read the dollars), and the $/hr the live burn rate. $/hr is the one Accent, but only
             // when the agent is actually burning *now* — a parked agent's last rate stays dim.
             for a in &self.agents {
-                // dot state: green working, amber/red waiting-on-you, dim when parked (gone stale).
-                let dot_c = if a.waiting {
-                    idle_color(a.idle)
-                } else if a.idle >= STALE_SECS {
-                    Token::FgDim
-                } else {
+                // dot state: green while working (running a tool) or recently active, dim once
+                // idle/parked. No amber/red "waiting on you" escalation — it wasn't actionable.
+                let dot_c = if a.working || a.idle < ATTN_SECS {
                     Token::Ok
+                } else {
+                    Token::FgDim
                 };
                 // Each row shows THIS agent's own overall average $/hr (its DPS since ezbar
                 // anchored it) — like Recount, where a player's overall DPS stays on their row even
@@ -325,9 +308,10 @@ impl Plugin for Claude {
                     text(pad_num(&total, 6)).size(11.0).color(Token::FgDim),
                     text(a.label.clone()).size(13.0).color(Token::Fg),
                 ];
-                // a waiting agent also shows how long it's been quiet, in its escalation colour.
-                if a.waiting {
-                    r.push(text(idle_str(a.idle)).size(11.0).color(dot_c));
+                // a quiet, not-currently-working agent shows how long it's been idle — dim info,
+                // not an alarm (a working agent mid-build isn't "idle" even if it hasn't written).
+                if !a.working && a.idle >= ATTN_SECS {
+                    r.push(text(idle_str(a.idle)).size(11.0).color(Token::FgDim));
                 }
                 col.push(row(r).spacing(8.0).align(Align::Center));
             }
@@ -492,12 +476,9 @@ impl Claude {
             .drain(..)
             .enumerate()
             .map(|(i, r)| Agent {
-                label: String::new(), // filled by disambiguate_labels below
-                // Detector gates on `working` ALONE — a parked agent (no tool child) flags after
-                // ATTN_SECS even though its idle render loop nudges CPU. Above STALE_SECS it's no
-                // longer "waiting for you" (abandoned), so it leaves the alarm and reads as parked.
-                waiting: !r.working && (ATTN_SECS..STALE_SECS).contains(&idle[i]),
+                label: String::new(), // filled by disambiguate_labels / session name below
                 idle: idle[i],
+                working: r.working,
                 session: std::mem::take(&mut session[i]),
                 cwd: r.cwd,
                 cost: 0.0,
@@ -539,6 +520,12 @@ impl Claude {
                     .entry(a.session.clone())
                     .or_insert((now, s.cost, s.api_secs));
                 a.dps = claude_logic::dps(anchor, s.cost, s.api_secs);
+                // Prefer the session's own title (what the user named the work) over the cwd
+                // basename; fall back to the disambiguated cwd label when the session is unnamed.
+                // Titles run long (40–60 chars), so clip to keep the popup row from blowing out.
+                if !s.name.is_empty() {
+                    a.label = clip(&s.name, 32);
+                }
             }
         }
         // Drop anchors for sessions no longer live so the map can't grow unbounded.
@@ -559,24 +546,16 @@ impl Claude {
         self.agents = agents;
     }
 
-    /// Combined **live** $/hr — the team's "raid DPS" — counting only agents that are burning
-    /// right now (the Accent rows). A waiting/parked agent's overall average still shows on its own
-    /// row, but it isn't money leaving the account this second, so it doesn't inflate the headline.
-    /// The bright rows therefore sum to this. One coherent number for the chip, header, sparkline.
+    /// Combined **live** $/hr — the team's "raid DPS" — summing the agents that are spending (the
+    /// Accent rows: a real $/hr and not abandoned). A long-parked session's overall average still
+    /// shows on its own row but drops out of the headline. The bright rows sum to this — one
+    /// coherent number for the chip, header, and sparkline.
     fn live_dps(&self) -> f64 {
         self.agents
             .iter()
             .filter(|a| burning(a))
             .map(|a| a.dps)
             .sum()
-    }
-
-    fn worst_idle(&self) -> Option<i64> {
-        self.agents
-            .iter()
-            .filter(|a| a.waiting)
-            .map(|a| a.idle)
-            .max()
     }
 
     /// Record a sparse `five_hour_used%` sample (≥20s apart) so `project_five` can fit a fill
@@ -601,11 +580,12 @@ impl Claude {
     }
 }
 
-/// Is this agent **burning right now** — actively spending, not waiting on you or parked? Its
-/// overall-average $/hr then counts toward the live headline and paints Accent. Idle agents still
-/// show their average on their own row, just dim and out of the live total.
+/// Is this agent **spending** — a real $/hr and not abandoned (parked past `STALE_SECS`)? Its
+/// overall-average $/hr then counts toward the live headline and paints Accent. A briefly-idle
+/// agent (between turns) still counts, so the headline doesn't collapse to $0 whenever the fleet
+/// is momentarily waiting; only a long-abandoned session drops out.
 fn burning(a: &Agent) -> bool {
-    a.dps >= 1.0 && !a.waiting && a.idle < STALE_SECS
+    a.dps >= 1.0 && a.idle < STALE_SECS
 }
 
 // ── rendering helpers ────────────────────────────────────────────────────────
@@ -622,11 +602,6 @@ fn token(l: Level) -> Token {
 /// Colour for a limit by how much is *used*: green with headroom, amber past 70%, red past 85%.
 fn usage_token(used: f64) -> Token {
     token(claude_logic::usage_level(used))
-}
-
-/// Colour for an idle agent by how long it's been quiet: amber, then red past `RED_SECS`.
-fn idle_color(secs: i64) -> Token {
-    token(claude_logic::idle_level(secs, RED_SECS))
 }
 
 /// A two-tone box-drawing bar of `used` %, filling toward the cap, with the percent right-aligned
@@ -694,6 +669,17 @@ fn cmp_desc(a: f64, b: f64) -> std::cmp::Ordering {
 fn pad_num(s: &str, width: usize) -> String {
     let pad = width.saturating_sub(s.chars().count());
     format!("{}{}", "\u{2007}".repeat(pad), s)
+}
+
+/// Clip a label to `max` chars with an ellipsis — session titles run long (40–60 chars) and would
+/// otherwise blow out the popup row.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
 }
 
 // ── data (fs) ────────────────────────────────────────────────────────────────

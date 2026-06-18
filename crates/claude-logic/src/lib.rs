@@ -12,7 +12,7 @@ use serde_json::Value;
 /// snapshot (`~/.claude/ezbar/sessions/<id>.json`): total spend, and total **API-active** time
 /// (the seconds the model was actually working — Claude Code's own measurement). Both are
 /// computed for us, so the bar needs no token-pricing math and no external tool.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     /// `cost.total_cost_usd` — cumulative $ spent.
     pub cost: f64,
@@ -20,6 +20,9 @@ pub struct Session {
     /// This is the meter's "active combat time": wall-clock idle (the agent parked waiting for
     /// you) does not advance it, so it's the honest denominator for a burn *rate*.
     pub api_secs: f64,
+    /// `session_name` — the title Claude Code shows for the session (what the user actually named
+    /// the work, e.g. "Convert calendar to WASM"). Empty when the session hasn't been named.
+    pub name: String,
 }
 
 /// Parse a session snapshot into its [`Session`] counters. `None` only when the cost figure is
@@ -29,7 +32,12 @@ pub fn parse_session(json: &str) -> Option<Session> {
     let v: Value = serde_json::from_str(json).ok()?;
     let cost = v["cost"]["total_cost_usd"].as_f64()?;
     let api_secs = v["cost"]["total_api_duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
-    Some(Session { cost, api_secs })
+    let name = v["session_name"].as_str().unwrap_or("").trim().to_string();
+    Some(Session {
+        cost,
+        api_secs,
+        name,
+    })
 }
 
 /// The **anchor** sample for a session: `(epoch, cumulative_cost, cumulative_api_secs)` captured the
@@ -100,16 +108,6 @@ pub fn usage_level(used: f64) -> Level {
         Level::Warn
     } else {
         Level::Ok
-    }
-}
-
-/// Colour level for a waiting agent by how long it's been quiet: amber, then red past
-/// `red_secs`. Only ever Warn/Urgent — it's called only for agents already flagged waiting.
-pub fn idle_level(secs: i64, red_secs: i64) -> Level {
-    if secs >= red_secs {
-        Level::Urgent
-    } else {
-        Level::Warn
     }
 }
 
@@ -274,11 +272,19 @@ mod tests {
     }
 
     #[test]
-    fn idle_level_reddens_past_threshold() {
-        assert_eq!(idle_level(0, 300), Level::Warn);
-        assert_eq!(idle_level(299, 300), Level::Warn);
-        assert_eq!(idle_level(300, 300), Level::Urgent); // inclusive
-        assert_eq!(idle_level(10_000, 300), Level::Urgent);
+    fn parse_session_reads_name_and_trims() {
+        let s = parse_session(
+            r#"{"cost":{"total_cost_usd":1.0},"session_name":"  Refactor the bar  "}"#,
+        )
+        .unwrap();
+        assert_eq!(s.name, "Refactor the bar"); // trimmed
+                                                // missing session_name → empty (falls back to the cwd label in the plugin)
+        assert_eq!(
+            parse_session(r#"{"cost":{"total_cost_usd":1.0}}"#)
+                .unwrap()
+                .name,
+            ""
+        );
     }
 
     #[test]
