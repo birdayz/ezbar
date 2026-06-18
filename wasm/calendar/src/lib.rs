@@ -1,7 +1,8 @@
 //! ezbar WASM plugin: `calendar` — the next meeting + countdown in the chip; **hover** opens the
-//! day's agenda, and a meeting with a Zoom link is **click-to-join**: the row hands its rebuilt
-//! web-client URL to `xdg-open`, so the browser opens straight onto the in-meeting page instead
-//! of the app-launch wall Zoom puts up (see `calendar_logic::zoom`).
+//! day's agenda, and a meeting with a **Zoom** or **Google Meet** link is **click-to-join**: the
+//! row hands a browser-ready join URL to `xdg-open`, so the browser opens straight onto the
+//! in-meeting page — skipping Zoom's app-launch wall (Meet is web-first already). See
+//! `calendar_logic::meeting`.
 //!
 //! It is the sandboxed replacement for the old built-in calendar module:
 //!   * the secret iCal feed is read from `~/.config/ezbar/calendar_url` via an **fs** grant
@@ -65,7 +66,7 @@ struct Row {
     title: String,
     trailing: String,
     state: RowState,
-    /// The web-client join URL, if this event carries a Zoom link → makes the row clickable.
+    /// The browser join URL, if this event carries a Zoom or Google Meet link → row is clickable.
     join: Option<String>,
 }
 
@@ -170,7 +171,7 @@ impl Plugin for Calendar {
                 ctx.set_timeout(if ok { TICK_MS } else { RETRY_MS });
                 true
             }
-            // Click a joinable agenda row → open its Zoom web-client URL in the browser.
+            // Click a joinable agenda row → open its meeting (Zoom web-client / Meet) in the browser.
             Event::Pointer {
                 id,
                 kind: PointerKind::Press,
@@ -202,8 +203,18 @@ impl Plugin for Calendar {
             .spacing(6.0);
         }
         if !self.has_next {
-            // Nothing upcoming (or not configured): a quiet glyph only — detail lives in the popup.
-            return Icon::Calendar.view(14.0, Token::FgDim);
+            // Nothing upcoming. If today still had meetings (all now in the past), surface a "✓ N"
+            // so the day's agenda is an obvious hover away rather than a bare glyph that reads as
+            // "empty/broken". Only a genuinely empty day falls back to the quiet glyph.
+            let n = self.rows.len();
+            if n == 0 {
+                return Icon::Calendar.view(14.0, Token::FgDim);
+            }
+            return row([
+                Icon::Calendar.view(14.0, Token::FgDim),
+                text(format!("\u{2713} {n}")).color(Token::FgDim),
+            ])
+            .spacing(6.0);
         }
         let accent = if self.is_overdue {
             Token::Urgent
