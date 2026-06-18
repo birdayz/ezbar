@@ -45,6 +45,69 @@ pub fn parse_session(json: &str) -> Option<Session> {
 /// what it has *observed since it started*, like Recount records from the moment you open it.
 pub type Damage = (i64, f64, f64);
 
+/// Pull `(message.id, output_tokens)` out of one transcript `.jsonl` line, or `None` if it isn't an
+/// assistant turn carrying usage. The session JSON has no cumulative token counter, so output
+/// throughput is summed from the transcript (RFC: dedup by `message.id` — Claude writes each
+/// assistant message 3–4× identically). Only call this on a line the caller has size-bounded; a
+/// multi-MB tool-result line is not an assistant-usage line and is skipped before it reaches here.
+pub fn parse_assistant_out(line: &str) -> Option<(String, u64)> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v["type"].as_str()? != "assistant" {
+        return None;
+    }
+    let id = v["message"]["id"].as_str()?.to_string();
+    let out = v["message"]["usage"]["output_tokens"].as_u64()?;
+    Some((id, out))
+}
+
+/// Cumulative output tokens from a transcript stream, deduping Claude's consecutive re-writes of
+/// the same assistant message (same `message.id`). Each message is counted **once, at its final
+/// `output_tokens`** — the re-writes are sometimes streaming partials (`out=2` … then `out=3760`),
+/// so we keep the latest value for the in-flight id and only fold it into the total when the id
+/// changes. Fed line-by-line and **resumable across ticks**: persisting `(last_id, last_tokens)`
+/// means a message whose duplicate lines straddle an incremental-read boundary is still counted
+/// once, at its final value.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TokenCounter {
+    /// `message.id` of the in-flight (not-yet-folded) message.
+    last_id: String,
+    /// Its latest `output_tokens` — updated on every re-write, folded into `finalized` when the id
+    /// changes (so a streaming message is counted at its final, largest value).
+    last_tokens: u64,
+    /// Sum of all messages whose id has since changed (i.e. finalized).
+    finalized: u64,
+}
+
+impl TokenCounter {
+    /// Feed one transcript line. On a new `message.id`, the previous message is finalized; the
+    /// current id's `output_tokens` is always updated to the latest line's value.
+    pub fn push_line(&mut self, line: &str) {
+        if let Some((id, out)) = parse_assistant_out(line) {
+            if id != self.last_id {
+                self.finalized += self.last_tokens;
+                self.last_id = id;
+            }
+            self.last_tokens = out;
+        }
+    }
+
+    /// Cumulative output tokens (finalized messages + the in-flight one at its latest value).
+    pub fn total(&self) -> u64 {
+        self.finalized + self.last_tokens
+    }
+}
+
+/// Output **tokens per second of active model time** since an anchor — the generation-rate sibling
+/// of [`dps`]. `Δtokens / Δactive`; `0.0` until there's a sliver of active time.
+pub fn tps(anchor_tokens: u64, anchor_active: f64, tokens: u64, active: f64) -> f64 {
+    let dtok = tokens.saturating_sub(anchor_tokens) as f64;
+    let dactive = active - anchor_active;
+    if dactive <= 0.0 {
+        return 0.0;
+    }
+    dtok / dactive
+}
+
 /// **DPS** in $/hr: cost spent **per hour of active model time**, averaged from the `anchor` (the
 /// session's first sample when ezbar started watching) to the latest `(cost, api_secs)`. This is
 /// the *overall* average since the meter started — `Δcost / Δactive_time` over the whole watched
@@ -269,6 +332,68 @@ mod tests {
         assert_eq!(usage_level(85.0), Level::Warn); // >85
         assert_eq!(usage_level(85.1), Level::Urgent);
         assert_eq!(usage_level(100.0), Level::Urgent);
+    }
+
+    #[test]
+    fn token_counter_dedups_consecutive_message_rewrites() {
+        let l = |id: &str, out: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"output_tokens":{out}}}}}}}"#
+            )
+        };
+        let mut c = TokenCounter::default();
+        // msg A written 3× identically → counted once; B once; a non-assistant line ignored.
+        c.push_line(&l("msgA", 576));
+        c.push_line(&l("msgA", 576));
+        c.push_line(&l("msgA", 576));
+        c.push_line(r#"{"type":"user","message":{"content":"hi"}}"#);
+        c.push_line(&l("msgB", 100));
+        c.push_line(&l("msgB", 100));
+        assert_eq!(c.total(), 676);
+        // resumable: a dup of the last id straddling a tick boundary must not recount.
+        c.push_line(&l("msgB", 100));
+        assert_eq!(c.total(), 676);
+    }
+
+    #[test]
+    fn token_counter_takes_final_value_of_a_streamed_message() {
+        let l = |id: &str, out: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"output_tokens":{out}}}}}}}"#
+            )
+        };
+        let mut c = TokenCounter::default();
+        // a streamed message: tiny partials first, then the final count — count the final, not 2.
+        c.push_line(&l("m", 2));
+        c.push_line(&l("m", 2));
+        c.push_line(&l("m", 3760));
+        assert_eq!(c.total(), 3760);
+        // two distinct messages with the SAME token value both count (id, not value, dedups).
+        c.push_line(&l("n", 3760));
+        assert_eq!(c.total(), 7520);
+    }
+
+    #[test]
+    fn parse_assistant_out_only_assistant_usage() {
+        assert_eq!(
+            parse_assistant_out(
+                r#"{"type":"assistant","message":{"id":"m1","usage":{"output_tokens":42}}}"#
+            ),
+            Some(("m1".to_string(), 42))
+        );
+        assert_eq!(parse_assistant_out(r#"{"type":"user","message":{}}"#), None);
+        assert_eq!(
+            parse_assistant_out(r#"{"type":"assistant","message":{"id":"m2"}}"#),
+            None // no usage
+        );
+        assert_eq!(parse_assistant_out("not json"), None);
+    }
+
+    #[test]
+    fn tps_is_tokens_per_active_second() {
+        assert_eq!(tps(0, 0.0, 600, 10.0), 60.0); // 600 tok / 10s
+        assert_eq!(tps(100, 5.0, 100, 5.0), 0.0); // no active delta
+        assert_eq!(tps(50, 0.0, 40, 10.0), 0.0); // tokens below anchor clamps to 0
     }
 
     #[test]

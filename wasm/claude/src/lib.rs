@@ -39,7 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // Pure, host-unit-tested logic (proc parsing, project-dir encoding, projection, JSON parsing, …)
 // lives in a sibling crate so it can run under `cargo test` even though this plugin is wasm-only.
-use claude_logic::{human_dur, idle_str, Damage, Level, Limits};
+use claude_logic::{human_dur, idle_str, Damage, Level, Limits, TokenCounter};
 use ezbar_plugin_wasm::prelude::*;
 
 // Quieter than this (and not actively working) ⇒ the popup row's dot dims and shows "Nm" idle
@@ -76,6 +76,10 @@ struct Agent {
     api_secs: f64,
     /// Spend rate in $/hr — this agent's "DPS", `Δcost / Δactive` averaged since its anchor.
     dps: f64,
+    /// Cumulative output tokens, summed from the session's transcript(s) — see `token_files`.
+    out_tokens: u64,
+    /// Output generation rate (tokens per active second) since its anchor — the `$/hr` sibling.
+    tps: f64,
 }
 
 #[derive(Default)]
@@ -88,6 +92,13 @@ struct Claude {
     /// DPS is the average from here to now, so the meter measures everything since it started (like
     /// Recount's overall segment), not a recent window. O(1) per session — no growing time series.
     anchors: HashMap<String, Damage>,
+    /// Per-transcript-file incremental token state: `path → (byte offset already read, counter)`.
+    /// Transcripts are append-only, so each tick reads only the bytes past `offset`. Covers a
+    /// session's main `.jsonl` and every `subagents/*.jsonl`. Pruned to files seen this tick.
+    token_files: HashMap<String, (u64, TokenCounter)>,
+    /// Per-session token anchor `(api_secs, out_tokens)` at first sight, so tok/s is the average
+    /// since the meter started (same model as the DPS anchor). Pruned with the agent set.
+    tok_anchors: HashMap<String, (f64, u64)>,
     /// account $/hr over time — the meter's trend sparkline ("raid DPS").
     dps_hist: Vec<f64>,
     /// `pid → cpu ticks` from the last poll, to tell a *busy* child from an idle resident one.
@@ -195,6 +206,17 @@ impl Plugin for Claude {
                         Token::FgDim
                     }),
             );
+            // combined output throughput — the team's generation rate alongside the spend rate.
+            let total_tps = self.live_tps();
+            parts.push(
+                text(fmt_tps(total_tps))
+                    .size(13.0)
+                    .color(if total_tps >= 1.0 {
+                        Token::Accent
+                    } else {
+                        Token::FgDim
+                    }),
+            );
         }
         // 5h then 7d limit *used* — labelled so a glance isn't a guess. Each label+value is
         // bound tighter (3px) than the chip's 5px inter-element gap, so the two read as two
@@ -297,6 +319,7 @@ impl Plugin for Claude {
                 let live = burning(a);
                 let rate = format!("${:.0}/hr", a.dps.max(0.0));
                 let total = format!("${:.0}", a.cost);
+                let tok = fmt_tps(a.tps);
                 let mut r = vec![
                     Icon::Dot.view(12.0, dot_c),
                     meter_bar(a.cost, max_cost),
@@ -305,6 +328,8 @@ impl Plugin for Claude {
                     } else {
                         Token::FgDim
                     }),
+                    // output throughput, dim (secondary to the spend rate but useful at a glance).
+                    text(pad_num(&tok, 9)).size(11.0).color(Token::FgDim),
                     text(pad_num(&total, 6)).size(11.0).color(Token::FgDim),
                     text(a.label.clone()).size(13.0).color(Token::Fg),
                 ];
@@ -484,6 +509,8 @@ impl Claude {
                 cost: 0.0,
                 api_secs: 0.0,
                 dps: 0.0,
+                out_tokens: 0,
+                tps: 0.0,
             })
             .collect();
 
@@ -528,10 +555,46 @@ impl Claude {
                 }
             }
         }
-        // Drop anchors for sessions no longer live so the map can't grow unbounded.
+        // Tokens: sum each session's cumulative output tokens from its transcript(s) — the main
+        // `.jsonl` plus every `subagents/*.jsonl` — read INCREMENTALLY (append-only ⇒ only the new
+        // bytes each tick), deduped by message.id, then derive tok/s like the DPS anchor. A line
+        // larger than the cap (a multi-MB tool result, never assistant usage) is skipped unparsed,
+        // so this stays inside the sandbox.
+        let mut live_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for a in &mut agents {
+            if a.session.is_empty() {
+                continue;
+            }
+            let mut sum = 0u64;
+            for path in transcript_files(&a.cwd, &a.session) {
+                // First sight of a file: tail from its current EOF rather than summing history —
+                // a session's transcript can be 100s of MB, and reading it all in one tick would
+                // risk the WALL backstop. tok/s is "since ezbar started watching" (like the DPS
+                // anchor), so only tokens generated from now on matter.
+                let is_new = !self.token_files.contains_key(&path);
+                let entry = self.token_files.entry(path.clone()).or_default();
+                if is_new {
+                    entry.0 = file_len(&path);
+                }
+                read_new_lines(&path, &mut entry.0, &mut entry.1);
+                sum += entry.1.total();
+                live_files.insert(path);
+            }
+            a.out_tokens = sum;
+            let (a_active, a_tok) = *self
+                .tok_anchors
+                .entry(a.session.clone())
+                .or_insert((a.api_secs, a.out_tokens));
+            a.tps = claude_logic::tps(a_tok, a_active, a.out_tokens, a.api_secs);
+        }
+
+        // Drop anchors / token state for sessions (and transcript files) no longer live.
         let live: std::collections::HashSet<&str> =
             agents.iter().map(|a| a.session.as_str()).collect();
         self.anchors.retain(|sid, _| live.contains(sid.as_str()));
+        self.tok_anchors
+            .retain(|sid, _| live.contains(sid.as_str()));
+        self.token_files.retain(|p, _| live_files.contains(p));
 
         // Recount order: biggest spender on top. We rank by *total* spend ("damage done"), not
         // by $/hr — all-opus agents burn at nearly the same per-active-hour rate (the rate is
@@ -555,6 +618,15 @@ impl Claude {
             .iter()
             .filter(|a| burning(a))
             .map(|a| a.dps)
+            .sum()
+    }
+
+    /// Combined output generation rate (tokens/s) — the same set of agents that feed `live_dps`.
+    fn live_tps(&self) -> f64 {
+        self.agents
+            .iter()
+            .filter(|a| burning(a))
+            .map(|a| a.tps)
             .sum()
     }
 
@@ -671,6 +743,15 @@ fn pad_num(s: &str, width: usize) -> String {
     format!("{}{}", "\u{2007}".repeat(pad), s)
 }
 
+/// Output throughput as `45 t/s` / `1.2k t/s` (tokens per active second).
+fn fmt_tps(t: f64) -> String {
+    if t >= 1000.0 {
+        format!("{:.1}k t/s", t / 1000.0)
+    } else {
+        format!("{:.0} t/s", t)
+    }
+}
+
 /// Clip a label to `max` chars with an ellipsis — session titles run long (40–60 chars) and would
 /// otherwise blow out the popup row.
 fn clip(s: &str, max: usize) -> String {
@@ -771,6 +852,89 @@ fn transcript_sessions(cwd: &str) -> Vec<(String, i64)> {
 fn read_limits() -> Option<Limits> {
     let data = fs::read_to_string("/claude/ezbar-status.json").ok()?;
     claude_logic::parse_limits(&data, now_secs())
+}
+
+/// A session's transcript files: the main `…/<session>.jsonl` plus every `…/<session>/subagents/
+/// *.jsonl` (Task-spawned agents live in their own file tree, not interleaved). All guest paths
+/// under the `/claude` fs mount.
+fn transcript_files(cwd: &str, session: &str) -> Vec<String> {
+    let dir = format!("/claude/projects/{}", claude_logic::encode_project(cwd));
+    let mut out = vec![format!("{dir}/{session}.jsonl")];
+    let subdir = format!("{dir}/{session}/subagents");
+    if let Ok(entries) = fs::read_dir(&subdir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(".jsonl") {
+                out.push(format!("{subdir}/{name}"));
+            }
+        }
+    }
+    out
+}
+
+/// Current byte length of a file (0 if unstattable) — used to tail a transcript from its EOF on
+/// first sight rather than reading its (possibly enormous) history.
+fn file_len(path: &str) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Per-line cap: buffer+parse transcript lines up to this size; a longer line is a tool-result
+/// dump (hundreds of KB up to multi-MB; never assistant usage) and is scanned-and-skipped, never
+/// buffered — so a giant line can't blow the 2 MiB sandbox (one capped line + its serde Value
+/// stays well under). 256 KiB still covers any real assistant turn (the largest observed is ~93 KB
+/// / ~28K output tokens).
+const LINE_CAP: usize = 256 * 1024;
+const READ_CHUNK: usize = 64 * 1024;
+
+/// Read transcript lines appended past `*off`, feeding each (size-bounded) complete line to `tc`,
+/// and advance `*off` to the last newline (a partial trailing line is re-read next tick). If the
+/// file shrank (compaction/rotation), re-tail from its new EOF — we don't re-sum the rewritten
+/// history (it's old turns), we just keep counting new generation forward.
+fn read_new_lines(path: &str, off: &mut u64, tc: &mut TokenCounter) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::File::open(path) else {
+        return;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len < *off {
+        *off = len; // shrank → re-tail from the new end; counter keeps its running total
+    }
+    if f.seek(SeekFrom::Start(*off)).is_err() {
+        return;
+    }
+    let mut committed = *off;
+    let mut pos = *off;
+    let mut line: Vec<u8> = Vec::new();
+    let mut over = false; // current line exceeded LINE_CAP → scan to its newline, don't buffer
+    let mut buf = [0u8; READ_CHUNK];
+    loop {
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        for &b in &buf[..n] {
+            pos += 1;
+            if b == b'\n' {
+                if !over {
+                    if let Ok(s) = std::str::from_utf8(&line) {
+                        tc.push_line(s);
+                    }
+                }
+                line.clear();
+                over = false;
+                committed = pos;
+            } else if !over {
+                if line.len() >= LINE_CAP {
+                    over = true;
+                    line.clear();
+                } else {
+                    line.push(b);
+                }
+            }
+        }
+    }
+    *off = committed;
 }
 
 /// This session's cumulative damage counters (`cost`, `api_secs`), from its per-session statusline
