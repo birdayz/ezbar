@@ -559,6 +559,24 @@ mod tests {
     }
 
     #[test]
+    fn folded_description_keeps_zoom_token_intact() {
+        // iCal folds long lines: CRLF + a leading space mid-value. The parser MUST unfold so the
+        // pwd token isn't split (a split token = web client prompts for the passcode). The token
+        // here is broken across a fold right in the middle ("...KlMnOp" | "QrStUv.1").
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1@test\r\n\
+            SUMMARY:Debrief\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\n\
+            DESCRIPTION:Join https://acme.zoom.us/j/12345678901?pwd=AbCdEfGhIjKlMnOp\r\n QrStUv.1\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
+        let d = parse_calendar(body, now);
+        assert_eq!(d.today_events.len(), 1);
+        assert_eq!(
+            d.today_events[0].join_url.as_deref(),
+            Some("https://acme.zoom.us/wc/12345678901/join?pwd=AbCdEfGhIjKlMnOpQrStUv.1")
+        );
+    }
+
+    #[test]
     fn event_without_zoom_has_no_join_url() {
         let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
         let d = parse_calendar(

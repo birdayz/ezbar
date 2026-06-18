@@ -96,6 +96,11 @@ fn tokens(text: &str) -> impl Iterator<Item = &str> {
 
 /// Parse a single token as a Zoom meeting URL, or `None` if it isn't one.
 fn parse_zoom(url: &str) -> Option<ZoomMeeting> {
+    // Some feeds percent-encode the query separators (`?pwd%3DTOKEN` instead of `?pwd=TOKEN`), so
+    // the `pwd` token would otherwise be missed and the join URL would drop the passcode. Zoom
+    // ids/hosts/tokens contain no `%`, so decoding only ever normalises those encoded separators.
+    let decoded = percent_decode(url);
+    let url = decoded.as_str();
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
@@ -120,6 +125,36 @@ fn parse_zoom(url: &str) -> Option<ZoomMeeting> {
         id: id.to_string(),
         pwd,
     })
+}
+
+/// Decode `%XX` byte escapes (URL percent-encoding); invalid/truncated escapes pass through
+/// unchanged. Bytes are reassembled before UTF-8 decoding so a multi-byte escape sequence is
+/// handled correctly.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// First non-empty value of query parameter `key` (case-insensitive).
@@ -187,6 +222,15 @@ Passcode: 000000
         assert_eq!(
             m.web_join_url(),
             "https://bigcorp.zoom.us/wc/98765432109/join"
+        );
+    }
+
+    #[test]
+    fn percent_encoded_pwd_is_decoded() {
+        // some feeds percent-encode the query separator: `?pwd%3DTOKEN` instead of `?pwd=TOKEN`.
+        assert_eq!(
+            zoom_join_url("https://acme.zoom.us/j/12345678901?pwd%3DAbCdEf.1").as_deref(),
+            Some("https://acme.zoom.us/wc/12345678901/join?pwd=AbCdEf.1")
         );
     }
 
