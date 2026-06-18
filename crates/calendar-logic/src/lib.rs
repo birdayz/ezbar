@@ -15,8 +15,8 @@
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
-pub mod zoom;
-pub use zoom::{best_meeting, zoom_join_url, ZoomMeeting};
+pub mod meeting;
+pub use meeting::{best_meeting, join_url, zoom_join_url, ZoomMeeting};
 
 /// One concrete event in today's window, with times in the display timezone.
 #[derive(Debug, Clone)]
@@ -256,13 +256,15 @@ pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
                 continue;
             }
 
-            // The Zoom link usually lives in DESCRIPTION; LOCATION/URL are fallbacks. Scanning all
-            // three in order lets `best_meeting` still prefer a `pwd`-bearing link wherever it is.
+            // The meeting link usually lives in DESCRIPTION; LOCATION/URL/X-GOOGLE-CONFERENCE are
+            // fallbacks (Google Calendar puts the Meet link in X-GOOGLE-CONFERENCE). Scanning them
+            // together lets `join_url` pick the best click-to-join link wherever it appears.
             let scan = format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 prop_value(&ev, "DESCRIPTION"),
                 location,
                 prop_value(&ev, "URL"),
+                prop_value(&ev, "X-GOOGLE-CONFERENCE"),
             );
 
             today.push(CalendarEvent {
@@ -271,7 +273,7 @@ pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
                 end,
                 is_all_day: start.1,
                 location,
-                join_url: zoom_join_url(&scan),
+                join_url: join_url(&scan),
             });
         }
     }
@@ -573,6 +575,23 @@ mod tests {
         assert_eq!(
             d.today_events[0].join_url.as_deref(),
             Some("https://acme.zoom.us/wc/12345678901/join?pwd=AbCdEfGhIjKlMnOpQrStUv.1")
+        );
+    }
+
+    #[test]
+    fn event_with_google_meet_gets_join_url() {
+        // Meet link in DESCRIPTION (escaped newline) + the X-GOOGLE-CONFERENCE property Google adds.
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1@test\r\n\
+            SUMMARY:Standup\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\n\
+            DESCRIPTION:Join with Google Meet\\nhttps://meet.google.com/abc-defg-hij\r\n\
+            X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
+        let d = parse_calendar(body, now);
+        assert_eq!(d.today_events.len(), 1);
+        assert_eq!(
+            d.today_events[0].join_url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
         );
     }
 

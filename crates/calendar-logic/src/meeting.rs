@@ -1,6 +1,6 @@
-//! The "join Zoom from the browser" heuristic.
+//! The "join the meeting from the browser" heuristic — Zoom and Google Meet.
 //!
-//! Zoom hides the web-client join button behind an app-launch dance. But the web client is
+//! **Zoom** hides the web-client join button behind an app-launch dance. But the web client is
 //! reachable directly at `https://{host}/wc/{id}/join?pwd={token}`. So we scan an event's text
 //! for any Zoom meeting link (`/j/`, `/wc/…/join`, `/wc/join/…`, `/s/`, `/launch/jc/`), pull out
 //! the numeric meeting id, the host, and the `pwd` token, then rebuild the canonical web-client
@@ -10,6 +10,13 @@
 //! token authenticates a one-click join, so we never try to synthesise it from a passcode. A
 //! link without a token still yields a `/wc/{id}/join` URL — the web client then prompts for the
 //! passcode, which is strictly better than the app-launch wall.
+//!
+//! **Google Meet** is already web-first: `https://meet.google.com/{xxx-xxxx-xxx}` (or a `/lookup/…`
+//! link) opens the meeting directly with no app wall and no passcode, so we just find it and pass
+//! it through unchanged.
+//!
+//! [`join_url`] is the entry point — the best click-to-join link for an event, preferring a
+//! one-click Zoom (with token) or a Meet link over a passcode-prompting Zoom.
 
 /// A Zoom meeting parsed out of free text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +42,27 @@ impl ZoomMeeting {
 /// Find the best Zoom meeting in `text` and return its web-client join URL.
 pub fn zoom_join_url(text: &str) -> Option<String> {
     best_meeting(text).map(|m| m.web_join_url())
+}
+
+/// The best **click-to-join** link in `text`, across providers. A one-click Zoom (carrying a `pwd`
+/// token) wins; otherwise a Google Meet link is preferred over a token-less Zoom, because Meet
+/// always opens directly while a token-less Zoom would still prompt for the passcode. Returns
+/// `None` when there's no recognised meeting link.
+pub fn join_url(text: &str) -> Option<String> {
+    let cleaned = unescape_ical(text);
+    let mut zoom_no_pwd: Option<String> = None;
+    let mut meet: Option<String> = None;
+    for tok in tokens(&cleaned) {
+        if let Some(m) = parse_zoom(tok) {
+            if m.pwd.is_some() {
+                return Some(m.web_join_url()); // best: one-click Zoom
+            }
+            zoom_no_pwd.get_or_insert_with(|| m.web_join_url());
+        } else if let Some(url) = parse_meet(tok) {
+            meet.get_or_insert(url);
+        }
+    }
+    meet.or(zoom_no_pwd)
 }
 
 /// The best Zoom meeting in `text`: prefer the first link that carries a `pwd` token (so the
@@ -155,6 +183,36 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Parse a single token as a Google Meet link, returning it unchanged (Meet is web-first, so the
+/// link is the join URL). Accepts the standard `meet.google.com/{xxx-xxxx-xxx}` code form and the
+/// `meet.google.com/lookup/…` named-meeting form; anything else (a bare host, a non-meet path) is
+/// `None`.
+fn parse_meet(url: &str) -> Option<String> {
+    let decoded = percent_decode(url);
+    let rest = decoded
+        .strip_prefix("https://")
+        .or_else(|| decoded.strip_prefix("http://"))?;
+    let (host, after) = rest.split_once('/')?;
+    if !host.eq_ignore_ascii_case("meet.google.com") {
+        return None;
+    }
+    let seg = after.split(['/', '?']).next().unwrap_or("");
+    if is_meet_code(seg) || seg == "lookup" {
+        // Normalise the scheme/host; keep the path + any query (e.g. ?authuser=) intact.
+        Some(format!("https://meet.google.com/{after}"))
+    } else {
+        None
+    }
+}
+
+/// A Google Meet meeting code: three lowercase-letter groups of length 3-4-3 (`abc-defg-hij`).
+fn is_meet_code(seg: &str) -> bool {
+    let p: Vec<&str> = seg.split('-').collect();
+    p.len() == 3
+        && [3, 4, 3] == [p[0].len(), p[1].len(), p[2].len()]
+        && p.iter().all(|g| g.bytes().all(|b| b.is_ascii_lowercase()))
 }
 
 /// First non-empty value of query parameter `key` (case-insensitive).
@@ -302,6 +360,56 @@ Passcode: 000000
         assert_eq!(
             zoom_join_url("One tap mobile +15551234567,,12345678901# US"),
             None
+        );
+    }
+
+    #[test]
+    fn google_meet_link_passed_through() {
+        // Meet is web-first: the link is the join URL, returned unchanged.
+        assert_eq!(
+            join_url("Join with Google Meet https://meet.google.com/abc-defg-hij").as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+        // escaped-newline form (DESCRIPTION) + trailing bilingual text must not glue onto the URL.
+        assert_eq!(
+            join_url("Google Meet\\nhttps://meet.google.com/abc-defg-hij\\nOder per Telefon")
+                .as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+        // the /lookup/ named-meeting form.
+        assert_eq!(
+            join_url("https://meet.google.com/lookup/abcdef123").as_deref(),
+            Some("https://meet.google.com/lookup/abcdef123")
+        );
+    }
+
+    #[test]
+    fn meet_query_preserved_and_non_meet_rejected() {
+        assert_eq!(
+            join_url("https://meet.google.com/abc-defg-hij?authuser=1").as_deref(),
+            Some("https://meet.google.com/abc-defg-hij?authuser=1")
+        );
+        assert_eq!(join_url("https://meet.google.com/"), None); // bare host
+        assert_eq!(join_url("https://meet.google.com/about"), None); // not a meeting code
+        assert_eq!(join_url("https://meet.google.com/ab-cd-ef"), None); // wrong shape (not 3-4-3)
+        assert_eq!(join_url("https://google.com/abc-defg-hij"), None); // wrong host
+    }
+
+    #[test]
+    fn provider_precedence() {
+        // one-click Zoom (pwd) beats everything, regardless of order.
+        let z = "Meet https://meet.google.com/abc-defg-hij \
+                 Zoom https://acme.zoom.us/j/12345678901?pwd=tok.1";
+        assert_eq!(
+            join_url(z).as_deref(),
+            Some("https://acme.zoom.us/wc/12345678901/join?pwd=tok.1")
+        );
+        // a token-less Zoom would prompt for a passcode, so Meet (clean one-click) is preferred.
+        let m = "Zoom https://acme.zoom.us/j/12345678901 \
+                 Meet https://meet.google.com/abc-defg-hij";
+        assert_eq!(
+            join_url(m).as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
         );
     }
 }

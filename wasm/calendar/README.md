@@ -1,10 +1,18 @@
 # calendar (ezbar WASM plugin)
 
 The next meeting + a countdown in the chip; **hover** opens the day's agenda. A meeting that
-carries a **Zoom** link is **click-to-join**: clicking the row hands its rebuilt web-client URL to
-`xdg-open`, so the browser lands on the in-meeting page directly — skipping Zoom's "launch the
-app" wall. (Heuristic: any `…zoom.us/{j,wc,s,launch/jc}/{id}…?pwd=…` link is turned into
-`https://{host}/wc/{id}/join?pwd={token}`.)
+carries a **Zoom** or **Google Meet** link is **click-to-join**: clicking the row hands a
+browser-ready join URL to `xdg-open`, so the browser lands on the in-meeting page directly.
+
+- **Zoom**: any `…zoom.us/{j,wc,s,launch/jc}/{id}…?pwd=…` link is rebuilt into
+  `https://{host}/wc/{id}/join?pwd={token}` — the web client, skipping Zoom's "launch the app"
+  wall. (The `pwd` *token* is passed; a link with only a numeric "Passcode: 123456" still prompts.)
+- **Google Meet**: `https://meet.google.com/{xxx-xxxx-xxx}` (or `/lookup/…`) is passed through
+  unchanged — Meet is web-first, no app wall, no passcode. Found in `DESCRIPTION`, `LOCATION`,
+  `URL`, or Google's `X-GOOGLE-CONFERENCE` property.
+
+A one-click Zoom (with token) wins; otherwise a Meet link is preferred over a passcode-prompting
+Zoom.
 
 This is the sandboxed replacement for the old built-in `calendar` module.
 
