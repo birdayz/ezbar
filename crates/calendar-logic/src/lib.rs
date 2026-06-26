@@ -226,6 +226,45 @@ pub fn slim_ical(body: &str, today: NaiveDate, days_back: i64, days_fwd: i64) ->
     s.finish()
 }
 
+/// Collapse content-identical events to one row.
+///
+/// A Google secret-iCal feed routinely carries the *same* meeting as two VEVENT blocks: a
+/// recurring master (`RRULE`) plus an override for the modified/accepted instance
+/// (`RECURRENCE-ID`, same `UID`), or a second copy that arrived as a meeting invite. Google's web
+/// UI collapses them, so the user sees one event — but the raw feed has both, and since we don't
+/// expand RRULE we'd render each in-window VEVENT, showing the same meeting twice at the same
+/// time with an identical countdown.
+///
+/// We key on what the user actually sees — `(start, end, title, is_all_day)` — so true duplicates
+/// merge regardless of whether their UIDs match (the master/override and the cross-invite cases
+/// have different UIDs). When copies collide, we keep the first but **adopt a join link** from any
+/// copy that has one, so the surviving row stays click-to-join even if the master lacked the link.
+fn dedupe_events(events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
+    use std::collections::HashMap;
+    let mut seen: HashMap<(i64, i64, String, bool), usize> = HashMap::with_capacity(events.len());
+    let mut out: Vec<CalendarEvent> = Vec::with_capacity(events.len());
+    for ev in events {
+        let key = (
+            ev.start.timestamp(),
+            ev.end.timestamp(),
+            ev.title.clone(),
+            ev.is_all_day,
+        );
+        match seen.get(&key) {
+            Some(&i) => {
+                if out[i].join_url.is_none() {
+                    out[i].join_url = ev.join_url;
+                }
+            }
+            None => {
+                seen.insert(key, out.len());
+                out.push(ev);
+            }
+        }
+    }
+    out
+}
+
 /// Parse an iCal feed into today's events + the next-meeting summary, in `now`'s timezone.
 pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
     let tz = now.timezone();
@@ -278,6 +317,7 @@ pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
         }
     }
 
+    today = dedupe_events(today);
     today.sort_by_key(|a| a.start);
 
     let mut data = CalendarData {
@@ -593,6 +633,58 @@ mod tests {
             d.today_events[0].join_url.as_deref(),
             Some("https://meet.google.com/abc-defg-hij")
         );
+    }
+
+    #[test]
+    fn duplicate_vevents_collapse_to_one_row() {
+        // Google secret-iCal: a recurring master + its modified-instance override land as two
+        // VEVENTs with the SAME start/title (different UIDs). The web UI shows one; the raw feed
+        // has both. We must render one row — the bug was a recurring meeting appearing twice.
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+            BEGIN:VEVENT\r\nUID:series@google\r\nSUMMARY:Team Sync\r\n\
+            DTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:override@google\r\nSUMMARY:Team Sync\r\n\
+            RECURRENCE-ID:20260531T140000Z\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 12, 10, 0).unwrap();
+        let d = parse_calendar(body, now);
+        assert_eq!(
+            d.today_events.len(),
+            1,
+            "identical copies must merge to one"
+        );
+        assert_eq!(d.next_title, "Team Sync");
+    }
+
+    #[test]
+    fn dedupe_keeps_the_join_link_from_either_copy() {
+        // The copy carrying the Meet link may not be the first one seen — the survivor must still
+        // be click-to-join.
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+            BEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Standup\r\n\
+            DTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:b@x\r\nSUMMARY:Standup\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\n\
+            X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\nEND:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
+        let d = parse_calendar(body, now);
+        assert_eq!(d.today_events.len(), 1);
+        assert_eq!(
+            d.today_events[0].join_url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij"),
+        );
+    }
+
+    #[test]
+    fn distinct_meetings_at_same_time_are_kept() {
+        // Same slot, different titles = two real parallel meetings. Must NOT be collapsed.
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+            BEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Team Sync\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:b@x\r\nSUMMARY:1:1 with Sam\r\nDTSTART:20260531T140000Z\r\nDTEND:20260531T143000Z\r\nEND:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let now = UTC.with_ymd_and_hms(2026, 5, 31, 13, 0, 0).unwrap();
+        let d = parse_calendar(body, now);
+        assert_eq!(d.today_events.len(), 2);
     }
 
     #[test]
