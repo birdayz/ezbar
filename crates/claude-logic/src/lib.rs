@@ -259,6 +259,43 @@ pub fn pwd_from_environ(bytes: &[u8]) -> Option<String> {
         .find_map(|kv| kv.strip_prefix("PWD=").map(|s| s.to_string()))
 }
 
+/// The `--worktree <name>` value from a NUL-separated `/proc/<pid>/cmdline` blob, if present
+/// (accepts both `--worktree NAME` and `--worktree=NAME`). `None` when the flag is absent or has
+/// no value.
+///
+/// **Why this exists.** `claude --worktree <name>` chdir's the process into
+/// `<repo>/.claude/worktrees/<name>`, but the launching shell's `PWD` env var stays at the repo
+/// root. The cap-std sandbox can't `readlink` the real `/proc/<pid>/cwd`, so [`pwd_from_environ`]
+/// is the only cwd signal — and for a worktree session it points at the *parent repo*, mapping the
+/// agent to the parent's transcripts and surfacing a wrong, older session. The cmdline is a plain
+/// readable file, so we recover the worktree name from it and rebuild the true cwd via
+/// [`worktree_cwd`].
+pub fn worktree_from_cmdline(cmdline: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(cmdline);
+    let mut args = s.split('\0');
+    while let Some(a) = args.next() {
+        let Some(rest) = a.strip_prefix("--worktree") else {
+            continue;
+        };
+        // `--worktree=NAME`
+        if let Some(v) = rest.strip_prefix('=') {
+            return (!v.is_empty()).then(|| v.to_string());
+        }
+        // `--worktree NAME` (exact flag, value is the next arg). A `--worktree-ish` longer flag
+        // leaves `rest` non-empty and non-`=`, so it correctly doesn't match.
+        if rest.is_empty() {
+            return args.next().filter(|v| !v.is_empty()).map(str::to_string);
+        }
+    }
+    None
+}
+
+/// The cwd a `--worktree <name>` session actually runs in: `<pwd>/.claude/worktrees/<name>`, the
+/// layout Claude Code creates. Pairs with [`worktree_from_cmdline`].
+pub fn worktree_cwd(pwd: &str, name: &str) -> String {
+    format!("{}/.claude/worktrees/{}", pwd.trim_end_matches('/'), name)
+}
+
 /// Compact idle time: `45s` / `8m` / `2h`.
 pub fn idle_str(secs: i64) -> String {
     if secs < 60 {
@@ -531,6 +568,48 @@ mod tests {
         // `PWD` must match as a key prefix, not mid-string.
         assert_eq!(pwd_from_environ(b"OLDPWD=/y\0").as_deref(), None);
         assert_eq!(pwd_from_environ(b"PWD=\0").as_deref(), Some("")); // empty but present
+    }
+
+    #[test]
+    fn worktree_from_cmdline_space_eq_and_absent() {
+        // the cmdline shape `claude --dangerously-skip-permissions --worktree <name>`
+        assert_eq!(
+            worktree_from_cmdline(
+                b"claude\0--dangerously-skip-permissions\0--worktree\0feature-1\0"
+            )
+            .as_deref(),
+            Some("feature-1")
+        );
+        assert_eq!(
+            worktree_from_cmdline(b"claude\0--worktree=feature-1\0").as_deref(),
+            Some("feature-1")
+        );
+        // absent flag, and a flag with no value, both yield None
+        assert_eq!(worktree_from_cmdline(b"claude\0--resume\0"), None);
+        assert_eq!(worktree_from_cmdline(b"claude\0--worktree\0"), None);
+        // a longer flag that merely starts with --worktree must not match
+        assert_eq!(worktree_from_cmdline(b"claude\0--worktree-dir\0x\0"), None);
+    }
+
+    #[test]
+    fn worktree_cwd_builds_claude_layout() {
+        assert_eq!(
+            worktree_cwd("/home/user/projects/webapp", "feature-1"),
+            "/home/user/projects/webapp/.claude/worktrees/feature-1"
+        );
+        // trailing slash on PWD doesn't double up
+        assert_eq!(worktree_cwd("/repo/", "wt"), "/repo/.claude/worktrees/wt");
+    }
+
+    #[test]
+    fn worktree_cwd_encodes_to_the_real_project_dir() {
+        // end-to-end: the rebuilt cwd must `encode_project` to the SAME dir Claude wrote the
+        // worktree session's transcript under — the join key the misattribution bug got wrong.
+        let cwd = worktree_cwd("/home/user/projects/webapp", "feature-1");
+        assert_eq!(
+            encode_project(&cwd),
+            "-home-user-projects-webapp--claude-worktrees-feature-1"
+        );
     }
 
     #[test]

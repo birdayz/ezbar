@@ -300,15 +300,27 @@ impl Plugin for Claude {
         // `.max(0.0)` normalises a float -0.0 / sub-dollar negative so it never prints "$-0/hr".
         let total_dps: f64 = self.live_dps().max(0.0);
         if total > 0 {
-            parts.push(
-                text(format!("${total_dps:.0}/hr"))
-                    .size(13.0)
-                    .color(if total_dps >= 1.0 {
-                        Token::Accent
-                    } else {
-                        Token::FgDim
-                    }),
-            );
+            let dps_color = if total_dps >= 1.0 {
+                Token::Accent
+            } else {
+                Token::FgDim
+            };
+            parts.push(text(format!("${total_dps:.0}/hr")).size(13.0).color(dps_color));
+            // Inline sparkline of the combined $/hr — the SAME `dps_hist` the popup charts, so the
+            // bar carries the team's spend *trend* at a glance (the cpu/temperature-style chip
+            // graph), not just the instantaneous number. `Generic` auto-fits the y-range to the
+            // data (DPS is on no fixed scale), host-sized to a 48x16 chip sparkline; our line
+            // colour wins (Generic has no threshold palette). Needs >=2 points to draw a segment.
+            if self.dps_hist.len() >= 2 {
+                parts.push(
+                    Graph {
+                        values: self.dps_hist.clone(),
+                        kind: GraphKind::Generic,
+                        line: dps_color.into(),
+                    }
+                    .view(),
+                );
+            }
             // combined output throughput — the team's generation rate alongside the spend rate.
             let total_tps = self.live_tps();
             parts.push(
@@ -967,17 +979,29 @@ fn read_procs() -> (Vec<Proc>, HashMap<i32, Vec<i32>>) {
 /// but the cap-std sandbox refuses to `readlink` magic symlinks (they resolve to an absolute
 /// path outside the preopen) — so that always fails here and every agent would label as `?`.
 /// Fall back to the `PWD` env var from `/proc/<pid>/environ`, a plain readable file for a
-/// same-uid process, which the launching shell sets to the cwd. `?` only if neither resolves.
+/// same-uid process, which the launching shell sets to the cwd.
+///
+/// One twist: `claude --worktree <name>` chdir's into `<repo>/.claude/worktrees/<name>` while
+/// `PWD` stays at the repo root — so the bare `PWD` would map a worktree agent to the *parent
+/// repo's* transcripts and surface a wrong, older session (a worktree session rendered under an
+/// unrelated session that had last run in the parent repo). The cmdline is plain-readable, so
+/// recover the worktree name and rebuild the real cwd. `?` only if nothing resolves.
 fn proc_cwd(pid: i32) -> String {
     if let Ok(target) = fs::read_link(format!("/proc/{pid}/cwd")) {
         return target.to_string_lossy().to_string();
     }
-    if let Ok(env) = fs::read(format!("/proc/{pid}/environ")) {
-        if let Some(pwd) = claude_logic::pwd_from_environ(&env) {
-            return pwd;
+    let Ok(env) = fs::read(format!("/proc/{pid}/environ")) else {
+        return "?".into();
+    };
+    let Some(pwd) = claude_logic::pwd_from_environ(&env) else {
+        return "?".into();
+    };
+    if let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) {
+        if let Some(name) = claude_logic::worktree_from_cmdline(&cmdline) {
+            return claude_logic::worktree_cwd(&pwd, &name);
         }
     }
-    "?".into()
+    pwd
 }
 
 /// `(session_id, mtime)` for `cwd`'s transcript `.jsonl` files, **newest first** — one per
