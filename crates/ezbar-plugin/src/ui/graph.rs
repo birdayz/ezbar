@@ -15,6 +15,10 @@ pub enum GraphKind {
     Memory,
     Temperature,
     Ping,
+    /// Arbitrary-scale data (a WASM plugin's own series — $/hr, prices, magnitudes): the y-range
+    /// is **auto-fit** to the data, not the fixed 0..100 of `Cpu`/`Memory`. There's no threshold
+    /// palette, so the trace uses the plugin's `line` colour. See [`Graph::draw_generic`].
+    Generic,
 }
 
 /// Canvas program holding a snapshot of the history values to plot.
@@ -226,6 +230,59 @@ impl Graph {
         }
     }
 
+    /// A sparkline for **arbitrary-scale** data: the y-range is auto-fit to the values (with a
+    /// small pad), so a `$/hr` / price / magnitude series isn't clamped to the fixed 0..100 the
+    /// `Cpu`/`Memory` kinds assume (which pegs out-of-range values to the top and floods the box
+    /// into a solid block). A flat series gets a unit range so the trace is a steady line, never a
+    /// divide-by-zero. No threshold palette — the trace uses the plugin's `line_color`; the floor
+    /// band matches `draw_fixed` so it lifts off the baseline like the other sparklines.
+    fn draw_generic(&self, frame: &mut Frame, w: f32, h: f32) {
+        let values: Vec<f64> = self
+            .values
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        if values.len() < 2 {
+            return;
+        }
+        let mut lo = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut hi = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if (hi - lo).abs() < f64::EPSILON {
+            hi = lo + 1.0; // flat series → a unit range, so it draws a steady line not NaN
+        }
+        let pad = (hi - lo) * 0.12; // headroom so the peak/trough don't clip the edges
+        lo -= pad;
+        hi += pad;
+        let n = values.len();
+        let floor = h * 0.32;
+        let plot_h = h - floor;
+        let color = self
+            .line_color
+            .unwrap_or_else(|| Color::from_rgb(0.5, 0.7, 1.0));
+        let xy: Vec<(f32, f32)> = values
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let x = i as f32 * w / (n as f32 - 1.0).max(1.0);
+                let y = h - floor - (((v - lo) / (hi - lo)) as f32) * plot_h;
+                (x, y)
+            })
+            .collect();
+        if self.fill {
+            fill_under(frame, &xy, h, color);
+        }
+        for seg in xy.windows(2) {
+            stroke_segment(
+                frame,
+                Point::new(seg[0].0, seg[0].1),
+                Point::new(seg[1].0, seg[1].1),
+                color,
+                self.line_width,
+            );
+        }
+    }
+
     fn draw_temperature(&self, frame: &mut Frame, w: f32, h: f32) {
         let temps = &self.values;
         let (min_t, max_t) = match temp_range(temps) {
@@ -342,6 +399,7 @@ impl<Message> canvas::Program<Message> for Graph {
             GraphKind::Memory => self.draw_fixed(&mut frame, w, h, 0.0, 100.0, memory_color),
             GraphKind::Temperature => self.draw_temperature(&mut frame, w, h),
             GraphKind::Ping => self.draw_ping(&mut frame, w, h),
+            GraphKind::Generic => self.draw_generic(&mut frame, w, h),
         }
         vec![frame.into_geometry()]
     }

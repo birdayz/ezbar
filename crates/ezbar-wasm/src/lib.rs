@@ -1042,7 +1042,7 @@ fn graph_kind(k: ezbar::plugin::types::GraphKind) -> GraphKind {
         W::Memory => GraphKind::Memory,
         W::Temperature => GraphKind::Temperature,
         W::Ping => GraphKind::Ping,
-        W::Generic => GraphKind::Cpu, // line colour is overridden anyway
+        W::Generic => GraphKind::Generic, // auto-fits the y-range (not Cpu's fixed 0..100)
     }
 }
 
