@@ -5,10 +5,13 @@
 //! chip, and a clean forecast panel on hover — an hourly strip and a 4-day
 //! outlook, all from the host icon set. No stock-style chart anywhere.
 //!
-//! Sources: open-meteo (primary) with a wttr.in fallback for when its daily quota
-//! is spent — so grant BOTH hosts:
+//! Sources: open-meteo (primary) with a wttr.in fallback for when its daily quota is spent. The
+//! location is `[modules.weather].city` — a name geocoded via open-meteo's geocoding API, or
+//! "auto" (the default) which IP-geolocates via wttr.in; explicit `lat`/`lon` override. So grant
+//! all three hosts:
 //!   [modules.weather]
-//!   network = ["api.open-meteo.com", "wttr.in"]
+//!   network = ["api.open-meteo.com", "geocoding-api.open-meteo.com", "wttr.in"]
+//!   city = "Berlin"   # optional; default "auto"
 //!
 //! Note how little there is: a `Plugin` impl + `export_plugin!`. No wit-bindgen,
 //! no generated-type glue — the SDK owns all of that.
@@ -33,6 +36,13 @@ struct DayPt {
 }
 
 struct Weather {
+    /// `[modules.weather].city`: "auto" (IP-geolocate, the default) or a place name to geocode.
+    /// Ignored when explicit `lat`/`lon` are configured.
+    city: String,
+    /// `true` once lat/lon are known (explicit config, or resolved from `city`).
+    located: bool,
+    /// `[modules.weather].name` was set — an explicit label that the resolver must not overwrite.
+    name_override: bool,
     place: String,
     lat: String,
     lon: String,
@@ -53,9 +63,12 @@ struct Weather {
 impl Default for Weather {
     fn default() -> Self {
         Weather {
+            city: "auto".into(), // IP-geolocate unless [modules.weather].city / lat+lon say otherwise
+            located: false,
+            name_override: false,
             place: String::new(),
-            lat: "52.52".into(), // Berlin; override via [modules.weather].lat/lon
-            lon: "13.41".into(),
+            lat: String::new(), // resolved from `city`/auto on the first tick — no hardcoded default
+            lon: String::new(),
             temp: 0.0,
             feels: 0.0,
             code: 0,
@@ -95,21 +108,44 @@ const HAIR: f32 = BASE * 0.5; // ≈7   divider hairline
 
 impl Plugin for Weather {
     fn load(&mut self, config: Vec<(String, String)>) {
+        let (mut lat_set, mut lon_set) = (false, false);
         for (k, v) in &config {
             match k.as_str() {
-                "lat" => self.lat = v.clone(),
-                "lon" => self.lon = v.clone(),
-                "name" => self.place = v.clone(),
+                "lat" => {
+                    self.lat = v.clone();
+                    lat_set = true;
+                }
+                "lon" => {
+                    self.lon = v.clone();
+                    lon_set = true;
+                }
+                "city" => self.city = v.clone(),
+                "name" => {
+                    self.place = v.clone();
+                    self.name_override = true;
+                }
                 _ => {}
             }
         }
-        if self.place.is_empty() {
-            self.place = format!("{}, {}", self.lat, self.lon);
+        if lat_set && lon_set {
+            // Explicit coordinates win — skip geocoding/geolocation.
+            self.located = true;
+            if !self.name_override {
+                self.place = format!("{}, {}", self.lat, self.lon);
+            }
         }
+        // Else `located` stays false: the first tick resolves `city` (default "auto") into lat/lon
+        // and a place label (unless `name` already pinned one).
     }
 
     fn update(&mut self, ctx: &mut dyn Ctx, ev: Event) -> bool {
         let Event::Timer = ev else { return false };
+        // Resolve lat/lon first: geocode the configured `city`, or IP-geolocate when it's "auto".
+        // Until that succeeds we have no coordinates to query, so retry on the short cadence.
+        if !self.located && !self.resolve_location(ctx) {
+            ctx.set_timeout(RETRY_MS);
+            return false;
+        }
         // Primary source is open-meteo (richer data, WMO codes). Fall back to wttr.in when
         // it's unavailable — e.g. open-meteo's daily quota is spent. Re-arm the next tick
         // *unconditionally* (RFC 0011 one-shot timer): a longer cadence on good data, a
@@ -170,6 +206,71 @@ impl Plugin for Weather {
 }
 
 impl Weather {
+    /// Resolve `lat`/`lon` once: geocode the configured `city`, or — for "auto" — let the source
+    /// detect our location from our IP. Sets `place` to the resolved name unless `name` pinned an
+    /// explicit label. Returns whether we now have coordinates.
+    fn resolve_location(&mut self, ctx: &mut dyn Ctx) -> bool {
+        let ok = if self.city.eq_ignore_ascii_case("auto") {
+            self.geolocate_auto(ctx)
+        } else {
+            self.geocode(ctx)
+        };
+        self.located = ok;
+        ok
+    }
+
+    /// Geocode `self.city` to coordinates via open-meteo's geocoding API.
+    fn geocode(&mut self, ctx: &mut dyn Ctx) -> bool {
+        let url = format!(
+            "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
+            urlencode(&self.city)
+        );
+        let Ok(bytes) = ctx.http_get(&url) else {
+            return false;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        let r = &v["results"][0];
+        let (Some(lat), Some(lon)) = (r["latitude"].as_f64(), r["longitude"].as_f64()) else {
+            ctx.log(&format!("weather: city {:?} not found", self.city));
+            return false;
+        };
+        self.lat = format!("{lat:.4}");
+        self.lon = format!("{lon:.4}");
+        if !self.name_override {
+            self.place = r["name"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| self.city.clone());
+        }
+        true
+    }
+
+    /// IP-geolocate via wttr.in (no location ⇒ it uses our IP), reading the nearest area's name +
+    /// coordinates; the richer open-meteo fetch then runs against those coordinates.
+    fn geolocate_auto(&mut self, ctx: &mut dyn Ctx) -> bool {
+        let Ok(bytes) = ctx.http_get("https://wttr.in/?format=j1") else {
+            return false;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        let area = &v["nearest_area"][0];
+        let (Some(lat), Some(lon)) = (area["latitude"].as_str(), area["longitude"].as_str()) else {
+            return false;
+        };
+        self.lat = lat.to_string();
+        self.lon = lon.to_string();
+        if !self.name_override {
+            self.place = area["areaName"][0]["value"]
+                .as_str()
+                .unwrap_or("Current location")
+                .to_string();
+        }
+        true
+    }
+
     /// Fetch + parse open-meteo (the primary source). Returns false (so the caller
     /// can fall back) on any network error, including a 429 daily-quota response.
     fn fetch_open_meteo(&mut self, ctx: &mut dyn Ctx) -> bool {
@@ -253,7 +354,11 @@ impl Weather {
                     })
                     .unwrap_or(0);
                 self.days.push(DayPt {
-                    label: if i == 0 { "Today".into() } else { weekday(date).into() },
+                    label: if i == 0 {
+                        "Today".into()
+                    } else {
+                        weekday(date).into()
+                    },
                     hi: sf(&d["maxtempC"]),
                     lo: sf(&d["mintempC"]),
                     code: day_code,
@@ -286,12 +391,18 @@ impl Weather {
                 .position(|(di, hour, _)| *di == 0 && *hour >= now_h)
                 .unwrap_or(0);
             for (di, hour, slot) in slots.into_iter().skip(start).take(6) {
-                let is_day = sun.get(di).map(|(sr, ss)| hour >= *sr && hour < *ss).unwrap_or(true);
+                let is_day = sun
+                    .get(di)
+                    .map(|(sr, ss)| hour >= *sr && hour < *ss)
+                    .unwrap_or(true);
                 self.hours.push(HourPt {
                     label: format!("{hour:02}"),
                     temp: sf(&slot["tempC"]),
                     code: wwo_to_wmo(su(&slot["weatherCode"])),
-                    pop: slot["chanceofrain"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+                    pop: slot["chanceofrain"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
                     is_day,
                 });
             }
@@ -321,7 +432,11 @@ impl Weather {
                 let sunset = arr_str(d, "sunset", i);
                 sun_by_date.push((date.clone(), sunrise.clone(), sunset.clone()));
                 self.days.push(DayPt {
-                    label: if i == 0 { "Today".into() } else { weekday(&date).into() },
+                    label: if i == 0 {
+                        "Today".into()
+                    } else {
+                        weekday(&date).into()
+                    },
                     hi: arr_f64(d, "temperature_2m_max", i),
                     lo: arr_f64(d, "temperature_2m_min", i),
                     code: arr_f64(d, "weathercode", i) as u8,
@@ -341,7 +456,10 @@ impl Weather {
         let h = &v["hourly"];
         self.hours.clear();
         if let Some(htime) = h["time"].as_array() {
-            let start = htime.iter().position(|t| t.as_str().unwrap_or("") > now).unwrap_or(0);
+            let start = htime
+                .iter()
+                .position(|t| t.as_str().unwrap_or("") > now)
+                .unwrap_or(0);
             for i in start..(start + 6).min(htime.len()) {
                 let t = htime[i].as_str().unwrap_or("");
                 self.hours.push(HourPt {
@@ -358,8 +476,12 @@ impl Weather {
 
     fn header(&self) -> Render {
         let temp_line = row([
-            text(format!("{:.0}\u{b0}", self.temp)).color(temp_color(self.temp)).size(HERO_TEMP),
-            text(condition_label(self.code)).color(Token::FgDim).size(BODY),
+            text(format!("{:.0}\u{b0}", self.temp))
+                .color(temp_color(self.temp))
+                .size(HERO_TEMP),
+            text(condition_label(self.code))
+                .color(Token::FgDim)
+                .size(BODY),
         ])
         .spacing(6.0)
         .align(Align::End);
@@ -368,9 +490,12 @@ impl Weather {
             wmo_icon(self.code, self.is_day).view(HERO_ICON, sky_tint(self.code, self.is_day)),
             column([
                 temp_line,
-                text(format!("Feels {:.0}\u{b0}  \u{b7}  {}", self.feels, self.place))
-                    .color(Token::FgDim)
-                    .size(SMALL),
+                text(format!(
+                    "Feels {:.0}\u{b0}  \u{b7}  {}",
+                    self.feels, self.place
+                ))
+                .color(Token::FgDim)
+                .size(SMALL),
             ])
             .spacing(1.0),
         ])
@@ -383,7 +508,11 @@ impl Weather {
             (Icon::Sunset, Token::Warn)
         };
         let metrics = row([
-            metric(Icon::Droplets, Token::Accent, format!("{:.0}%", self.humidity)),
+            metric(
+                Icon::Droplets,
+                Token::Accent,
+                format!("{:.0}%", self.humidity),
+            ),
             metric(Icon::Wind, Token::FgDim, format!("{:.0} km/h", self.wind)),
             metric(sun_icon, sun_tint, self.sun_label.clone()),
         ])
@@ -401,7 +530,9 @@ impl Weather {
                 column([
                     text(h.label.clone()).color(Token::FgDim).size(SMALL),
                     wmo_icon(h.code, h.is_day).view(HOUR_ICON, sky_tint(h.code, h.is_day)),
-                    text(format!("{:.0}\u{b0}", h.temp)).color(temp_color(h.temp)).size(BODY),
+                    text(format!("{:.0}\u{b0}", h.temp))
+                        .color(temp_color(h.temp))
+                        .size(BODY),
                     text(pop_str(h.pop)).color(Token::Accent).size(TINY),
                 ])
                 .spacing(4.0)
@@ -452,8 +583,26 @@ fn divider() -> Render {
     text("\u{2500}".repeat(48)).color(Token::FgDim).size(HAIR)
 }
 
+/// Percent-encode a query value (e.g. a city name with spaces or umlauts) for the geocoding URL.
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn metric(icon: Icon, tint: Token, label: String) -> Render {
-    row([icon.view(SMALL, tint), text(label).color(Token::FgDim).size(SMALL)]).spacing(4.0)
+    row([
+        icon.view(SMALL, tint),
+        text(label).color(Token::FgDim).size(SMALL),
+    ])
+    .spacing(4.0)
 }
 
 // ── WMO weathercode → icon / label / colour ─────────────────────────────────
@@ -541,7 +690,11 @@ fn sky_tint(code: u8, is_day: bool) -> Token {
 // ── small helpers ───────────────────────────────────────────────────────────
 
 fn arr_f64(obj: &Value, key: &str, i: usize) -> f64 {
-    obj[key].as_array().and_then(|a| a.get(i)).and_then(|x| x.as_f64()).unwrap_or(0.0)
+    obj[key]
+        .as_array()
+        .and_then(|a| a.get(i))
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0)
 }
 
 fn arr_str(obj: &Value, key: &str, i: usize) -> String {
@@ -591,11 +744,7 @@ fn pad_right(s: &str, width: usize) -> String {
 fn fig_temp(t: f64) -> String {
     let n = t.round() as i64;
     let digits = n.abs().to_string();
-    let pad = if n < 0 {
-        format!("-{digits}")
-    } else {
-        digits
-    };
+    let pad = if n < 0 { format!("-{digits}") } else { digits };
     if pad.chars().count() < 2 {
         format!("\u{2007}{pad}\u{b0}")
     } else {
@@ -646,19 +795,19 @@ fn ampm_hour(s: &str) -> u32 {
 /// `wmo_icon`/`condition_label` logic applies unchanged.
 fn wwo_to_wmo(code: u32) -> u8 {
     match code {
-        113 => 0,                                  // clear / sunny
-        116 => 2,                                  // partly cloudy
-        119 | 122 => 3,                            // cloudy / overcast
-        143 | 248 | 260 => 45,                     // mist / fog
-        176 | 263 | 266 | 293 | 296 | 353 => 61,   // patchy/light rain & drizzle
-        299 | 302 | 356 => 63,                     // moderate rain
-        305 | 308 | 359 => 65,                     // heavy rain
+        113 => 0,                                // clear / sunny
+        116 => 2,                                // partly cloudy
+        119 | 122 => 3,                          // cloudy / overcast
+        143 | 248 | 260 => 45,                   // mist / fog
+        176 | 263 | 266 | 293 | 296 | 353 => 61, // patchy/light rain & drizzle
+        299 | 302 | 356 => 63,                   // moderate rain
+        305 | 308 | 359 => 65,                   // heavy rain
         // sleet / freezing rain / ice pellets
         182 | 185 | 281 | 284 | 311 | 314 | 317 | 320 | 350 | 362 | 365 | 374 | 377 => 66,
         179 | 227 | 323 | 326 | 329 | 332 | 368 | 371 => 71, // snow
-        230 | 335 | 338 => 75,                     // heavy snow / blizzard
-        200 | 386 | 389 | 392 | 395 => 95,         // thunder
-        _ => 3,                                    // default: cloudy
+        230 | 335 | 338 => 75,                               // heavy snow / blizzard
+        200 | 386 | 389 | 392 | 395 => 95,                   // thunder
+        _ => 3,                                              // default: cloudy
     }
 }
 
