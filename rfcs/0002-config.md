@@ -228,7 +228,7 @@ spacing   = { zone = 8, group = 4 }      # between groups vs within a group (sca
 padding   = { x = 8, y = 2 }             # inside an island / popup (scalar ok)
 radius    = { item = 4, group = 8, popup = 10 }   # scalar also allowed
 border    = { width = 1, color = "#ffffff14" }    # hairline; or per-side/per-state below
-shadow    = { blur = 8, color = "#0008", y = 2 }  # island/popup drop shadow; off by default
+shadow    = { blur = 8, color = "#0008", x = 0, y = 2 }  # IMPLEMENTED (islands pills): partial table, or false/true/bare color. Default = the old hardcoded look, NOT off — zero config keeps today's bar
 separator = { color = "#30363d", glyph = "", width = 1 }   # color | glyph (e.g. "" "|") | both
 background = { base = "#0d1117", weak = "#161b22", strong = "#21262d" }
 text = "#e6edf3"; dim = "#7d8590"

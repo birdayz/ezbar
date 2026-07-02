@@ -190,6 +190,88 @@ impl Default for Border {
     }
 }
 
+/// `[theme].shadow` — the drop shadow under each islands pill (RFC 0002; solid
+/// draws none). Previously hardcoded in the renderer; now a token so a preset
+/// can tune or disable it. Accepts:
+///
+/// - `shadow = false` — no shadow (`true` = the default look)
+/// - `shadow = "#00000073"` — default geometry, that color
+/// - `shadow = { color?, x?, y?, blur? }` — partial table; missing keys keep
+///   their defaults
+///
+/// The default reproduces the previously-hardcoded look exactly (0.45-alpha
+/// black, 2px down, 8px blur) — zero config still means today's bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shadow {
+    pub color: Color,
+    pub x: f32,
+    pub y: f32,
+    pub blur: f32,
+}
+
+impl Default for Shadow {
+    fn default() -> Self {
+        Shadow {
+            color: Color::rgba(0.0, 0.0, 0.0, 0.45),
+            x: 0.0,
+            y: 2.0,
+            blur: 8.0,
+        }
+    }
+}
+
+impl Shadow {
+    /// No shadow at all — what `shadow = false` deserializes to.
+    pub const NONE: Shadow = Shadow {
+        color: Color::rgba(0.0, 0.0, 0.0, 0.0),
+        x: 0.0,
+        y: 0.0,
+        blur: 0.0,
+    };
+
+    pub fn iced(self) -> iced::Shadow {
+        iced::Shadow {
+            color: self.color.iced(),
+            offset: iced::Vector::new(self.x, self.y),
+            blur_radius: self.blur,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Shadow {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Toggle(bool),
+            Hex(String),
+            Table {
+                color: Option<Color>,
+                x: Option<f32>,
+                y: Option<f32>,
+                blur: Option<f32>,
+            },
+        }
+        let def = Shadow::default();
+        Ok(match Raw::deserialize(d)? {
+            Raw::Toggle(true) => def,
+            Raw::Toggle(false) => Shadow::NONE,
+            // a bare color string keeps the default geometry, recolored.
+            Raw::Hex(s) => Shadow {
+                color: Color::parse(&s)
+                    .ok_or_else(|| serde::de::Error::custom(format!("invalid color: {s:?}")))?,
+                ..def
+            },
+            Raw::Table { color, x, y, blur } => Shadow {
+                color: color.unwrap_or(def.color),
+                x: x.unwrap_or(def.x),
+                y: y.unwrap_or(def.y),
+                blur: blur.unwrap_or(def.blur),
+            },
+        })
+    }
+}
+
 /// How adjacent widgets *within a group* are divided (RFC 0005). Grouping itself
 /// (sub-islands / wider gaps) carries the macro structure; this is the optional
 /// per-widget mark on top of the spacing.
@@ -426,6 +508,8 @@ pub struct Theme {
     pub padding: f32,
     pub radius: Radius,
     pub border: Border,
+    /// islands-only: the drop shadow under each pill (solid draws none).
+    pub shadow: Shadow,
     pub background: Background,
     pub text: Color,
     pub dim: Color,
@@ -456,6 +540,7 @@ impl Default for Theme {
                 width: 1.0,
                 color: hex("#ffffff20"),
             },
+            shadow: Shadow::default(),
             background: Background::Tonal {
                 base: hex("#1e1e2e"),
                 weak: Some(hex("#313244")),
@@ -1020,6 +1105,43 @@ mod tests {
         assert_eq!(c.theme.workspaces.style.variant(), 3);
         // default is boxed
         assert_eq!(Config::default().theme.workspaces.style, WsStyle::Boxed);
+    }
+
+    #[test]
+    fn shadow_default_keeps_the_previous_hardcoded_look() {
+        // zero config == today's bar: the exact values main.rs used to hardcode.
+        let s = Config::default().theme.shadow;
+        assert_eq!(s.color, Color::rgba(0.0, 0.0, 0.0, 0.45));
+        assert_eq!((s.x, s.y, s.blur), (0.0, 2.0, 8.0));
+    }
+
+    #[test]
+    fn shadow_accepts_bool_hex_or_table() {
+        // false ⇒ no shadow at all; true ⇒ the default look, spelled out.
+        let off = parse_str("[theme]\nshadow = false").unwrap();
+        assert_eq!(off.theme.shadow, Shadow::NONE);
+        let on = parse_str("[theme]\nshadow = true").unwrap();
+        assert_eq!(on.theme.shadow, Shadow::default());
+        // a bare hex recolors the default geometry (like separator's bare hex).
+        let hex = parse_str("[theme]\nshadow = \"#7e9cd880\"").unwrap();
+        assert_eq!(hex.theme.shadow.color, Color::parse("#7e9cd880").unwrap());
+        assert_eq!(hex.theme.shadow.blur, 8.0);
+        // a partial table: given keys win, missing keys keep their defaults.
+        let tbl = parse_str("[theme.shadow]\nblur = 3\ny = 1").unwrap();
+        assert_eq!((tbl.theme.shadow.y, tbl.theme.shadow.blur), (1.0, 3.0));
+        assert_eq!(tbl.theme.shadow.color, Shadow::default().color);
+    }
+
+    #[test]
+    fn shadow_bad_color_is_an_error_not_a_panic() {
+        assert!(parse_str("[theme]\nshadow = \"nope\"").is_err());
+        // a $palette ref resolves before the deserialize sees it.
+        let c = parse_str(concat!(
+            "[palette]\nink = \"#16161d80\"\n",
+            "[theme]\nshadow = \"$ink\"",
+        ))
+        .unwrap();
+        assert_eq!(c.theme.shadow.color, Color::parse("#16161d80").unwrap());
     }
 
     #[test]

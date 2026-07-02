@@ -2240,7 +2240,9 @@ impl Bar {
             let bc = t.border.color.iced();
             // A soft drop shadow lifts each pill off the wallpaper — framing it on a
             // bright sky as well as a dark patch, where a lilac border alone washes
-            // out. This is the "floating islands" read (RFC 0005).
+            // out. This is the "floating islands" read (RFC 0005). Tunable (or
+            // removable) via `[theme].shadow`; the default keeps this exact look.
+            let sh = t.shadow.iced();
             let pill_style = move |_: &iced::Theme| container::Style {
                 background: Some(Background::Color(pillbg)),
                 border: Border {
@@ -2248,11 +2250,7 @@ impl Bar {
                     width: bw,
                     radius: r.into(),
                 },
-                shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
-                    offset: iced::Vector::new(0.0, 2.0),
-                    blur_radius: 8.0,
-                },
+                shadow: sh,
                 ..Default::default()
             };
             // Each visible island floats inside a FULL-HEIGHT cell, so its hit/hover
