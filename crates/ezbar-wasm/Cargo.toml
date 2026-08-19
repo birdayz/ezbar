@@ -11,8 +11,8 @@ license = "MIT"
 
 [dependencies]
 ezbar-plugin = { path = "../ezbar-plugin" }
-wasmtime = { version = "45", features = ["async"] }   # RFC 0008: async reactor (fibers)
-wasmtime-wasi = "45"
+wasmtime = { version = "46", features = ["async"] }   # RFC 0008: async reactor (fibers)
+wasmtime-wasi = "46"
 anyhow = "1"
 log = "0.4"
 # async (not blocking) reqwest: a host http_get suspends the guest fiber instead of
