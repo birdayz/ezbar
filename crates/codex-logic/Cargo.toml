@@ -1,0 +1,11 @@
+[package]
+name = "codex-logic"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure, host-testable logic for the ezbar `agents` module's Codex CLI support: rollout-log token/rate-limit event parsing, session cwd extraction, limit-window labeling. No I/O — mirrors crates/claude-logic's role for the Codex provider."
+
+[lib]
+
+[dependencies]
+serde_json = "1"

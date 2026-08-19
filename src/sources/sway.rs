@@ -24,11 +24,14 @@ pub struct Workspace {
 }
 
 /// The latest sway state the service publishes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     pub workspaces: Vec<Workspace>,
     pub title: String,
     pub layout: String,
+    /// con_id of the currently-focused window — so the agent dock can highlight the agent the
+    /// user just switched to *immediately* on the sway focus event (RFC 0022), not on its poll.
+    pub focused: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,10 +67,12 @@ pub fn snapshot() -> Arc<Snapshot> {
 /// Subscribe to events once, re-query the changed slice, publish a fresh snapshot.
 fn run_service(tx: &watch::Sender<Arc<Snapshot>>) -> swayipc::Fallible<()> {
     let mut q = Connection::new()?;
+    let (title, focused) = focused_node(&mut q);
     let mut snap = Snapshot {
         workspaces: fetch_workspaces(&mut q)?,
-        title: focused_title(&mut q),
+        title,
         layout: active_layout(&mut q),
+        focused,
     };
     let _ = tx.send_replace(Arc::new(snap.clone()));
 
@@ -79,7 +84,11 @@ fn run_service(tx: &watch::Sender<Arc<Snapshot>>) -> swayipc::Fallible<()> {
     for event in events {
         match event? {
             Event::Workspace(_) => snap.workspaces = fetch_workspaces(&mut q)?,
-            Event::Window(_) => snap.title = focused_title(&mut q),
+            Event::Window(_) => {
+                let (title, focused) = focused_node(&mut q);
+                snap.title = title;
+                snap.focused = focused;
+            }
             Event::Input(_) => snap.layout = active_layout(&mut q),
             _ => continue,
         }
@@ -131,6 +140,12 @@ pub fn title() -> impl Stream<Item = String> {
     dedup(snapshots().map(|s| s.title.clone()))
 }
 
+/// Focused-window **con_id** slice (deduped) — emits the moment sway's focus changes, so a
+/// subscriber (the agent dock) can repaint its "selected" highlight without waiting for its poll.
+pub fn focused_con() -> impl Stream<Item = Option<i64>> {
+    dedup(snapshots().map(|s| s.focused))
+}
+
 /// Active keyboard-layout slice (deduped).
 pub fn layout() -> impl Stream<Item = String> {
     dedup(snapshots().map(|s| s.layout.clone()))
@@ -144,6 +159,70 @@ pub fn run_command(cmd: impl Into<String>) {
             let _ = c.run_command(cmd);
         }
     });
+}
+
+/// Focus a window AND flash it so it's easy to spot — the bare focus border is often too faint,
+/// especially across several monitors. Focuses immediately, then pulses the window's opacity a few
+/// times (the flicker draws the eye) and leaves it fully opaque. Background thread; no-op if sway is
+/// unreachable.
+pub fn focus_flash(con_id: i64) {
+    std::thread::spawn(move || {
+        let Ok(mut c) = Connection::new() else { return };
+        let _ = c.run_command(format!("[con_id={con_id}] focus"));
+        // dim → full, twice; ends at 1.0 (fully opaque, the normal focused state).
+        for op in ["0.35", "1.0", "0.35", "1.0"] {
+            std::thread::sleep(Duration::from_millis(90));
+            let _ = c.run_command(format!("[con_id={con_id}] opacity {op}"));
+        }
+    });
+}
+
+/// Run a *sequence* of sway commands with a settle delay between each, on a background thread.
+/// Compound layout surgery (move → split → move) races when sent as one batch — the window move
+/// hasn't landed in the tree before the next split fires, so the split silently no-ops. Staging
+/// each step lets the tree settle; this is what makes the agent-grid build (RFC 0022 "Organize")
+/// land the same packed grid every time.
+pub fn run_staged(cmds: Vec<String>) {
+    std::thread::spawn(move || {
+        let Ok(mut c) = Connection::new() else { return };
+        for cmd in cmds {
+            let _ = c.run_command(&cmd);
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    });
+}
+
+/// Every sway **window** node as `(pid, con_id, title)` plus the currently-**focused** window's
+/// con_id — the mapping that turns a process into the window hosting it (RFC 0022 click-to-focus),
+/// which agent the user is looking at right now (the focused window), and the window title (claude
+/// sets the terminal title to the running task, so it disambiguates which session a same-cwd process
+/// is on). One short-lived blocking query; the caller walks a process's ppid chain against the map.
+/// `(empty, None)` on any IPC failure. Call off the render thread.
+pub fn window_nodes() -> (Vec<(i32, i64, String)>, Option<i64>) {
+    let Ok(mut q) = Connection::new() else {
+        return (Vec::new(), None);
+    };
+    let Ok(tree) = q.get_tree() else {
+        return (Vec::new(), None);
+    };
+    let mut out = Vec::new();
+    let mut focused = None;
+    collect_window_pids(&tree, &mut out, &mut focused);
+    (out, focused)
+}
+
+/// Walk the tree, collecting `(pid, id)` for every node that has a pid (i.e. is a real window;
+/// containers/workspaces/outputs have none), and noting the focused node's id.
+fn collect_window_pids(node: &Node, out: &mut Vec<(i32, i64, String)>, focused: &mut Option<i64>) {
+    if let Some(pid) = node.pid {
+        out.push((pid, node.id, node.name.clone().unwrap_or_default()));
+    }
+    if node.focused {
+        *focused = Some(node.id);
+    }
+    for c in node.nodes.iter().chain(node.floating_nodes.iter()) {
+        collect_window_pids(c, out, focused);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,19 +254,22 @@ fn fetch_workspaces(conn: &mut Connection) -> swayipc::Fallible<Vec<Workspace>> 
     Ok(state)
 }
 
-fn focused_title(conn: &mut Connection) -> String {
+/// The focused window's `(title, con_id)` in one tree walk — feeds both the `window_title` module
+/// and the dock's instant focus highlight.
+fn focused_node(conn: &mut Connection) -> (String, Option<i64>) {
     conn.get_tree()
         .ok()
-        .and_then(|t| focused_name(&t))
+        .and_then(|t| find_focused(&t))
+        .map(|(name, id)| (name, Some(id)))
         .unwrap_or_default()
 }
 
-fn focused_name(node: &Node) -> Option<String> {
+fn find_focused(node: &Node) -> Option<(String, i64)> {
     if node.focused {
-        return Some(node.name.clone().unwrap_or_default());
+        return Some((node.name.clone().unwrap_or_default(), node.id));
     }
     for c in node.nodes.iter().chain(node.floating_nodes.iter()) {
-        if let Some(n) = focused_name(c) {
+        if let Some(n) = find_focused(c) {
             return Some(n);
         }
     }

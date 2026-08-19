@@ -65,6 +65,9 @@ pub enum Position {
     Top,
     #[default]
     Bottom,
+    /// Vertical edges (RFC 0022) — used by the agent **dock**, and a valid bar position too.
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -457,6 +460,31 @@ impl Default for Bar {
     }
 }
 
+/// `[dock]` — the always-on vertical **agent dock** (RFC 0022): a left/right layer surface that
+/// renders the `agents` module's per-agent meter persistently (one row per agent, click-to-focus),
+/// alongside the horizontal bar. Off unless `enabled = true`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Dock {
+    pub enabled: bool,
+    /// Which edge to pin the dock to. Only `left`/`right` make sense; others fall back to `left`.
+    pub position: Position,
+    /// Dock thickness in logical px (also its reserved exclusive zone).
+    pub width: u32,
+    pub layer: Layer,
+}
+
+impl Default for Dock {
+    fn default() -> Self {
+        Dock {
+            enabled: false,
+            position: Position::Left,
+            width: 360,
+            layer: Layer::default(),
+        }
+    }
+}
+
 /// Per-side gap from the screen edges (RFC 0002). Non-zero floats the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(default)]
@@ -621,6 +649,8 @@ pub struct Plugins {
 #[serde(default)]
 pub struct Config {
     pub bar: Bar,
+    /// `[dock]` — the always-on vertical agent dock (RFC 0022). Off by default.
+    pub dock: Dock,
     pub theme: Theme,
     pub left: Vec<Entry>,
     pub center: Vec<Entry>,

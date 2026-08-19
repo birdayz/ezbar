@@ -43,6 +43,10 @@ icon_set! {
     Keyboard => "keyboard", Clock => "clock", Calendar => "calendar",
     // ── brands (Simple Icons) ──
     Github => "github", Spotify => "spotify", Kubernetes => "kubernetes",
+    // ── agent providers (Simple Icons) — the `agents` dock tags each row so Claude vs Codex
+    // reads at a glance instead of a shared generic bot glyph. No "Codex"/"ChatGPT" mark exists
+    // in Simple Icons, so Codex uses OpenAI's own logo (the product's parent brand).
+    Claude => "claude", OpenAi => "openai",
     // ── weather / misc (used by plugins) ──
     Cloud => "cloud", Sun => "sun", Moon => "moon", Alert => "alert", Dot => "dot",
     // ── weather conditions (WMO-coded, used by the weather plugin) ──

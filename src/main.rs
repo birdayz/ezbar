@@ -138,11 +138,12 @@ mod registry;
 /// semantic clusters that render as separate sub-islands (RFC 0005). The gaps between
 /// groups are the separators; the order is `clock` last so time anchors the far edge.
 const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
-    &["cpu", "memory", "temperature"], // machine vitals
-    &["ping", "github"],               // connectivity + dev
-    &["spotify"],                      // media (calendar + kube context live in WASM plugins)
-    &["stock", "volume", "battery"],   // status
-    &["clock"],                        // time — a dedicated end-cap (switcher trails)
+    &["cpu", "memory", "temperature", "disk"], // machine vitals
+    &["ping", "github"],                       // connectivity + dev
+    &["spotify"], // media (calendar + kube context live in WASM plugins)
+    &["stock", "volume", "battery"], // status
+    &["agents"],  // Claude Code agent meter (RFC 0022; native sibling of the claude wasm pill)
+    &["clock"],   // time — a dedicated end-cap (switcher trails)
 ];
 
 struct ModuleEntry {
@@ -690,6 +691,12 @@ struct BarSurface {
 struct Bar {
     /// One layer surface per matching output (RFC 0004), reconciled on hotplug.
     bars: Vec<BarSurface>,
+    /// The agent dock's surfaces (RFC 0022) — same per-output reconcile as `bars`, vertical
+    /// geometry, rendering the `agents` module's meter. Empty unless the dock is shown.
+    docks: Vec<BarSurface>,
+    /// Runtime dock visibility — initialised from `[dock] enabled`, toggled by clicking the agents
+    /// chip (`HostRequest::ToggleDock`). The reconcile creates/destroys dock surfaces to match.
+    dock_visible: bool,
     popup: Option<(window::Id, PopupKind)>,
     module_popup: Option<(window::Id, u64, PopupMode)>,
     /// The size the open module popup's surface was last given. A module whose popup is open keeps
@@ -919,22 +926,66 @@ struct BarGeom {
 fn bar_geom(b: &config::Bar, pos: config::Position) -> BarGeom {
     let h = b.height.max(1);
     let m = b.margin;
-    // Top or bottom edge; span the full width minus L/R margins.
+    let horizontal = matches!(pos, config::Position::Top | config::Position::Bottom);
     let edge = match pos {
         config::Position::Top => Anchor::Top,
         config::Position::Bottom => Anchor::Bottom,
+        config::Position::Left => Anchor::Left,
+        config::Position::Right => Anchor::Right,
     };
-    // Reserve the bar's height plus its near-edge gap so windows never overlap it.
+    // Reserve the bar's thickness plus its near-edge gap so windows never overlap it.
     let near_gap = match pos {
         config::Position::Top => m.top,
         config::Position::Bottom => m.bottom,
+        config::Position::Left => m.left,
+        config::Position::Right => m.right,
+    };
+    // Horizontal: span the width (size.0 = 0), anchored L+R. Vertical: span the height
+    // (size.1 = 0), anchored T+B — `h` is the bar's thickness on the spanning axis either way.
+    let (anchor, size) = if horizontal {
+        (edge | Anchor::Left | Anchor::Right, (0, h))
+    } else {
+        (edge | Anchor::Top | Anchor::Bottom, (h, 0))
     };
     BarGeom {
-        anchor: edge | Anchor::Left | Anchor::Right,
+        anchor,
         margin: (m.top, m.right, m.bottom, m.left),
         exclusive_zone: h as i32 + near_gap.max(0),
-        size: (0, h),
+        size,
         layer: iced_layer(b.layer),
+    }
+}
+
+/// Layer-shell geometry for the vertical agent **dock** (RFC 0022): pinned to a side edge, spanning
+/// full height, reserving its `width` as the exclusive zone so windows never sit under it.
+fn dock_geom(d: &config::Dock) -> BarGeom {
+    let w = d.width.max(1);
+    let edge = match d.position {
+        config::Position::Right => Anchor::Right,
+        // a dock is inherently vertical; any non-right position pins it to the left edge.
+        _ => Anchor::Left,
+    };
+    BarGeom {
+        anchor: edge | Anchor::Top | Anchor::Bottom,
+        margin: (0, 0, 0, 0),
+        exclusive_zone: w as i32,
+        size: (w, 0),
+        layer: iced_layer(d.layer),
+    }
+}
+
+fn dock_settings(cfg: &Config, output: &str) -> NewLayerShellSettings {
+    let g = dock_geom(&cfg.dock);
+    NewLayerShellSettings {
+        size: Some(g.size),
+        exclusive_zone: Some(g.exclusive_zone),
+        anchor: g.anchor,
+        margin: Some(g.margin),
+        layer: g.layer,
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::OutputName(output.to_string()),
+        namespace: Some("ezbar-dock".to_string()),
+        ..Default::default()
     }
 }
 
@@ -1216,13 +1267,28 @@ impl Bar {
         let outputs = desired_outputs(&config).unwrap_or_default();
         let screen_w = outputs.first().map(|o| o.width).unwrap_or(1920);
         let mut bars = Vec::new();
+        let mut docks = Vec::new();
         let mut opens = Vec::new();
+        let dock_on = config.dock.enabled;
         for o in outputs {
             let id = window::Id::unique();
             opens.push(Task::done(Message::NewLayerShell {
                 settings: bar_settings(&config, bar_pos, &o.name),
                 id,
             }));
+            // RFC 0022: a parallel dock surface per output when enabled.
+            if dock_on {
+                let did = window::Id::unique();
+                opens.push(Task::done(Message::NewLayerShell {
+                    settings: dock_settings(&config, &o.name),
+                    id: did,
+                }));
+                docks.push(BarSurface {
+                    id: did,
+                    output: o.name.clone(),
+                    width: o.width,
+                });
+            }
             bars.push(BarSurface {
                 id,
                 output: o.name,
@@ -1238,6 +1304,8 @@ impl Bar {
             .unwrap_or_else(tokio::runtime::Handle::current);
         let bar = Bar {
             bars,
+            docks,
+            dock_visible: dock_on,
             popup: None,
             module_popup: None,
             module_popup_size: None,
@@ -1266,6 +1334,10 @@ impl Bar {
     /// Is `id` one of our bar surfaces?
     fn is_bar(&self, id: window::Id) -> bool {
         self.bars.iter().any(|b| b.id == id)
+    }
+
+    fn is_dock(&self, id: window::Id) -> bool {
+        self.docks.iter().any(|d| d.id == id)
     }
 
     fn namespace() -> String {
@@ -1449,6 +1521,12 @@ impl Bar {
                     let surfaces = self.reconcile_surfaces();
                     return Task::batch([popups, surfaces]);
                 }
+                if self.is_dock(id) {
+                    // A dock surface went away (output unplugged) — drop it and let reconcile
+                    // re-create it if the output returns.
+                    self.docks.retain(|d| d.id != id);
+                    return self.reconcile_surfaces();
+                }
                 if let Some((pid, _)) = self.popup {
                     if pid == id {
                         self.popup = None;
@@ -1555,6 +1633,13 @@ impl Bar {
                 });
                 Task::batch([close_existing, place])
             }
+            HostRequest::ToggleDock => {
+                // Clicking the agents chip shows/hides the dock; reconcile creates/destroys the
+                // surfaces. Close any open popup first (the chip's hover popup may be up).
+                self.dock_visible = !self.dock_visible;
+                let popups = self.close_any_popup();
+                Task::batch([popups, self.reconcile_surfaces()])
+            }
             HostRequest::ClosePopup => {
                 if let Some((pid, inst, _)) = self.module_popup {
                     if inst == instance {
@@ -1605,9 +1690,24 @@ impl Bar {
 
     /// Left margin so a `popup_w`-wide popup is centered on `anchor_x`, clamped so it always
     /// stays fully on the output — both edges, so a right-anchored widget (e.g. the ▾
-    /// switcher) opens visibly.
+    /// switcher) opens visibly. When the dock is shown it reserves a left exclusive zone that
+    /// pushes the popup surface right by `dock_left_offset`, so both the centering anchor and the
+    /// clamp width are taken in the popup's shifted space (RFC 0022) — otherwise popups land off
+    /// by the dock width.
     fn popup_left_margin_at(&self, popup_w: u32, anchor_x: f32) -> i32 {
-        centered_left_margin(self.screen_w, popup_w, anchor_x)
+        let off = self.dock_left_offset();
+        let avail = self.screen_w.saturating_sub(off as u32);
+        centered_left_margin(avail, popup_w, anchor_x - off)
+    }
+
+    /// The dock's reserved left width — popups are pushed right by this exclusive zone. `0` when the
+    /// dock is hidden or pinned to the right edge.
+    fn dock_left_offset(&self) -> f32 {
+        if self.dock_visible && !matches!(self.config.dock.position, config::Position::Right) {
+            self.config.dock.width as f32
+        } else {
+            0.0
+        }
     }
 
     /// Cursor-anchored variant for the hardcoded popups (switcher/volume) that have no pill
@@ -1629,14 +1729,15 @@ impl Bar {
         // Clear the bar: its height + the near-edge gap it may float by + a hair.
         let m = self.config.bar.margin;
         let (edge, offset) = match self.bar_pos {
-            config::Position::Top => (Anchor::Top, m.top.max(0)),
             config::Position::Bottom => (Anchor::Bottom, m.bottom.max(0)),
+            // Top, or a vertical bar (whose module popups still drop from the top edge).
+            _ => (Anchor::Top, m.top.max(0)),
         };
         let clear = self.config.bar.height as i32 + offset + 6;
         // margin order: (top, right, bottom, left).
         let margin = match self.bar_pos {
-            config::Position::Top => (clear, 0, 0, left_margin),
             config::Position::Bottom => (0, 0, clear, left_margin),
+            _ => (clear, 0, 0, left_margin),
         };
         let output_option = match &self.cursor_output {
             Some(name) => OutputOption::OutputName(name.clone()),
@@ -1776,6 +1877,9 @@ impl Bar {
             // The same chip row renders on every output's bar surface.
             return self.bar_view();
         }
+        if self.is_dock(id) {
+            return self.dock_view();
+        }
         if let Some(p) = &self.picker {
             if id == p.id {
                 return self.picker_view(p);
@@ -1805,6 +1909,45 @@ impl Bar {
             }
         }
         Space::new().into()
+    }
+
+    /// The agent **dock** surface (RFC 0022): the `agents` module's meter rendered persistently on
+    /// a vertical side surface — one row per agent, each a click-to-focus target. The same
+    /// `popup()` content the chip shows on hover, just pinned open. Module messages (the window
+    /// selector, a row's focus click) route back through the normal `ModuleMsg` path.
+    fn dock_view(&self) -> Element<'_, Message> {
+        let bg = ThemeTokens::color(self.theme.bg);
+        let inner: Element<Message> = match self.modules.iter().find(|e| e.module.id() == "agents")
+        {
+            Some(entry) => {
+                let instance = entry.id;
+                let ctx = Ctx {
+                    instance_id: instance,
+                    theme: &self.theme,
+                };
+                match entry
+                    .module
+                    .dock_view(&ctx)
+                    .or_else(|| entry.module.popup(&ctx))
+                {
+                    Some(c) => c.map(move |m| Message::ModuleMsg { instance, msg: m }),
+                    None => Space::new().into(),
+                }
+            }
+            None => text("agents module not enabled")
+                .size(12)
+                .color(ThemeTokens::color(self.theme.fg_dim))
+                .into(),
+        };
+        container(inner)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(12)
+            .style(move |_| container::Style {
+                background: Some(Background::Color(bg)),
+                ..Default::default()
+            })
+            .into()
     }
 
     /// The native searchable picker (RFC 0018 §6): an always-focused search field (inset well, no
@@ -2086,9 +2229,17 @@ impl Bar {
             return el;
         };
         let instance = entry.id;
-        if let Some((enter, leave)) = entry.module.hover_messages() {
-            return mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
-                .interaction(Pointer)
+        let hover = entry.module.hover_messages();
+        let click = entry.module.click_message();
+        if hover.is_none() && click.is_none() {
+            return el;
+        }
+        // A pill can do BOTH: hover to preview a popup AND click to act (e.g. agents — hover shows
+        // the team, click toggles the dock). Wire whichever it declares onto one mouse_area.
+        let mut ma = mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
+            .interaction(Pointer);
+        if let Some((enter, leave)) = hover {
+            ma = ma
                 .on_enter(Message::ModuleMsg {
                     instance,
                     msg: enter,
@@ -2096,19 +2247,15 @@ impl Bar {
                 .on_exit(Message::ModuleMsg {
                     instance,
                     msg: leave,
-                })
-                .into();
+                });
         }
-        if let Some(click) = entry.module.click_message() {
-            return mouse_area(container(el).id(pill_id(instance)).center_y(Length::Fill))
-                .interaction(Pointer)
-                .on_press(Message::ModuleMsg {
-                    instance,
-                    msg: click,
-                })
-                .into();
+        if let Some(click) = click {
+            ma = ma.on_press(Message::ModuleMsg {
+                instance,
+                msg: click,
+            });
         }
-        el
+        ma.into()
     }
 
     /// If `group` is a single module that opted into whole-pill hover
@@ -2133,22 +2280,22 @@ impl Bar {
         group: &[Placed],
         widgets: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        // Hover-open a display popup, or click-open an interactive one (mutually exclusive).
-        // Either way the whole pill is an interactive target → show the hand cursor, not the
-        // compositor default (which read as a text I-beam on the popup picker).
+        // A pill can hover-open a display popup AND click-act (e.g. agents: hover previews the team,
+        // click toggles the dock). Show the hand cursor either way (not the compositor I-beam).
         use iced::mouse::Interaction::Pointer;
-        if let Some((instance, enter, leave)) = self.pill_hover(group) {
-            // Tag the pill with a stable Id so the popup can anchor to its real layout
-            // bounds (deterministic), not a one-event-stale cursor cache. See `PillBounds`.
-            // `height(Fill)` is load-bearing: the pill cell is full-height for Fitts's law
-            // (slamming the cursor to the screen edge still lands on the bar); a default
-            // `Shrink` container would collapse that hit area to the glyphs and kill the
-            // top-edge hover.
-            let tagged = container(widgets)
-                .id(pill_id(instance))
-                .height(Length::Fill);
-            return mouse_area(tagged)
-                .interaction(Pointer)
+        let hover = self.pill_hover(group);
+        let click = self.pill_click(group);
+        let Some(instance) = hover.as_ref().map(|h| h.0).or(click.as_ref().map(|c| c.0)) else {
+            return widgets;
+        };
+        // Tag the pill with a stable Id so the popup anchors to its real layout bounds. `height(Fill)`
+        // is load-bearing: the full-height cell makes the top-edge hover/click land (Fitts's law).
+        let tagged = container(widgets)
+            .id(pill_id(instance))
+            .height(Length::Fill);
+        let mut ma = mouse_area(tagged).interaction(Pointer);
+        if let Some((_, enter, leave)) = hover {
+            ma = ma
                 .on_enter(Message::ModuleMsg {
                     instance,
                     msg: enter,
@@ -2156,22 +2303,15 @@ impl Bar {
                 .on_exit(Message::ModuleMsg {
                     instance,
                     msg: leave,
-                })
-                .into();
+                });
         }
-        if let Some((instance, click)) = self.pill_click(group) {
-            let tagged = container(widgets)
-                .id(pill_id(instance))
-                .height(Length::Fill);
-            return mouse_area(tagged)
-                .interaction(Pointer)
-                .on_press(Message::ModuleMsg {
-                    instance,
-                    msg: click,
-                })
-                .into();
+        if let Some((_, click)) = click {
+            ma = ma.on_press(Message::ModuleMsg {
+                instance,
+                msg: click,
+            });
         }
-        widgets
+        ma.into()
     }
 
     /// Like [`pill_hover`](Self::pill_hover) but for a single module that opts into whole-pill
@@ -2588,6 +2728,47 @@ impl Bar {
             });
         }
 
+        // ── dock surfaces (RFC 0022): same per-output reconcile when shown; tear all down when
+        // hidden (a `[dock] enabled = false` edit, or a chip-click toggle, closes them).
+        if self.dock_visible {
+            let tracked_d: Vec<(String, window::Id)> = self
+                .docks
+                .iter()
+                .map(|d| (d.output.clone(), d.id))
+                .collect();
+            let (dclose, dcreate) = plan_surfaces(&desired_list, &tracked_d);
+            for id in &dclose {
+                tasks.push(iced::window::close(*id));
+            }
+            self.docks.retain(|d| !dclose.contains(&d.id));
+            for o in &desired {
+                if let Some(d) = self.docks.iter_mut().find(|d| d.output == o.name) {
+                    d.width = o.width;
+                }
+            }
+            for name in dcreate {
+                let width = desired
+                    .iter()
+                    .find(|o| o.name == name)
+                    .map_or(1920, |o| o.width);
+                let id = window::Id::unique();
+                log::info!("reconcile: CREATE dock {id:?} for output {name}");
+                tasks.push(Task::done(Message::NewLayerShell {
+                    settings: dock_settings(&self.config, &name),
+                    id,
+                }));
+                self.docks.push(BarSurface {
+                    id,
+                    output: name,
+                    width,
+                });
+            }
+        } else if !self.docks.is_empty() {
+            for d in self.docks.drain(..) {
+                tasks.push(iced::window::close(d.id));
+            }
+        }
+
         // If the cursor's output no longer has a bar, forget it (so popups don't
         // target a dead output) and re-base the popup-clamp width on a survivor.
         if let Some(name) = &self.cursor_output {
@@ -2742,8 +2923,9 @@ impl Bar {
                     "top" => config::Position::Top,
                     "bottom" => config::Position::Bottom,
                     _ => match self.bar_pos {
-                        config::Position::Top => config::Position::Bottom,
                         config::Position::Bottom => config::Position::Top,
+                        // Top (and any vertical bar) toggles to bottom.
+                        _ => config::Position::Bottom,
                     },
                 };
                 self.reconcile_bar_geometry(next)

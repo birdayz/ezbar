@@ -226,6 +226,8 @@ impl Harness {
                     self.popup = None;
                 }
             }
+            // The harness has no dock surface; nothing to toggle.
+            HostRequest::ToggleDock => {}
         }
     }
 

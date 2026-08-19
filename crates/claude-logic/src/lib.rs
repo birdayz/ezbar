@@ -23,6 +23,9 @@ pub struct Session {
     /// `session_name` — the title Claude Code shows for the session (what the user actually named
     /// the work, e.g. "Convert calendar to WASM"). Empty when the session hasn't been named.
     pub name: String,
+    /// `context_window.used_percentage` — how full the agent's context window is (0..100). The
+    /// actionable "is this agent about to compact / hit the wall" number. `None` if absent.
+    pub context_pct: Option<f64>,
 }
 
 /// Parse a session snapshot into its [`Session`] counters. `None` only when the cost figure is
@@ -33,10 +36,12 @@ pub fn parse_session(json: &str) -> Option<Session> {
     let cost = v["cost"]["total_cost_usd"].as_f64()?;
     let api_secs = v["cost"]["total_api_duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
     let name = v["session_name"].as_str().unwrap_or("").trim().to_string();
+    let context_pct = v["context_window"]["used_percentage"].as_f64();
     Some(Session {
         cost,
         api_secs,
         name,
+        context_pct,
     })
 }
 
@@ -45,55 +50,71 @@ pub fn parse_session(json: &str) -> Option<Session> {
 /// what it has *observed since it started*, like Recount records from the moment you open it.
 pub type Damage = (i64, f64, f64);
 
-/// Pull `(message.id, output_tokens)` out of one transcript `.jsonl` line, or `None` if it isn't an
-/// assistant turn carrying usage. The session JSON has no cumulative token counter, so output
-/// throughput is summed from the transcript (RFC: dedup by `message.id` — Claude writes each
-/// assistant message 3–4× identically). Only call this on a line the caller has size-bounded; a
-/// multi-MB tool-result line is not an assistant-usage line and is skipped before it reaches here.
-pub fn parse_assistant_out(line: &str) -> Option<(String, u64)> {
+/// Pull `(message.id, output_tokens, input_tokens)` out of one transcript `.jsonl` line, or `None`
+/// if it isn't an assistant turn carrying usage. The session JSON has no cumulative token counter,
+/// so throughput is summed from the transcript (RFC: dedup by `message.id` — Claude writes each
+/// assistant message 3–4× identically). **input** is the full token volume the model read:
+/// `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` (cache re-reads included,
+/// so it's the honest total fed in). Only call on a size-bounded line; a multi-MB tool-result line
+/// is not an assistant-usage line and is skipped before it reaches here.
+pub fn parse_assistant_usage(line: &str) -> Option<(String, u64, u64)> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v["type"].as_str()? != "assistant" {
         return None;
     }
     let id = v["message"]["id"].as_str()?.to_string();
-    let out = v["message"]["usage"]["output_tokens"].as_u64()?;
-    Some((id, out))
+    let u = &v["message"]["usage"];
+    let out = u["output_tokens"].as_u64()?;
+    let inp = u["input_tokens"].as_u64().unwrap_or(0)
+        + u["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+        + u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    Some((id, out, inp))
 }
 
-/// Cumulative output tokens from a transcript stream, deduping Claude's consecutive re-writes of
-/// the same assistant message (same `message.id`). Each message is counted **once, at its final
-/// `output_tokens`** — the re-writes are sometimes streaming partials (`out=2` … then `out=3760`),
-/// so we keep the latest value for the in-flight id and only fold it into the total when the id
-/// changes. Fed line-by-line and **resumable across ticks**: persisting `(last_id, last_tokens)`
-/// means a message whose duplicate lines straddle an incremental-read boundary is still counted
-/// once, at its final value.
+/// Cumulative **output and input** tokens from a transcript stream, deduping Claude's consecutive
+/// re-writes of the same assistant message (same `message.id`). Each message is counted **once, at
+/// its final usage** — the re-writes are sometimes streaming partials (`out=2` … then `out=3760`),
+/// so we keep the latest values for the in-flight id and only fold them into the totals when the id
+/// changes. Fed line-by-line and **resumable across ticks**: persisting the in-flight `(id, out,
+/// in)` means a message whose duplicate lines straddle an incremental-read boundary is still
+/// counted once, at its final value.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TokenCounter {
     /// `message.id` of the in-flight (not-yet-folded) message.
     last_id: String,
-    /// Its latest `output_tokens` — updated on every re-write, folded into `finalized` when the id
-    /// changes (so a streaming message is counted at its final, largest value).
-    last_tokens: u64,
-    /// Sum of all messages whose id has since changed (i.e. finalized).
-    finalized: u64,
+    /// Its latest `output_tokens` — folded into `finalized_out` when the id changes.
+    last_out: u64,
+    /// Its latest input total — folded into `finalized_in` when the id changes.
+    last_in: u64,
+    /// Sum of finalized messages' output tokens.
+    finalized_out: u64,
+    /// Sum of finalized messages' input tokens.
+    finalized_in: u64,
 }
 
 impl TokenCounter {
     /// Feed one transcript line. On a new `message.id`, the previous message is finalized; the
-    /// current id's `output_tokens` is always updated to the latest line's value.
+    /// current id's usage is always updated to the latest line's value.
     pub fn push_line(&mut self, line: &str) {
-        if let Some((id, out)) = parse_assistant_out(line) {
+        if let Some((id, out, inp)) = parse_assistant_usage(line) {
             if id != self.last_id {
-                self.finalized += self.last_tokens;
+                self.finalized_out += self.last_out;
+                self.finalized_in += self.last_in;
                 self.last_id = id;
             }
-            self.last_tokens = out;
+            self.last_out = out;
+            self.last_in = inp;
         }
     }
 
-    /// Cumulative output tokens (finalized messages + the in-flight one at its latest value).
+    /// Cumulative **output** tokens (finalized + the in-flight one at its latest value).
     pub fn total(&self) -> u64 {
-        self.finalized + self.last_tokens
+        self.finalized_out + self.last_out
+    }
+
+    /// Cumulative **input** tokens (finalized + in-flight), cache re-reads included.
+    pub fn total_in(&self) -> u64 {
+        self.finalized_in + self.last_in
     }
 }
 
@@ -112,11 +133,20 @@ pub fn tps(anchor_tokens: u64, anchor_active: f64, tokens: u64, active: f64) -> 
 pub type Sample = (i64, f64, f64, u64);
 
 /// Windowed **($/hr, tokens/s)** over `[win_start, now]`, both per *active* second like [`dps`]/
-/// [`tps`]. The baseline is the earliest `ring` sample at/after `win_start`; but when the window
-/// reaches at or before our oldest sample (e.g. the "All" window, or a session younger than the
-/// window) we use `anchor` — the true first-seen `(cost, api_secs, out_tokens)` — so "All" measures
-/// since ezbar started, not just since the ring's 24h horizon. `now`-side values are passed in.
-/// `(0.0, 0.0)` when there's no active-time delta.
+/// [`tps`]. When the `ring` fully covers the window, both measure from its earliest in-window
+/// sample. Otherwise the two counters' baselines diverge, because they have different histories:
+///
+/// * **cost** is cumulative session-lifetime (Claude Code's statusline snapshot), so for the
+///   **All** window its baseline is `0` — "All" $/hr is the session's *overall* average (Recount's
+///   overall segment) and survives an ezbar **restart** over an already-spending agent. (The old
+///   code anchored cost at first-seen, so a restart re-anchored at the current cost and read
+///   `$0/hr` until fresh spend landed — the "it shows 0$/hr" bug.)
+/// * **tokens** are tailed from the transcript's EOF at first sight, so they carry no pre-watch
+///   history; their baseline stays the `anchor` (since ezbar started watching) in every window.
+///
+/// Active-time is therefore taken per-metric (lifetime active for the All $/hr, since-sight active
+/// for tok/s). A Today/1h window whose ring is too short to cover it falls back to the anchor for
+/// both, as before. `(0.0, 0.0)` when there's no active-time delta. `now`-side values are passed in.
 pub fn windowed_rate(
     ring: &[Sample],
     anchor: (f64, f64, u64),
@@ -126,18 +156,35 @@ pub fn windowed_rate(
     tokens: u64,
 ) -> (f64, f64) {
     let in_window = ring.iter().find(|s| s.0 >= win_start);
-    // Window reaches to/before our oldest sample (or ring empty) ⇒ the real baseline is the anchor.
+    // Does the ring extend back to/before the window start? If not (or it's empty), the in-window
+    // sample isn't a true baseline, so we fall back per-metric below.
     let reaches_start = ring.first().map(|o| o.0 >= win_start).unwrap_or(true);
-    let (c0, a0, t0) = match in_window {
-        Some(s) if !reaches_start => (s.1, s.2, s.3),
-        _ => anchor,
+    let is_all = win_start == i64::MIN;
+    // Per-metric baselines: (cost_c0, cost_active0, tok_t0, tok_active0).
+    let (cost_c0, cost_a0, tok_t0, tok_a0) = match in_window {
+        // Ring covers the window ⇒ both measure from the same in-window sample.
+        Some(s) if !reaches_start => (s.1, s.2, s.3, s.2),
+        // All: cost from session start (0), tokens from first-sight (the anchor).
+        _ if is_all => (0.0, 0.0, anchor.2, anchor.1),
+        // Today/1h with too-short a ring: anchor (since-sight) for both, as before.
+        _ => (anchor.0, anchor.1, anchor.2, anchor.1),
     };
-    let dactive = active - a0;
-    if dactive <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let dps = ((cost - c0).max(0.0) / dactive) * 3600.0;
-    let tps = (tokens.saturating_sub(t0) as f64) / dactive;
+    let dps = {
+        let d = active - cost_a0;
+        if d <= 0.0 {
+            0.0
+        } else {
+            (cost - cost_c0).max(0.0) / d * 3600.0
+        }
+    };
+    let tps = {
+        let d = active - tok_a0;
+        if d <= 0.0 {
+            0.0
+        } else {
+            tokens.saturating_sub(tok_t0) as f64 / d
+        }
+    };
     (dps, tps)
 }
 
@@ -302,8 +349,10 @@ pub fn idle_str(secs: i64) -> String {
         format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m", secs / 60)
-    } else {
+    } else if secs < 86400 {
         format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
     }
 }
 
@@ -444,19 +493,45 @@ mod tests {
     }
 
     #[test]
-    fn parse_assistant_out_only_assistant_usage() {
+    fn parse_assistant_usage_out_and_input() {
+        // input = input_tokens + cache_creation + cache_read (cache re-reads included).
         assert_eq!(
-            parse_assistant_out(
+            parse_assistant_usage(
+                r#"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":2,"cache_creation_input_tokens":1950,"cache_read_input_tokens":424332,"output_tokens":42}}}"#
+            ),
+            Some(("m1".to_string(), 42, 426284))
+        );
+        // output present, input fields absent → input 0.
+        assert_eq!(
+            parse_assistant_usage(
                 r#"{"type":"assistant","message":{"id":"m1","usage":{"output_tokens":42}}}"#
             ),
-            Some(("m1".to_string(), 42))
+            Some(("m1".to_string(), 42, 0))
         );
-        assert_eq!(parse_assistant_out(r#"{"type":"user","message":{}}"#), None);
         assert_eq!(
-            parse_assistant_out(r#"{"type":"assistant","message":{"id":"m2"}}"#),
+            parse_assistant_usage(r#"{"type":"user","message":{}}"#),
+            None
+        );
+        assert_eq!(
+            parse_assistant_usage(r#"{"type":"assistant","message":{"id":"m2"}}"#),
             None // no usage
         );
-        assert_eq!(parse_assistant_out("not json"), None);
+        assert_eq!(parse_assistant_usage("not json"), None);
+    }
+
+    #[test]
+    fn token_counter_sums_input_too() {
+        let l = |id: &str, out: u64, inp: u64| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"cache_read_input_tokens":{inp},"output_tokens":{out}}}}}}}"#
+            )
+        };
+        let mut c = TokenCounter::default();
+        c.push_line(&l("a", 100, 5000));
+        c.push_line(&l("a", 100, 5000)); // dup, not recounted
+        c.push_line(&l("b", 50, 6000));
+        assert_eq!(c.total(), 150);
+        assert_eq!(c.total_in(), 11000);
     }
 
     #[test]
@@ -475,7 +550,7 @@ mod tests {
             (5000, 4.0, 250.0, 4000u64), // newest
         ];
         let (cost, active, tokens) = (4.0, 250.0, 4000u64);
-        // All: window reaches before the oldest sample ⇒ baseline = anchor (since ezbar started).
+        // All: cost from session start (0) — here the anchor is also 0, so it matches lifetime.
         let (dps_all, tps_all) = windowed_rate(&ring, anchor, i64::MIN, cost, active, tokens);
         assert!((dps_all - (4.0 / 250.0 * 3600.0)).abs() < 1e-6);
         assert!((tps_all - (4000.0 / 250.0)).abs() < 1e-6);
@@ -485,6 +560,21 @@ mod tests {
         assert!((tps_1h - (1000.0 / 50.0)).abs() < 1e-6);
         // empty ring ⇒ anchor baseline; no active delta ⇒ 0.
         assert_eq!(windowed_rate(&[], anchor, 1400, 0.0, 0.0, 0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn all_window_measures_session_lifetime_not_since_watch() {
+        // ezbar only started watching after the session had already spent $10 over 100s active
+        // and emitted 5000 tokens — so the first-seen anchor is nonzero (the post-restart case).
+        // "All" $/hr must still be the *session* average ($12 / 150s active), not Δ-since-watch
+        // (which would be $2 / 50s); tokens, tailed only from first sight, stay measured from the
+        // anchor (1000 tok / 50s). This is the regression guard for the "shows 0$/hr" bug.
+        let anchor = (10.0, 100.0, 5000u64);
+        let ring = vec![(2000i64, 12.0, 150.0, 6000u64)];
+        let (cost, active, tokens) = (12.0, 150.0, 6000u64);
+        let (dps_all, tps_all) = windowed_rate(&ring, anchor, i64::MIN, cost, active, tokens);
+        assert!((dps_all - (12.0 / 150.0 * 3600.0)).abs() < 1e-6);
+        assert!((tps_all - (1000.0 / 50.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -500,6 +590,21 @@ mod tests {
                 .unwrap()
                 .name,
             ""
+        );
+        // context_window.used_percentage → context_pct (None when absent)
+        assert_eq!(
+            parse_session(
+                r#"{"cost":{"total_cost_usd":1.0},"context_window":{"used_percentage":42}}"#
+            )
+            .unwrap()
+            .context_pct,
+            Some(42.0)
+        );
+        assert_eq!(
+            parse_session(r#"{"cost":{"total_cost_usd":1.0}}"#)
+                .unwrap()
+                .context_pct,
+            None
         );
     }
 

@@ -157,6 +157,9 @@ pub enum PopupMode {
 pub enum HostRequest {
     OpenPopup(PopupMode),
     ClosePopup,
+    /// Toggle the agent dock (RFC 0022) on/off — emitted by the dock's source module so clicking
+    /// its bar chip shows/hides the sidebar. A no-op for hosts without a dock.
+    ToggleDock,
 }
 
 /// Returned from `update`: an iced task plus typed host requests.
@@ -223,6 +226,14 @@ pub trait Module: Send {
     /// Desired popup size in logical px. `None` uses the host's default. Override
     /// when the popup content is much smaller/larger than the default surface.
     fn popup_size(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// Optional **dock** rendering (RFC 0022): a vertical, persistent variant of this module's
+    /// detail view, for the agent dock surface. `None` (the default) ⇒ the host falls back to
+    /// [`popup`](Module::popup). Like `popup`, it may emit `ModMsg` (clicks) but not `HostRequest`.
+    fn dock_view(&self, ctx: &Ctx) -> Option<iced::Element<'_, ModMsg>> {
+        let _ = ctx;
         None
     }
 

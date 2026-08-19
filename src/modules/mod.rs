@@ -1,5 +1,6 @@
 //! Compile-in modules implementing `ezbar_plugin::Module` (RFC 0001, phase 1).
 
+pub mod agents;
 pub mod battery;
 pub mod clock;
 pub mod cpu;
@@ -323,7 +324,8 @@ pub fn is_module(id: &str) -> bool {
     wasm_plugin_path(id).is_some()
         || matches!(
             id,
-            "cpu"
+            "agents"
+                | "cpu"
                 | "github"
                 | "custom"
                 | "disk"
@@ -433,6 +435,7 @@ pub fn build(
     rt: &tokio::runtime::Handle,
 ) -> Option<Box<dyn Module>> {
     match id {
+        "agents" => Some(Box::new(agents::Agents::new(instance, cfg))),
         "cpu" => Some(Box::new(cpu::Cpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
