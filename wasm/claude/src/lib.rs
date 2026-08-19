@@ -18,14 +18,16 @@
 //! ## DPS (a real damage meter — no external tool, no `exec`)
 //! Per agent we sample two cumulative counters from Claude Code's own per-session statusline
 //! snapshot (`~/.claude/ezbar/sessions/<id>.json`, written by the ezbar wrapper): `total_cost_usd`
-//! (the "damage") and `total_api_duration_ms` (the seconds the model was actually working). The
-//! first time ezbar sees a session it **anchors** that pair; DPS is then `Δcost / Δactive` from the
-//! anchor to now — the *overall* average since the meter started, exactly like Recount's overall
-//! segment (total damage ÷ time-in-combat), not a recent window. Cost per hour of *active* model
-//! time, so wall-clock idle (an agent parked waiting for you) neither inflates nor dilutes it, and
-//! the number is steady rather than twitching on the last turn. The combined $/hr is one coherent
-//! number everywhere — the chip, the popup header, the sum of the rows, and the trend sparkline all
-//! show it. No `ccusage`, no token-pricing math — just `fs`.
+//! (the "damage") and `total_api_duration_ms` (the seconds the model was actually working). DPS
+//! (the "All" window) is `cost / active` over the session's whole **lifetime** — the *overall*
+//! average, exactly like Recount's overall segment (total damage ÷ time-in-combat), not a recent
+//! window. Measuring cost from session start — not from whenever ezbar happened to start watching —
+//! is what keeps it honest across an ezbar **restart**: a fleet of already-spending agents still
+//! reads its real $/hr instead of collapsing to `$0` until it burns fresh money. Cost per hour of
+//! *active* model time, so wall-clock idle (an agent parked waiting for you) neither inflates nor
+//! dilutes it, and the number is steady rather than twitching on the last turn. The combined $/hr
+//! is one coherent number everywhere — the chip, the popup header, the sum of the rows, and the
+//! trend sparkline all show it. No `ccusage`, no token-pricing math — just `fs`.
 //!
 //! ## Windowed rates (All / Today / 1h)
 //! The session snapshot has no token counter, so **tokens/s** is summed from the transcript files
@@ -158,9 +160,10 @@ struct Claude {
     limits: Option<Limits>,
     /// sparse `(epoch, five_hour_remaining%)` samples to project time-to-limit.
     limit_hist: Vec<(i64, f64)>,
-    /// per-session **all-time anchor** — the first `(cost, api_secs, out_tokens)` ezbar saw. The
-    /// baseline for the "All" window, so it measures everything since the meter started watching
-    /// (like Recount's overall segment). O(1) per session.
+    /// per-session **first-seen anchor** — the first `(cost, api_secs, out_tokens)` ezbar saw.
+    /// The All window measures cost from session start (baseline 0, so a restart can't zero it),
+    /// but **tokens** from this anchor — the transcript is only tailed from first sight, so it has
+    /// no earlier token history to measure against. O(1) per session.
     anchors: HashMap<String, (f64, f64, u64)>,
     /// per-session **sample ring** — `(epoch, cost, api_secs, out_tokens)` at ≈1-min resolution for
     /// the last 24h, the baselines for the "Today"/"1h" windows. Bounded + pruned to live sessions.
@@ -305,7 +308,7 @@ impl Plugin for Claude {
             } else {
                 Token::FgDim
             };
-            parts.push(text(format!("${total_dps:.0}/hr")).size(13.0).color(dps_color));
+            parts.push(text(fmt_rate(total_dps)).size(13.0).color(dps_color));
             // Inline sparkline of the combined $/hr — the SAME `dps_hist` the popup charts, so the
             // bar carries the team's spend *trend* at a glance (the cpu/temperature-style chip
             // graph), not just the instantaneous number. `Generic` auto-fits the y-range to the
@@ -397,7 +400,7 @@ impl Plugin for Claude {
         ];
         if total > 0 {
             hdr.push(
-                text(format!("\u{00b7} ${total_dps:.0}/hr"))
+                text(format!("\u{00b7} {}", fmt_rate(total_dps)))
                     .size(12.0)
                     .color(if total_dps >= 1.0 {
                         Token::Accent
@@ -432,7 +435,7 @@ impl Plugin for Claude {
                 // the column still aligns; the Accent rows are exactly the ones summed into the
                 // header (`live_dps`), so the bright values still foot to the headline.
                 let live = burning(a);
-                let rate = format!("${:.0}/hr", a.dps.max(0.0));
+                let rate = fmt_rate(a.dps);
                 let total = format!("${:.0}", a.cost);
                 let tok = fmt_tps(a.tps);
                 let mut r = vec![
@@ -709,8 +712,9 @@ impl Claude {
             a.out_tokens = sum;
         }
 
-        // Anchor each session's first-seen counters (the all-time "All" baseline) and append a
-        // coarse timestamped sample (≈1-min resolution, last 24h) — these feed the windowed rates.
+        // Anchor each session's first-seen counters (the token baseline for All; the full baseline
+        // for Today/1h when the ring is short — cost in All measures from session start, not this)
+        // and append a coarse timestamped sample (≈1-min resolution, last 24h) for the windows.
         for a in &agents {
             if a.session.is_empty() {
                 continue;
@@ -822,12 +826,13 @@ impl Claude {
     }
 }
 
-/// Is this agent **spending** — a real $/hr and not abandoned (parked past `STALE_SECS`)? Its
-/// overall-average $/hr then counts toward the live headline and paints Accent. A briefly-idle
+/// Is this agent **spending** — any positive $/hr and not abandoned (parked past `STALE_SECS`)?
+/// Its overall-average $/hr then counts toward the live headline and paints Accent. A briefly-idle
 /// agent (between turns) still counts, so the headline doesn't collapse to $0 whenever the fleet
-/// is momentarily waiting; only a long-abandoned session drops out.
+/// is momentarily waiting; only a long-abandoned session drops out. (No `>= $1` floor — a real
+/// sub-dollar rate is still money moving, and flooring it could make three live agents read `$0/hr`.)
 fn burning(a: &Agent) -> bool {
-    a.dps >= 1.0 && a.idle < STALE_SECS
+    a.dps > 0.0 && a.idle < STALE_SECS
 }
 
 // ── rendering helpers ────────────────────────────────────────────────────────
@@ -911,6 +916,20 @@ fn cmp_desc(a: f64, b: f64) -> std::cmp::Ordering {
 fn pad_num(s: &str, width: usize) -> String {
     let pad = width.saturating_sub(s.chars().count());
     format!("{}{}", "\u{2007}".repeat(pad), s)
+}
+
+/// Spend rate as `$N/hr` — but a positive sub-dollar rate renders `<$1/hr`, never the bare `$0`
+/// that `${x:.0}/hr` rounds to. A fleet that IS spending (any of it under a dollar an hour) then
+/// never looks identical to an idle one. A true zero stays `$0/hr`.
+fn fmt_rate(dps: f64) -> String {
+    let d = dps.max(0.0);
+    if d <= 0.0 {
+        "$0/hr".to_string()
+    } else if d < 1.0 {
+        "<$1/hr".to_string()
+    } else {
+        format!("${d:.0}/hr")
+    }
 }
 
 /// Output throughput as `45 t/s` / `1.2k t/s` (tokens per active second).
