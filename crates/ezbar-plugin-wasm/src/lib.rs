@@ -143,6 +143,35 @@ impl Chart {
     }
 }
 
+/// A dual-axis line chart: two series sharing the x-axis, each auto-scaled to its **own** y-range
+/// (so a temperature line and a UV-index line read on independent left/right axes) and drawn in its
+/// own colour. `a_*` is the primary (left-axis) series, `b_*` the secondary (right-axis).
+pub struct DualChart {
+    pub a_values: Vec<f64>,
+    pub a_line: Paint,
+    pub a_labels: Vec<String>,
+    pub b_values: Vec<f64>,
+    pub b_line: Paint,
+    pub b_labels: Vec<String>,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl DualChart {
+    pub fn view(self) -> Render {
+        Render::DualChart {
+            a_values: self.a_values,
+            a_line: self.a_line,
+            a_labels: self.a_labels,
+            b_values: self.b_values,
+            b_line: self.b_line,
+            b_labels: self.b_labels,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
 /// Cross-axis alignment of a row/column.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Align {
@@ -193,6 +222,16 @@ pub enum Render {
     Chart {
         values: Vec<f64>,
         line: Paint,
+        width: f32,
+        height: f32,
+    },
+    DualChart {
+        a_values: Vec<f64>,
+        a_line: Paint,
+        a_labels: Vec<String>,
+        b_values: Vec<f64>,
+        b_line: Paint,
+        b_labels: Vec<String>,
         width: f32,
         height: f32,
     },
@@ -512,6 +551,16 @@ pub enum WireNode {
         width: f32,
         height: f32,
     },
+    DualChart {
+        a_values: Vec<f64>,
+        a_line: Paint,
+        a_labels: Vec<String>,
+        b_values: Vec<f64>,
+        b_line: Paint,
+        b_labels: Vec<String>,
+        width: f32,
+        height: f32,
+    },
     Spacer(f32),
 }
 
@@ -593,6 +642,25 @@ fn push(r: &Render, out: &mut Vec<WireNode>) -> u32 {
             width: *width,
             height: *height,
         },
+        Render::DualChart {
+            a_values,
+            a_line,
+            a_labels,
+            b_values,
+            b_line,
+            b_labels,
+            width,
+            height,
+        } => WireNode::DualChart {
+            a_values: a_values.clone(),
+            a_line: *a_line,
+            a_labels: a_labels.clone(),
+            b_values: b_values.clone(),
+            b_line: *b_line,
+            b_labels: b_labels.clone(),
+            width: *width,
+            height: *height,
+        },
         Render::Spacer(px) => WireNode::Spacer(*px),
     };
     out.push(node);
@@ -639,7 +707,8 @@ macro_rules! export_plugin {
 pub mod prelude {
     pub use crate::widget::*;
     pub use crate::{
-        export_plugin, Align, Chart, Ctx, Event, Feed, Graph, GraphKind, Icon, Paint, Plugin,
+        export_plugin, Align, Chart, Ctx, DualChart, Event, Feed, Graph, GraphKind, Icon, Paint,
+        Plugin,
         PointerKind, Render, SwayState, SwayWorkspace, Token,
     };
 }

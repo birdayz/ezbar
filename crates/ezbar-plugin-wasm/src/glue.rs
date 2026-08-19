@@ -214,6 +214,25 @@ fn to_node(n: &WireNode) -> p::ui::Node {
             width: *width,
             height: *height,
         }),
+        WireNode::DualChart {
+            a_values,
+            a_line,
+            a_labels,
+            b_values,
+            b_line,
+            b_labels,
+            width,
+            height,
+        } => N::DualChart(p::ui::DualChartNode {
+            a_values: a_values.clone(),
+            a_line: paint(*a_line),
+            a_labels: a_labels.clone(),
+            b_values: b_values.clone(),
+            b_line: paint(*b_line),
+            b_labels: b_labels.clone(),
+            width: *width,
+            height: *height,
+        }),
         WireNode::Spacer(px) => N::Spacer(*px),
     }
 }

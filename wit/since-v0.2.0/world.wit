@@ -51,6 +51,8 @@ interface ui {
     record graph-node { values: list<f64>, kind: graph-kind, line: paint }
     // a high-fidelity smoothed gradient area chart (the stock-popup renderer)
     record chart-node { values: list<f64>, line: paint, width: f32, height: f32 }
+    // two independently-scaled series sharing an x-axis (temp °C + UV index) — a dual-axis line chart
+    record dual-chart-node { a-values: list<f64>, a-line: paint, a-labels: list<string>, b-values: list<f64>, b-line: paint, b-labels: list<string>, width: f32, height: f32 }
     // child indices into the flat `nodes` arena of a `tree` (avoids recursive
     // WIT variants and makes the host's incremental depth/count cap trivial).
     record layout-node { children: list<u32>, spacing: f32, align: align }
@@ -67,6 +69,7 @@ interface ui {
         graph(graph-node),
         chart(chart-node),
         spacer(f32),
+        dual-chart(dual-chart-node),
     }
     // A render is a flat arena of nodes; `root` indexes the top node. The host
     // walks it iteratively with a hard cap on count and depth.

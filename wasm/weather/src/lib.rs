@@ -18,10 +18,13 @@
 
 use ezbar_plugin_wasm::prelude::*;
 use serde_json::Value;
+use std::collections::HashMap;
 
 struct HourPt {
-    label: String, // "15"
+    label: String,    // "15"
+    day: String,      // "Mo" — two-letter weekday, for the day marker above the strip
     temp: f64,
+    uv: f64,          // UV index — the dual-chart's right-axis series
     code: u8,
     pop: u8,
     is_day: bool,
@@ -43,6 +46,10 @@ struct Weather {
     located: bool,
     /// `[modules.weather].name` was set — an explicit label that the resolver must not overwrite.
     name_override: bool,
+    /// `[modules.weather].model`: the open-meteo forecast model. Default `icon_seamless` (DWD's
+    /// global ICON blend, high-res over central Europe) — the `best_match` blend was demonstrably
+    /// wrong here (invented a storm). Override e.g. `best_match`, `gfs_seamless`, `ecmwf_ifs025`.
+    model: String,
     place: String,
     lat: String,
     lon: String,
@@ -66,6 +73,7 @@ impl Default for Weather {
             city: "auto".into(), // IP-geolocate unless [modules.weather].city / lat+lon say otherwise
             located: false,
             name_override: false,
+            model: "icon_seamless".into(), // DWD ICON forecast model (best_match was unreliable)
             place: String::new(),
             lat: String::new(), // resolved from `city`/auto on the first tick — no hardcoded default
             lon: String::new(),
@@ -120,6 +128,7 @@ impl Plugin for Weather {
                     lon_set = true;
                 }
                 "city" => self.city = v.clone(),
+                "model" => self.model = v.clone(),
                 "name" => {
                     self.place = v.clone();
                     self.name_override = true;
@@ -151,6 +160,11 @@ impl Plugin for Weather {
         // *unconditionally* (RFC 0011 one-shot timer): a longer cadence on good data, a
         // shorter retry on error — never leave ourselves un-armed.
         let ok = self.fetch_open_meteo(ctx) || self.fetch_wttr(ctx);
+        // Override the CURRENT block with the nearest DWD station's MEASURED observation (Bright
+        // Sky). Models forecast a *grid point* and can be plain wrong for "now"; this is a real
+        // station reading. Best-effort: a no-op where there's no nearby station (outside DE/EU),
+        // leaving the model's current in place.
+        self.fetch_measured_current(ctx);
         ctx.set_timeout(if ok { REFRESH_MS } else { RETRY_MS });
         ok
     }
@@ -194,6 +208,7 @@ impl Plugin for Weather {
             container(
                 column([
                     self.header(),
+                    self.temp_uv_chart(),
                     self.hourly_strip(),
                     divider(),
                     self.daily_strip(),
@@ -277,15 +292,16 @@ impl Weather {
         let url = format!(
             "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
              &current=temperature_2m,apparent_temperature,weathercode,is_day,windspeed_10m,relative_humidity_2m,precipitation\
-             &hourly=temperature_2m,weathercode,precipitation_probability\
+             &hourly=temperature_2m,weathercode,precipitation_probability,uv_index\
              &daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset\
-             &forecast_days=4&timezone=auto",
-            self.lat, self.lon
+             &forecast_days=4&models={}&timezone=auto",
+            self.lat, self.lon, self.model
         );
         match ctx.http_get(&url) {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(v) if v["current"].is_object() => {
-                    self.ingest(&v);
+                    let uv = self.fetch_uv(ctx);
+                    self.ingest(&v, &uv);
                     true
                 }
                 _ => false, // error body (e.g. quota exceeded) — let the fallback try
@@ -295,6 +311,70 @@ impl Weather {
                 false
             }
         }
+    }
+
+    /// UV index `timestamp -> value`, fetched WITHOUT a model pin. The chip's pinned regional model
+    /// (DWD ICON) doesn't compute UV — it's a global product — so a tiny separate request to
+    /// open-meteo's default model fills it. Keyed by ISO timestamp so it aligns with whatever hours
+    /// `ingest` picks. Empty map on any failure (the chart just omits the UV line).
+    fn fetch_uv(&self, ctx: &mut dyn Ctx) -> HashMap<String, f64> {
+        let mut map = HashMap::new();
+        let url = format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}\
+             &hourly=uv_index&forecast_days=4&timezone=auto",
+            self.lat, self.lon
+        );
+        if let Ok(bytes) = ctx.http_get(&url) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                let h = &v["hourly"];
+                if let (Some(times), Some(uvs)) = (h["time"].as_array(), h["uv_index"].as_array()) {
+                    for (t, u) in times.iter().zip(uvs.iter()) {
+                        if let (Some(ts), Some(uv)) = (t.as_str(), u.as_f64()) {
+                            map.insert(ts.to_string(), uv);
+                        }
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Override the current block with the nearest DWD station's MEASURED reading via Bright Sky
+    /// (api.brightsky.dev / DWD open data). A no-op (keeps the model's current) when there's no
+    /// station near `lat/lon` — Bright Sky covers Germany and parts of Europe. This is the
+    /// "actually measured, not modelled" current the chip shows.
+    fn fetch_measured_current(&mut self, ctx: &mut dyn Ctx) -> bool {
+        let url = format!(
+            "https://api.brightsky.dev/current_weather?lat={}&lon={}",
+            self.lat, self.lon
+        );
+        let Ok(bytes) = ctx.http_get(&url) else {
+            return false;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        let w = &v["weather"];
+        let Some(temp) = w["temperature"].as_f64() else {
+            return false; // no nearby station → keep the model's current
+        };
+        self.temp = temp;
+        if let Some(h) = w["relative_humidity"].as_f64() {
+            self.humidity = h;
+        }
+        if let Some(ws) = w["wind_speed_10"].as_f64() {
+            self.wind = ws;
+        }
+        let icon = w["icon"].as_str().unwrap_or("");
+        if !icon.is_empty() {
+            self.is_day = !icon.ends_with("-night");
+        }
+        self.code = brightsky_code(
+            w["condition"].as_str().unwrap_or("dry"),
+            w["cloud_cover"].as_f64().unwrap_or(0.0),
+        );
+        // Bright Sky reports no apparent temperature; keep the model's `feels` (a close estimate).
+        true
     }
 
     /// Fallback source: wttr.in (`j1` JSON). Different shape — WWO codes, string
@@ -397,7 +477,9 @@ impl Weather {
                     .unwrap_or(true);
                 self.hours.push(HourPt {
                     label: format!("{hour:02}"),
+                    day: short_weekday(ds.get(di).and_then(|d| d["date"].as_str()).unwrap_or("")),
                     temp: sf(&slot["tempC"]),
+                    uv: sf(&slot["uvIndex"]),
                     code: wwo_to_wmo(su(&slot["weatherCode"])),
                     pop: slot["chanceofrain"]
                         .as_str()
@@ -410,7 +492,7 @@ impl Weather {
         self.loaded = true;
     }
 
-    fn ingest(&mut self, v: &Value) {
+    fn ingest(&mut self, v: &Value, uv_by_time: &HashMap<String, f64>) {
         let cur = &v["current"];
         self.temp = cur["temperature_2m"].as_f64().unwrap_or(0.0);
         self.feels = cur["apparent_temperature"].as_f64().unwrap_or(self.temp);
@@ -452,7 +534,7 @@ impl Weather {
             self.sun_label = hhmm(pick).to_string();
         }
 
-        // hourly: the next 6 whole hours from now.
+        // hourly: 6 slots at 2-hour spacing from now (≈12h of coverage, not 6).
         let h = &v["hourly"];
         self.hours.clear();
         if let Some(htime) = h["time"].as_array() {
@@ -460,11 +542,13 @@ impl Weather {
                 .iter()
                 .position(|t| t.as_str().unwrap_or("") > now)
                 .unwrap_or(0);
-            for i in start..(start + 6).min(htime.len()) {
+            for i in (start..htime.len()).step_by(2).take(6) {
                 let t = htime[i].as_str().unwrap_or("");
                 self.hours.push(HourPt {
                     label: t.get(11..13).unwrap_or("").to_string(),
+                    day: short_weekday(t.get(0..10).unwrap_or("")),
                     temp: arr_f64(h, "temperature_2m", i),
+                    uv: uv_by_time.get(t).copied().unwrap_or(0.0),
                     code: arr_f64(h, "weathercode", i) as u8,
                     pop: arr_f64(h, "precipitation_probability", i) as u8,
                     is_day: day_at(t, &sun_by_date),
@@ -522,12 +606,66 @@ impl Weather {
         column([hero, metrics]).spacing(8.0)
     }
 
+    /// Temperature (yellow, left axis) + UV index (blue, right axis) across the hourly window — a
+    /// dual-axis line chart above the hourly strip, each series auto-scaled to its own range so the
+    /// trends read at a glance. The x-axis lines up with the hours below.
+    fn temp_uv_chart(&self) -> Render {
+        let temps: Vec<f64> = self.hours.iter().map(|h| h.temp).collect();
+        let uvs: Vec<f64> = self.hours.iter().map(|h| h.uv).collect();
+        let n = temps.len();
+        // Label a handful of points on each band so the values read off the curve like a weather app
+        // (not just the one endpoint). Temp keeps the °; UV tags its first mark "UV n" for identity,
+        // then bare numbers.
+        let mut a_labels = vec![String::new(); n];
+        let mut b_labels = vec![String::new(); n];
+        let mut first_uv = true;
+        let mut zero_labelled = false;
+        for i in label_marks(n) {
+            a_labels[i] = format!("{:.0}\u{b0}", temps[i]);
+            let uv = uvs[i];
+            // Don't re-label a flat run of zeros (the evening tail) — one 0 says it all.
+            if uv < 0.5 && zero_labelled {
+                continue;
+            }
+            if uv < 0.5 {
+                zero_labelled = true;
+            }
+            b_labels[i] = if first_uv {
+                first_uv = false;
+                format!("UV {uv:.0}")
+            } else {
+                format!("{uv:.0}")
+            };
+        }
+        DualChart {
+            a_values: temps,
+            a_line: Paint::Rgba(245, 205, 90, 255), // temperature — warm yellow (top band)
+            a_labels,
+            b_values: uvs,
+            b_line: Paint::Rgba(185, 135, 255, 255), // UV index — violet (bottom band)
+            b_labels,
+            width: 232.0,
+            height: 88.0,
+        }
+        .view()
+    }
+
     fn hourly_strip(&self) -> Render {
         let cols: Vec<Render> = self
             .hours
             .iter()
-            .map(|h| {
+            .enumerate()
+            .map(|(i, h)| {
+                // Day marker above the hour — shown for the first hour and at each day rollover, so
+                // a strip that crosses midnight reads "Mo … Tu …" instead of an ambiguous run of
+                // hours. (A blank space on same-day columns keeps every column the same height.)
+                let new_day = i == 0 || self.hours[i - 1].day != h.day;
+                let day = if new_day { h.day.clone() } else { " ".to_string() };
                 column([
+                    // A quiet wayfinding label, not data: muted fg (NOT accent — accent is reserved
+                    // for the precip% below, and the icons are already blue), centered over the
+                    // column like the rest of the cell.
+                    text(day).color(Token::FgDim).size(TINY),
                     text(h.label.clone()).color(Token::FgDim).size(SMALL),
                     wmo_icon(h.code, h.is_day).view(HOUR_ICON, sky_tint(h.code, h.is_day)),
                     text(format!("{:.0}\u{b0}", h.temp))
@@ -597,6 +735,23 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// Map a Bright Sky `condition` (+ cloud-cover %) to the WMO weather code the icon set expects,
+/// so a measured "dry/rain/…" observation picks the same glyph as the open-meteo forecast path.
+fn brightsky_code(condition: &str, cloud_cover: f64) -> u8 {
+    match condition {
+        "fog" => 45,
+        "rain" => 61,
+        "sleet" => 66,
+        "snow" => 71,
+        "hail" => 96,
+        "thunderstorm" => 95,
+        // "dry": clear / partly cloudy / overcast, by cloud cover.
+        _ if cloud_cover < 12.5 => 0,
+        _ if cloud_cover < 50.0 => 2,
+        _ => 3,
+    }
+}
+
 fn metric(icon: Icon, tint: Token, label: String) -> Render {
     row([
         icon.view(SMALL, tint),
@@ -658,7 +813,24 @@ fn condition_label(code: u8) -> &'static str {
 
 /// The temperature value's colour — only the extremes earn a colour; the
 /// comfortable band stays neutral so the chip isn't a christmas tree.
+/// Indices to label on the chart — three evenly-spaced marks (start / third / two-thirds), an even
+/// rhythm with no crammed endpoint pair. The leftmost (index 0) is "now".
+fn label_marks(n: usize) -> Vec<usize> {
+    match n {
+        0 => vec![],
+        1 | 2 => (0..n).collect(),
+        _ => {
+            let mut m = vec![0, n / 3, (2 * n) / 3];
+            m.dedup();
+            m
+        }
+    }
+}
+
 fn temp_color(t: f64) -> Token {
+    // Colour the *displayed* (rounded) value — otherwise 25.6 and 26.4 both render "26°" but in
+    // different colours (white vs warn), which reads as a bug side by side.
+    let t = t.round();
     if t < 0.0 {
         Token::Accent
     } else if t < 26.0 {
@@ -750,6 +922,12 @@ fn fig_temp(t: f64) -> String {
     } else {
         format!("{pad}\u{b0}")
     }
+}
+
+/// Two-letter weekday ("Mo", "Tu", …) from an ISO date — the compact day marker for the hourly
+/// strip (which can cross midnight, so each day's first hour gets labelled).
+fn short_weekday(date: &str) -> String {
+    weekday(date).chars().take(2).collect()
 }
 
 /// Weekday abbreviation from an ISO date "YYYY-MM-DD" (Sakamoto's algorithm).

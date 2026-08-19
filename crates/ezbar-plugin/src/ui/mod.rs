@@ -5,4 +5,4 @@
 //! a separate widget tier.
 
 pub mod graph;
-pub use graph::{Graph, GraphKind, StockChart};
+pub use graph::{DualTrend, Graph, GraphKind, StockChart};

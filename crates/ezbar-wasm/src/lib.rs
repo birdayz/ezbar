@@ -27,7 +27,7 @@ use ezbar_plugin::iced::advanced::subscription::{from_recipe, EventStream, Hashe
 use ezbar_plugin::iced::widget::text::Wrapping;
 use ezbar_plugin::iced::widget::{canvas, column, container, mouse_area, row, text};
 use ezbar_plugin::iced::{alignment, Color, Element, Length, Subscription};
-use ezbar_plugin::ui::graph::{Graph, GraphKind, MiniTrend};
+use ezbar_plugin::ui::graph::{DualTrend, Graph, GraphKind, MiniTrend};
 use ezbar_plugin::{icons, Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
 // RFC 0008: async world — host imports are async (http_get suspends the guest's
@@ -867,6 +867,16 @@ enum LNode {
         width: f32,
         height: f32,
     },
+    DualChart {
+        a_values: Vec<f64>,
+        a_line: Paint,
+        a_labels: Vec<String>,
+        b_values: Vec<f64>,
+        b_line: Paint,
+        b_labels: Vec<String>,
+        width: f32,
+        height: f32,
+    },
     Spacer(f32),
 }
 
@@ -958,6 +968,16 @@ fn lift_node(n: &Node, idx: u32) -> Result<LNode, String> {
             line: paint(&c.line),
             width: c.width,
             height: c.height,
+        },
+        N::DualChart(d) => LNode::DualChart {
+            a_values: d.a_values.clone(),
+            a_line: paint(&d.a_line),
+            a_labels: d.a_labels.clone(),
+            b_values: d.b_values.clone(),
+            b_line: paint(&d.b_line),
+            b_labels: d.b_labels.clone(),
+            width: d.width,
+            height: d.height,
         },
         N::Spacer(px) => LNode::Spacer(*px),
     })
@@ -2329,6 +2349,7 @@ fn measure(l: &Lifted, idx: u32) -> (f32, f32) {
         LNode::Icon { size, .. } => (*size, *size),
         LNode::Graph { .. } => (48.0, 16.0), // matches the chip sparkline size below
         LNode::Chart { width, height, .. } => (*width, *height),
+        LNode::DualChart { width, height, .. } => (*width, *height),
         LNode::Spacer(px) => (*px, 0.0),
     }
 }
@@ -2449,6 +2470,27 @@ fn build<'a>(l: &Lifted, idx: u32, ctx: &Ctx, depth: usize) -> Element<'a, ModMs
         } => canvas(MiniTrend {
             values: values.clone(),
             color: paint_color(line, ctx),
+            bg: ctx.bg(),
+        })
+        .width(Length::Fixed(*width))
+        .height(Length::Fixed(*height))
+        .into(),
+        LNode::DualChart {
+            a_values,
+            a_line,
+            a_labels,
+            b_values,
+            b_line,
+            b_labels,
+            width,
+            height,
+        } => canvas(DualTrend {
+            a: a_values.clone(),
+            a_color: paint_color(a_line, ctx),
+            a_labels: a_labels.clone(),
+            b: b_values.clone(),
+            b_color: paint_color(b_line, ctx),
+            b_labels: b_labels.clone(),
             bg: ctx.bg(),
         })
         .width(Length::Fixed(*width))

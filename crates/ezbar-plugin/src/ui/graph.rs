@@ -538,6 +538,168 @@ impl<Message> canvas::Program<Message> for MiniTrend {
     }
 }
 
+/// A dual-axis line chart: two series sharing the x-axis, each normalised to its **own** min/max so
+/// they read on independent left/right axes (e.g. temperature °C and UV index), each in its own
+/// colour. No area fill — two overlapping fills muddy; crisp lines + a soft glow + an end-cap dot
+/// per series keep both legible where they cross.
+pub struct DualTrend {
+    pub a: Vec<f64>,
+    pub a_color: Color,
+    /// per-point value labels for series `a` (`""` = no label at that point), drawn above its band.
+    pub a_labels: Vec<String>,
+    pub b: Vec<f64>,
+    pub b_color: Color,
+    pub b_labels: Vec<String>,
+    /// surface behind the chart, for the bg backing behind labels.
+    pub bg: Color,
+}
+
+impl<Message> canvas::Program<Message> for DualTrend {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let pad = 3.0_f32;
+        let (x0, x1) = (pad, (bounds.width - pad).max(pad + 1.0));
+        let (y_top, y_bot) = (pad, (bounds.height - pad).max(pad + 1.0));
+        let xl = x0 + 14.0;
+        let xr = (x1 - 14.0).max(xl + 1.0);
+        let cw = xr - xl;
+        let y_mid = (y_top + y_bot) * 0.5;
+
+        // Two stacked bands sharing the x-axis — temp UP TOP, UV DOWN BELOW. Both series descend and
+        // each is auto-scaled, so overlaid they'd sit right on top of each other; banding keeps them
+        // cleanly apart so each can carry several value labels (read like a weather app). Labels go
+        // in the outer margin of each band (temp above its curve, UV below).
+        for (vals, labels, color, width, band_top, band_bot, above) in [
+            (
+                &self.a,
+                &self.a_labels,
+                self.a_color,
+                1.8_f32,
+                y_top + 12.0,
+                y_mid - 2.0,
+                true,
+            ),
+            (
+                &self.b,
+                &self.b_labels,
+                self.b_color,
+                1.4_f32,
+                y_mid + 2.0,
+                y_bot - 12.0,
+                false,
+            ),
+        ] {
+            let n = vals.len();
+            if n < 2 {
+                continue;
+            }
+            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+            for &v in vals {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            if (hi - lo).abs() < f64::EPSILON {
+                hi = lo + 1.0;
+            }
+            let range = hi - lo;
+            lo -= range * 0.14;
+            hi += range * 0.14;
+            let bh = band_bot - band_top;
+            let y_of = |v: f64| band_top + bh - (((v - lo) / (hi - lo)) as f32) * bh;
+            let x_of = |i: usize| xl + (i as f32 / (n as f32 - 1.0)) * cw;
+            let pts: Vec<Point> = vals
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| Point::new(x_of(i), y_of(v)))
+                .collect();
+            let segs = smooth_controls(&pts, band_top, band_bot);
+            let line = Path::new(|b| {
+                b.move_to(pts[0]);
+                for &(c1, c2, end) in &segs {
+                    b.bezier_curve_to(c1, c2, end);
+                }
+            });
+            frame.stroke(
+                &line,
+                Stroke {
+                    style: Style::Solid(with_alpha(color, 0.16)),
+                    width: width + 2.2,
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..Stroke::default()
+                },
+            );
+            frame.stroke(
+                &line,
+                Stroke {
+                    style: Style::Solid(color),
+                    width,
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..Stroke::default()
+                },
+            );
+
+            // a small dot + a value label at each labelled point.
+            let core = Color::from_rgb(
+                color.r * 0.6 + 0.4,
+                color.g * 0.6 + 0.4,
+                color.b * 0.6 + 0.4,
+            );
+            for (i, pt) in pts.iter().enumerate() {
+                let label = labels.get(i).map(|s| s.as_str()).unwrap_or("");
+                if label.is_empty() {
+                    continue;
+                }
+                // The leftmost mark is "now": give it the brightened glow live-point (the signature
+                // end-cap); the interior marks are plain small dots.
+                if i == 0 {
+                    frame.fill(&Path::circle(*pt, 5.0), with_alpha(color, 0.28));
+                    frame.fill(&Path::circle(*pt, 3.2), Color { a: 1.0, ..self.bg });
+                    frame.fill(&Path::circle(*pt, 2.0), core);
+                } else {
+                    frame.fill(&Path::circle(*pt, 3.2), with_alpha(color, 0.24));
+                    frame.fill(&Path::circle(*pt, 2.3), Color { a: 1.0, ..self.bg });
+                    frame.fill(&Path::circle(*pt, 1.4), core);
+                }
+                let ly =
+                    (if above { pt.y - 10.0 } else { pt.y + 10.0 }).clamp(y_top + 7.0, y_bot - 7.0);
+                let tw = label.chars().count() as f32 * 6.2 + 7.0;
+                let cx = pt.x.clamp(x0 + tw * 0.5, x1 - tw * 0.5);
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        Point::new(cx - tw * 0.5, ly - 8.0),
+                        Size::new(tw, 16.0),
+                        3.5.into(),
+                    ),
+                    Color { a: 0.72, ..self.bg },
+                );
+                frame.fill_text(Text {
+                    align_x: TextAlign::Center,
+                    align_y: VAlign::Center,
+                    ..mk_text(
+                        label.to_string(),
+                        Point::new(cx, ly),
+                        with_alpha(color, 0.99),
+                        10.5,
+                        Weight::Semibold,
+                    )
+                });
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 /// A canvas `Text` with sane defaults; `ax`/`ay` anchor it (e.g. right/center).
 fn mk_text(content: String, pos: Point, color: Color, size: f32, weight: Weight) -> Text {
     Text {
