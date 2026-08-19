@@ -27,7 +27,7 @@ impl Disk {
         let s = |k: &str| cfg.get(k).and_then(|v| v.as_str()).map(str::to_string);
         Disk {
             instance,
-            path: s("path").unwrap_or_else(|| "/".to_string()),
+            path: expand_tilde(&s("path").unwrap_or_else(|| "/".to_string())),
             interval: cfg
                 .get("interval")
                 .and_then(|v| v.as_integer())
@@ -86,6 +86,17 @@ fn disk_stream(data: &(u64, String, u64)) -> impl Stream<Item = ModMsg> {
             }
         },
     )
+}
+
+/// Expand a leading `~` (or `~/…`) to `$HOME` so `path = "~/"` reports the home filesystem —
+/// `df` itself doesn't expand `~`. Other paths pass through untouched.
+fn expand_tilde(p: &str) -> String {
+    if p == "~" || p.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}{}", &p[1..]);
+        }
+    }
+    p.to_string()
 }
 
 /// `df -P <path>`: row 2, column 5 is the capacity percent.
