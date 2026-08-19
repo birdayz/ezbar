@@ -9,11 +9,16 @@
 //! sandbox has no local clock zone. No I/O, no `Local`, no system clock → it unit-tests on the
 //! host even though the plugin itself only builds for `wasm32-wasip2`.
 //!
-//! Recurring-event (RRULE) expansion is not performed; concrete VEVENT instances within today's
-//! window are shown (matches the native module this replaces).
+//! Recurring events (`RRULE`) are expanded for the in-window occurrences (see [`expand_rrule`]):
+//! a weekly 1:1 only has a concrete `VEVENT` in the feed for the day it was first created (or a
+//! day some instance was rescheduled) — every other occurrence exists purely as the `RRULE`, so
+//! without expansion it silently never appears once its literal `DTSTART` ages out of the window.
+
+use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
+use rrule::{RRuleSet, Tz as RTz};
 
 pub mod meeting;
 pub use meeting::{best_meeting, join_url, zoom_join_url, ZoomMeeting};
@@ -122,14 +127,18 @@ fn parse_dt(p: &ical::property::Property, tz: Tz) -> Option<(DateTime<Tz>, bool)
 }
 
 /// A **streaming** slimmer: feed it the iCal feed in arbitrary byte chunks ([`Slimmer::push`]),
-/// and [`Slimmer::finish`] returns a tiny VCALENDAR containing only the VEVENT blocks whose
-/// `DTSTART` date falls within `[today - days_back, today + days_fwd]`.
+/// and [`Slimmer::finish`] returns a tiny VCALENDAR containing only the VEVENT blocks that can
+/// affect `[today - days_back, today + days_fwd]`: a concrete event whose own `DTSTART` (or, for
+/// a rescheduled/cancelled recurring instance, `RECURRENCE-ID`) falls in that window, or a
+/// recurring master (`RRULE`) whose series hasn't ended before the window starts — its own
+/// `DTSTART` is typically ancient, but its *occurrences* keep landing in the window every week.
 ///
 /// A secret Google feed is the user's *entire* calendar history — tens of MB, thousands of events
 /// — but a status bar only cares about the next day or two, and the WASM sandbox can't hold the
 /// whole feed (RFC 0020). So the plugin pulls the body in chunks (`ctx.http_read`) and pushes each
 /// straight in here; the slimmer tracks the current VEVENT *across chunk boundaries* and keeps
-/// only in-window ones, so resident memory stays `O(one event + the window)`, never `O(feed)`.
+/// only relevant ones, so resident memory stays bounded — the in-window events plus the (small,
+/// bounded-by-number-of-still-active-series) set of recurring masters, never `O(feed)`.
 /// The window spans a couple of days so the chip rolls over at midnight without a refetch.
 pub struct Slimmer {
     lo: NaiveDate,
@@ -140,8 +149,10 @@ pub struct Slimmer {
     in_event: bool,
     /// The current VEVENT's raw lines (only flushed to `out` if it's in-window).
     event_buf: String,
-    /// Window decision for the current event, set once its `DTSTART` line is seen.
-    keep: Option<bool>,
+    /// Whether any property seen so far in the current event justifies keeping it (OR'd as each
+    /// qualifying line — `DTSTART`, `RECURRENCE-ID`, `RRULE` — is seen; an event can qualify more
+    /// than one way, e.g. a rescheduled recurring instance).
+    keep: bool,
 }
 
 impl Slimmer {
@@ -155,7 +166,7 @@ impl Slimmer {
             pending: String::new(),
             in_event: false,
             event_buf: String::new(),
-            keep: None,
+            keep: false,
         }
     }
 
@@ -183,7 +194,7 @@ impl Slimmer {
         // VALARM uses its own BEGIN/END:VALARM, so this only ever matches a real event boundary.
         if trimmed.starts_with("BEGIN:VEVENT") {
             self.in_event = true;
-            self.keep = None;
+            self.keep = false;
             self.event_buf.clear();
             self.event_buf.push_str(line);
             return;
@@ -193,12 +204,18 @@ impl Slimmer {
         }
         self.event_buf.push_str(line);
         // Property lines begin at column 0; a folded `DESCRIPTION` continuation starts with a
-        // space, so `starts_with` won't false-match one. First DTSTART decides the window.
-        if self.keep.is_none() && trimmed.starts_with("DTSTART") {
-            self.keep = Some(dtstart_in_window(trimmed, self.lo, self.hi));
+        // space, so `starts_with` won't false-match one. Any one of these justifies keeping the
+        // event, so they OR together rather than deciding once (an event can qualify more than
+        // one way — e.g. `RECURRENCE-ID` on a rescheduled instance of an otherwise-old series).
+        if trimmed.starts_with("DTSTART") || trimmed.starts_with("RECURRENCE-ID") {
+            if dtstart_in_window(trimmed, self.lo, self.hi) {
+                self.keep = true;
+            }
+        } else if trimmed.starts_with("RRULE") && rrule_may_reach_window(trimmed, self.lo) {
+            self.keep = true;
         }
         if trimmed.starts_with("END:VEVENT") {
-            if self.keep == Some(true) {
+            if self.keep {
                 self.out.push_str(&self.event_buf);
             }
             self.in_event = false;
@@ -207,14 +224,31 @@ impl Slimmer {
     }
 }
 
-/// Is a `DTSTART…:YYYYMMDD…` property line's date within `[lo, hi]`? Parses the leading 8 digits
-/// of the value (after the first `:`), so it handles `DTSTART:`, `DTSTART;TZID=…:`, `;VALUE=DATE:`.
+/// Is a `DTSTART…:YYYYMMDD…`-shaped property line's date within `[lo, hi]`? Parses the leading 8
+/// digits of the value (after the first `:`), so it handles `DTSTART:`, `DTSTART;TZID=…:`,
+/// `;VALUE=DATE:` — and, since `RECURRENCE-ID` values have the identical shape, that property too.
 fn dtstart_in_window(line: &str, lo: NaiveDate, hi: NaiveDate) -> bool {
     let Some(colon) = line.find(':') else {
         return false;
     };
     let digits: String = line[colon + 1..].chars().take(8).collect();
     matches!(NaiveDate::parse_from_str(&digits, "%Y%m%d"), Ok(d) if d >= lo && d <= hi)
+}
+
+/// Could this `RRULE` line still produce an occurrence on or after `lo`? True unless it carries an
+/// `UNTIL` that's already before `lo` — an open-ended or `COUNT`-limited rule can't be date-bounded
+/// without full expansion, so it's kept (a live weekly 1:1 is small; the memory cost is one master
+/// VEVENT per still-active series, not per occurrence).
+fn rrule_may_reach_window(line: &str, lo: NaiveDate) -> bool {
+    let Some(colon) = line.find(':') else {
+        return true;
+    };
+    let value = &line[colon + 1..];
+    let Some(until_at) = value.find("UNTIL=") else {
+        return true;
+    };
+    let digits: String = value[until_at + "UNTIL=".len()..].chars().take(8).collect();
+    !matches!(NaiveDate::parse_from_str(&digits, "%Y%m%d"), Ok(d) if d < lo)
 }
 
 /// Slice a whole in-memory iCal feed to the `[today-back, today+fwd]` window — a thin wrapper over
@@ -275,46 +309,69 @@ pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
         .unwrap_or(now);
     let end_of_day = start_of_day + Duration::hours(24);
 
-    let mut today: Vec<CalendarEvent> = Vec::new();
     let parser = ical::IcalParser::new(body.as_bytes());
-    for cal in parser.flatten() {
-        for ev in cal.events {
-            let start = match prop(&ev, "DTSTART").and_then(|p| parse_dt(p, tz)) {
-                Some(s) => s,
-                None => continue,
-            };
-            let end = prop(&ev, "DTEND")
-                .and_then(|p| parse_dt(p, tz))
-                .map(|(d, _)| d)
-                .unwrap_or_else(|| start.0 + Duration::hours(1));
-            let title = prop_value(&ev, "SUMMARY");
-            let location = prop_value(&ev, "LOCATION");
+    let events: Vec<ical::parser::ical::component::IcalEvent> =
+        parser.flatten().flat_map(|cal| cal.events).collect();
 
-            // Filter to today's window (matches the native module's Start/End filter).
-            if end <= start_of_day || start.0 >= end_of_day {
-                continue;
-            }
-
-            // The meeting link usually lives in DESCRIPTION; LOCATION/URL/X-GOOGLE-CONFERENCE are
-            // fallbacks (Google Calendar puts the Meet link in X-GOOGLE-CONFERENCE). Scanning them
-            // together lets `join_url` pick the best click-to-join link wherever it appears.
-            let scan = format!(
-                "{}\n{}\n{}\n{}",
-                prop_value(&ev, "DESCRIPTION"),
-                location,
-                prop_value(&ev, "URL"),
-                prop_value(&ev, "X-GOOGLE-CONFERENCE"),
-            );
-
-            today.push(CalendarEvent {
-                title,
-                start: start.0,
-                end,
-                is_all_day: start.1,
-                location,
-                join_url: join_url(&scan),
-            });
+    // A rescheduled/cancelled recurring instance is a separate VEVENT carrying the SAME UID as its
+    // series master plus a `RECURRENCE-ID` naming the *original* (un-modified) occurrence it
+    // replaces. Google does not reliably also EXDATE that original slot (see `expand_rrule`), so
+    // this set is what stops the master's RRULE from generating a ghost duplicate alongside it.
+    let mut overridden: HashSet<(String, i64)> = HashSet::new();
+    for ev in &events {
+        if let Some((rid, _)) = prop(ev, "RECURRENCE-ID").and_then(|p| parse_dt(p, tz)) {
+            overridden.insert((prop_value(ev, "UID"), rid.timestamp()));
         }
+    }
+
+    let mut today: Vec<CalendarEvent> = Vec::new();
+    for ev in &events {
+        // A cancelled single instance of a recurring series is a VEVENT like any other — skip it
+        // so it doesn't render as a real meeting (its slot is already freed via `overridden` above).
+        if prop_value(ev, "STATUS").eq_ignore_ascii_case("CANCELLED") {
+            continue;
+        }
+
+        if prop(ev, "RRULE").is_some() {
+            today.extend(expand_rrule(ev, tz, start_of_day, end_of_day, &overridden));
+            continue;
+        }
+
+        let start = match prop(ev, "DTSTART").and_then(|p| parse_dt(p, tz)) {
+            Some(s) => s,
+            None => continue,
+        };
+        let end = prop(ev, "DTEND")
+            .and_then(|p| parse_dt(p, tz))
+            .map(|(d, _)| d)
+            .unwrap_or_else(|| start.0 + Duration::hours(1));
+        let title = prop_value(ev, "SUMMARY");
+        let location = prop_value(ev, "LOCATION");
+
+        // Filter to today's window (matches the native module's Start/End filter).
+        if end <= start_of_day || start.0 >= end_of_day {
+            continue;
+        }
+
+        // The meeting link usually lives in DESCRIPTION; LOCATION/URL/X-GOOGLE-CONFERENCE are
+        // fallbacks (Google Calendar puts the Meet link in X-GOOGLE-CONFERENCE). Scanning them
+        // together lets `join_url` pick the best click-to-join link wherever it appears.
+        let scan = format!(
+            "{}\n{}\n{}\n{}",
+            prop_value(ev, "DESCRIPTION"),
+            location,
+            prop_value(ev, "URL"),
+            prop_value(ev, "X-GOOGLE-CONFERENCE"),
+        );
+
+        today.push(CalendarEvent {
+            title,
+            start: start.0,
+            end,
+            is_all_day: start.1,
+            location,
+            join_url: join_url(&scan),
+        });
     }
 
     today = dedupe_events(today);
@@ -400,6 +457,113 @@ pub fn parse_calendar(body: &str, now: DateTime<Tz>) -> CalendarData {
     }
 
     data
+}
+
+/// Reconstruct a property's raw iCal content line (`NAME;PARAM=VAL;…:value`) from its parsed
+/// form, so it can be fed straight to [`rrule`]'s own iCal-text parser instead of us re-deriving
+/// timezone/date handling it already does correctly. `ical` has already unfolded any line
+/// continuations into `value`, so the reconstructed line is always single-line and complete.
+fn raw_prop_line(p: &ical::property::Property) -> String {
+    let mut line = p.name.clone();
+    if let Some(params) = &p.params {
+        for (k, vs) in params {
+            line.push(';');
+            line.push_str(k);
+            line.push('=');
+            line.push_str(&vs.join(","));
+        }
+    }
+    line.push(':');
+    if let Some(v) = &p.value {
+        line.push_str(v);
+    }
+    line
+}
+
+/// Expand a recurring master `VEVENT` (one carrying an `RRULE`) into its concrete occurrences
+/// within `[start_of_day, end_of_day)`.
+///
+/// Built from the event's own raw `DTSTART`/`RRULE`/`EXDATE` lines rather than re-deriving them,
+/// so `rrule` handles the timezone/DST-correct expansion (its own tests cover the DST edge cases
+/// that would be easy to get subtly wrong by hand). Occurrences whose original slot is claimed by
+/// a separate rescheduled/cancelled override VEVENT (`overridden`) are dropped — that override, if
+/// still live, renders through the normal per-event path instead so the meeting doesn't double up
+/// at two different times.
+fn expand_rrule(
+    ev: &ical::parser::ical::component::IcalEvent,
+    tz: Tz,
+    start_of_day: DateTime<Tz>,
+    end_of_day: DateTime<Tz>,
+    overridden: &HashSet<(String, i64)>,
+) -> Vec<CalendarEvent> {
+    let Some(dtstart_prop) = prop(ev, "DTSTART") else {
+        return Vec::new();
+    };
+    let Some(rrule_prop) = prop(ev, "RRULE") else {
+        return Vec::new();
+    };
+    let Some((master_start, is_all_day)) = parse_dt(dtstart_prop, tz) else {
+        return Vec::new();
+    };
+    if is_all_day {
+        return Vec::new(); // all-day recurring series: not expanded (rare; unchanged limitation).
+    }
+    let duration = prop(ev, "DTEND")
+        .and_then(|p| parse_dt(p, tz))
+        .map(|(d, _)| d - master_start)
+        .unwrap_or_else(|| Duration::hours(1));
+
+    let mut text = raw_prop_line(dtstart_prop);
+    text.push('\n');
+    text.push_str(&raw_prop_line(rrule_prop));
+    for exdate in ev.properties.iter().filter(|p| p.name == "EXDATE") {
+        text.push('\n');
+        text.push_str(&raw_prop_line(exdate));
+    }
+    let Ok(set) = text.parse::<RRuleSet>() else {
+        return Vec::new(); // malformed RRULE text: skip rather than crash the whole feed.
+    };
+
+    // Pad a day either side so a display-zone occurrence right at the window edge (whose event-zone
+    // instant sits just outside it, or vice versa) is never missed by the rrule crate's own bound.
+    let pad = Duration::hours(24);
+    let after = (start_of_day - pad).with_timezone(&RTz::UTC);
+    let before = (end_of_day + pad).with_timezone(&RTz::UTC);
+    let occurrences = set.after(after).before(before).all(64).dates;
+
+    let uid = prop_value(ev, "UID");
+    let title = prop_value(ev, "SUMMARY");
+    let location = prop_value(ev, "LOCATION");
+    let scan = format!(
+        "{}\n{}\n{}\n{}",
+        prop_value(ev, "DESCRIPTION"),
+        location,
+        prop_value(ev, "URL"),
+        prop_value(ev, "X-GOOGLE-CONFERENCE"),
+    );
+    let join = join_url(&scan);
+
+    occurrences
+        .into_iter()
+        .filter_map(|d| {
+            let start = d.with_timezone(&tz);
+            if overridden.contains(&(uid.clone(), start.timestamp())) {
+                return None;
+            }
+            let end = start + duration;
+            if end <= start_of_day || start >= end_of_day {
+                return None;
+            }
+            Some(CalendarEvent {
+                title: title.clone(),
+                start,
+                end,
+                is_all_day: false,
+                location: location.clone(),
+                join_url: join.clone(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -696,5 +860,145 @@ mod tests {
         );
         assert_eq!(d.today_events.len(), 1);
         assert_eq!(d.today_events[0].join_url, None);
+    }
+
+    // ── RRULE expansion — regression coverage for a real bug: a years-old weekly 1:1 whose
+    // literal DTSTART had long aged out of the window silently stopped appearing, because only
+    // concrete VEVENTs were ever shown and the RRULE was never expanded. ──
+
+    /// A weekly-Thursday master starting long before `now`, mirroring the real feed: `DTSTART`
+    /// in `Europe/London` (so an in-window occurrence lands in BST, UTC+1) and no `UNTIL` (open).
+    fn weekly_1on1(extra: &str) -> String {
+        format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1on1@google.com\r\n\
+            SUMMARY:Johannes / Gavin 1:1\r\n\
+            DTSTART;TZID=Europe/London:20240201T110000\r\nDTEND;TZID=Europe/London:20240201T112500\r\n\
+            RRULE:FREQ=WEEKLY;BYDAY=TH\r\n{extra}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    #[test]
+    fn weekly_rrule_expands_to_far_future_occurrence() {
+        // 2026-07-02 is a Thursday, 2.5 years after DTSTART — nothing but the RRULE says it recurs.
+        let now = UTC.with_ymd_and_hms(2026, 7, 2, 9, 0, 0).unwrap();
+        let d = parse_calendar(&weekly_1on1(""), now);
+        assert_eq!(d.today_events.len(), 1);
+        assert_eq!(d.today_events[0].title, "Johannes / Gavin 1:1");
+        // 11:00 in Europe/London is BST (UTC+1) in July → 10:00 UTC.
+        assert_eq!(
+            d.today_events[0].start.with_timezone(&Utc),
+            Utc.with_ymd_and_hms(2026, 7, 2, 10, 0, 0).unwrap()
+        );
+        assert_eq!(
+            d.today_events[0].end.with_timezone(&Utc),
+            Utc.with_ymd_and_hms(2026, 7, 2, 10, 25, 0).unwrap()
+        );
+        assert_eq!(d.next_title, "Johannes / Gavin 1:1");
+    }
+
+    #[test]
+    fn rrule_exdate_excludes_that_occurrence() {
+        let now = UTC.with_ymd_and_hms(2026, 7, 2, 9, 0, 0).unwrap();
+        let body = weekly_1on1("EXDATE;TZID=Europe/London:20260702T110000\r\n");
+        let d = parse_calendar(&body, now);
+        assert_eq!(d.today_events.len(), 0, "EXDATE'd instance must not appear");
+    }
+
+    #[test]
+    fn rrule_respects_until_and_stops_generating() {
+        let now = UTC.with_ymd_and_hms(2026, 7, 2, 9, 0, 0).unwrap();
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:old@google.com\r\n\
+            SUMMARY:Retired 1:1\r\n\
+            DTSTART;TZID=Europe/London:20240201T110000\r\nDTEND;TZID=Europe/London:20240201T112500\r\n\
+            RRULE:FREQ=WEEKLY;UNTIL=20240301T000000Z;BYDAY=TH\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let d = parse_calendar(body, now);
+        assert_eq!(
+            d.today_events.len(),
+            0,
+            "series ended in 2024, no 2026 occurrence"
+        );
+    }
+
+    #[test]
+    fn rrule_override_replaces_generated_occurrence_not_duplicates_it() {
+        // A same-UID VEVENT with RECURRENCE-ID = today's *original* slot, rescheduled to a new
+        // time. Must render ONCE, at the rescheduled time — not twice (generated + override).
+        let now = UTC.with_ymd_and_hms(2026, 7, 2, 9, 0, 0).unwrap();
+        let mut body = weekly_1on1("");
+        body.truncate(body.len() - "END:VCALENDAR\r\n".len());
+        body.push_str(
+            "BEGIN:VEVENT\r\nUID:1on1@google.com\r\nSUMMARY:Johannes / Gavin 1:1\r\n\
+            RECURRENCE-ID;TZID=Europe/London:20260702T110000\r\n\
+            DTSTART;TZID=Europe/London:20260702T140000\r\nDTEND;TZID=Europe/London:20260702T142500\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let d = parse_calendar(&body, now);
+        assert_eq!(
+            d.today_events.len(),
+            1,
+            "override replaces, doesn't duplicate, the generated slot"
+        );
+        // rescheduled to 14:00 Europe/London (BST) = 13:00 UTC.
+        assert_eq!(
+            d.today_events[0].start.with_timezone(&Utc),
+            Utc.with_ymd_and_hms(2026, 7, 2, 13, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn cancelled_recurring_instance_is_hidden_and_suppresses_the_generated_one() {
+        let now = UTC.with_ymd_and_hms(2026, 7, 2, 9, 0, 0).unwrap();
+        let mut body = weekly_1on1("");
+        body.truncate(body.len() - "END:VCALENDAR\r\n".len());
+        body.push_str(
+            "BEGIN:VEVENT\r\nUID:1on1@google.com\r\nSUMMARY:Johannes / Gavin 1:1\r\n\
+            RECURRENCE-ID;TZID=Europe/London:20260702T110000\r\n\
+            DTSTART;TZID=Europe/London:20260702T110000\r\nDTEND;TZID=Europe/London:20260702T112500\r\n\
+            STATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let d = parse_calendar(&body, now);
+        assert_eq!(
+            d.today_events.len(),
+            0,
+            "cancelled instance: neither shown nor duplicated"
+        );
+    }
+
+    #[test]
+    fn slimmer_keeps_an_ancient_open_recurring_master() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
+        let slim = slim_ical(&weekly_1on1(""), today, 1, 2);
+        assert!(
+            slim.contains("Johannes / Gavin 1:1"),
+            "an open (no UNTIL) RRULE master must survive slimming regardless of its own ancient DTSTART"
+        );
+    }
+
+    #[test]
+    fn slimmer_drops_a_finished_recurring_master() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:old@google.com\r\n\
+            SUMMARY:Retired 1:1\r\n\
+            DTSTART;TZID=Europe/London:20240201T110000\r\nDTEND;TZID=Europe/London:20240201T112500\r\n\
+            RRULE:FREQ=WEEKLY;UNTIL=20240301T000000Z;BYDAY=TH\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let slim = slim_ical(body, today, 1, 2);
+        assert!(
+            !slim.contains("Retired 1:1"),
+            "a series whose UNTIL is long past the window must not be kept"
+        );
+    }
+
+    #[test]
+    fn slimmer_keeps_a_rescheduled_override_by_its_original_slot() {
+        // The override's OWN new time is far outside the window; only its RECURRENCE-ID (the slot
+        // it vacates) is inside it. It must still be kept, or the master would wrongly regenerate
+        // a ghost at the original slot with no way to know it was moved away.
+        let today = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1on1@google.com\r\n\
+            SUMMARY:Moved Far Away\r\nRECURRENCE-ID;TZID=Europe/London:20260702T110000\r\n\
+            DTSTART;TZID=Europe/London:20261225T110000\r\nDTEND;TZID=Europe/London:20261225T112500\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let slim = slim_ical(body, today, 1, 2);
+        assert!(slim.contains("Moved Far Away"));
     }
 }

@@ -275,7 +275,7 @@ impl Plugin for Calendar {
         .spacing(10.0)
         .align(Align::Center);
 
-        Some(container(column([header, divider(), body]).spacing(10.0)).padding(14.0))
+        Some(container(column([header, body]).spacing(10.0)).padding(14.0))
     }
 }
 
@@ -343,18 +343,21 @@ impl Calendar {
                 join: ev.join_url.clone(),
             });
         }
-        // Then timed events in chronological order, with a "now" marker before the first future
-        // one (only once a prior timed event has been shown — matches the native popup).
+        // Then timed events in chronological order, with a "now" marker before the first
+        // still-upcoming event — the boundary between what's done and what's ahead.
         let all_day_count = rows.len();
         let mut marker_at = None;
-        let mut shown = false;
         for (i, ev) in data
             .today_events
             .iter()
             .filter(|e| !e.is_all_day)
             .enumerate()
         {
-            if marker_at.is_none() && shown && ev.start > now {
+            // Place it before the first event whose start is in the future. (This used to also
+            // require a *prior* row to have been shown, which — when the day's first event was
+            // already upcoming — dropped the marker onto the SECOND future event instead, so a
+            // future event rendered ABOVE the "now" line and looked like a timezone bug.)
+            if marker_at.is_none() && ev.start > now {
                 marker_at = Some(all_day_count + i);
             }
             let state = if now >= ev.end {
@@ -385,7 +388,6 @@ impl Calendar {
                 state,
                 join: ev.join_url.clone(),
             });
-            shown = true;
         }
         self.rows = rows;
         self.marker_at = marker_at;
@@ -434,10 +436,6 @@ fn now_marker(clock: &str) -> Render {
     ])
     .spacing(8.0)
     .align(Align::Center)
-}
-
-fn divider() -> Render {
-    text("\u{2500}".repeat(48)).size(7.0).color(Token::FgDim)
 }
 
 fn empty_state(line: &str, hint: Option<&str>) -> Render {
