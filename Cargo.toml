@@ -54,6 +54,13 @@ libc = "0.2"                     # malloc_trim — hand glibc's retained-free pa
 # render-churn RSS sawtooth down to the working-set floor.
 tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
 sha2 = "0.11.0"
+# Tray protocols: reuse reviewed versions already present in the lockfile. No tray
+# framework, external helper, image-decoder bundle, or unpinned git dependency.
+zbus = { version = "=5.16.0", default-features = false, features = ["tokio"] }
+x11rb = { version = "=0.13.2", features = ["composite", "damage", "xfixes"] }
+png = "=0.17.16"
+# Already used by iced; render bounded tray SVGs with external image loading disabled.
+resvg = { version = "=0.45.1", default-features = false }
 
 [dev-dependencies]
 # the module dev harness — used only by examples/harness.rs, so it stays out of

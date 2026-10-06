@@ -3,6 +3,7 @@
 //!
 //!     cargo run --example harness -- github     # just the github chip + popup
 //!     cargo run --example harness -- cpu
+//!     cargo run --example harness -- gpu
 //!     cargo run --example harness -- claude
 //!     cargo run --example harness               # all of them, side by side
 //!
@@ -10,7 +11,7 @@
 //! `ezbar_harness::run(Box::new(MyModule::new(0)))`. See the `ezbar-plugin-author`
 //! skill and `crates/ezbar-harness/examples/counter.rs`.
 
-use ezbar::modules::{clock::Clock, cpu::Cpu, github::GitHub};
+use ezbar::modules::{clock::Clock, cpu::Cpu, github::GitHub, gpu::Gpu};
 use ezbar_plugin::Module;
 
 fn main() -> ezbar_plugin::iced::Result {
@@ -18,6 +19,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let cfg = toml::Value::Table(Default::default()); // modules that read `[modules.<id>]` get an empty table here
     let modules: Vec<Box<dyn Module>> = match which.as_str() {
         "cpu" => vec![Box::new(Cpu::new(0, &cfg))],
+        "gpu" => vec![Box::new(Gpu::new(0, &cfg))],
         "github" => vec![Box::new(GitHub::new(0))],
         "clock" => {
             // CLOCK_CAL=hover|click picks which popup to preview (default click = full grid).
@@ -28,9 +30,13 @@ fn main() -> ezbar_plugin::iced::Result {
             );
             vec![Box::new(Clock::new(0, &toml::Value::Table(t)))]
         }
-        "all" => vec![Box::new(Cpu::new(0, &cfg)), Box::new(GitHub::new(1))],
+        "all" => vec![
+            Box::new(Cpu::new(0, &cfg)),
+            Box::new(Gpu::new(1, &cfg)),
+            Box::new(GitHub::new(2)),
+        ],
         other => {
-            eprintln!("unknown module '{other}'. try one of: cpu, github, clock, all");
+            eprintln!("unknown module '{other}'. try one of: cpu, gpu, github, clock, all");
             std::process::exit(2);
         }
     };

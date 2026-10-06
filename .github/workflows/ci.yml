@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check known malicious lockfile versions before Cargo
+        run: python3 scripts/check-lock.py --self-test && python3 scripts/check-lock.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -31,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check known malicious lockfile versions before Cargo
+        run: python3 scripts/check-lock.py --self-test && python3 scripts/check-lock.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -39,17 +43,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --all-targets
-      - run: cargo test --workspace --doc
-      - run: cargo build --workspace --release
+            pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev dbus xvfb xauth
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --all-targets
+      - name: Isolated tray protocol tests
+        run: |
+          EZBAR_TRAY_TEST_BUS=1 dbus-run-session -- cargo test --locked --lib isolated_bus_protocols -- --ignored
+          EZBAR_TRAY_TEST_X11=1 xvfb-run -a cargo test --locked --lib isolated_xembed_protocols -- --ignored
+      - run: cargo test --locked --workspace --doc
+      - run: cargo build --locked --workspace --release
 
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check known malicious lockfile versions before Cargo
+        run: python3 scripts/check-lock.py --self-test && python3 scripts/check-lock.py
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans sources

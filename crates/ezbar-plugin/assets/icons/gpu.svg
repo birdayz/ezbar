@@ -1,0 +1,7 @@
+<!-- ezbar GPU icon: graphics card, matching the 24px system icon stroke. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2 4v16M2 7h18a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H2M7 18v3h9v-3M6 10v5" />
+  <circle cx="15" cy="12.5" r="3.5" />
+  <path d="M15 11v3M13.5 12.5h3" />
+</svg>

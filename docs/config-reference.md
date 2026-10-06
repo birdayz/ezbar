@@ -20,7 +20,12 @@ These are placed by id alone and read no config: `battery`, `calendar`, `claude`
 | Module | Key | Type | Default | Notes |
 |--------|-----|------|---------|-------|
 | `clock` | `format` | string | `"%Y-%m-%d %H:%M:%S"` | strftime format |
+| `tray` | `icon_size` | int (px) | `22` | clamped 12..48; [SNI + XEmbed details](tray.md) |
+| | `spacing` | int (px) | `8` | clamped 0..32 |
+| | `show_passive` | bool | `false` | include passive/hidden application icons |
 | `cpu` | `[graph]` | table | — | see [Graph sub-table](#graph-sub-table) (samples default 30) |
+| `gpu` | `card` | string | `""` (auto) | DRM card name, e.g. `"card1"`; see [GPU](#gpu) |
+| | `[graph]` | table | — | applies to both utilization and temperature graphs (samples default 30) |
 | `memory` | `[graph]` | table | — | graph (samples default 20) |
 | `temperature` | `[graph]` | table | — | graph (samples default 60) |
 | `ping` | `target` | string | `"8.8.8.8"` | host to ping |
@@ -54,14 +59,40 @@ These are placed by id alone and read no config: `battery`, `calendar`, `claude`
 `custom` output and `window_title`'s `format` accept the [inline markup](#inline-markup)
 subset.
 
+## GPU
+
+`gpu` shows utilization (%) and temperature (°C), each with the same sparkline style
+as CPU/temperature. It polls every two seconds; clicking either label toggles both
+graphs. It is included in the default machine-vitals group. With a custom layout,
+add `"gpu"` to the desired group in `left`, `center`, or `right`.
+
+The collector reads `gpu_busy_percent` and the **same card's** hwmon sensors under
+`/sys/class/drm`, without extra packages or root access. This supports **AMD amdgpu**;
+drivers without this sysfs ABI (including typical Intel/NVIDIA drivers) need a
+separate collector. Missing/unreadable readings show `--`, not zero, and their
+graphs are hidden. Temperature prefers the AMD **edge** sensor over junction/memory,
+falling back to `temp1_input` if no readable edge sensor exists.
+
+Autodetection picks the lowest-numbered `cardN` exposing `gpu_busy_percent`.
+Pin a card on multi-GPU systems (DRM numbering may change across boots):
+
+```toml
+[modules.gpu]
+card = "card1"           # optional; omit for autodetection
+
+[modules.gpu.graph]      # same options as CPU, applied to each graph
+samples = 30
+line_color = "accent"    # optional; default is green→red by value
+```
+
 ## Graph sub-table
 
-`[modules.<id>.graph]` for the sparkline metric modules (`cpu`, `memory`, `temperature`,
+`[modules.<id>.graph]` for the sparkline metric modules (`cpu`, `gpu`, `memory`, `temperature`,
 `ping`). Numeric values are clamped to the shown bounds (RFC 0002).
 
 | Key | Type | Default | Bounds |
 |-----|------|---------|--------|
-| `samples` | int | per-module (cpu 30, memory 20, temperature 60, ping 40) | 2–2048 |
+| `samples` | int | per-module (cpu/gpu 30, memory 20, temperature 60, ping 40) | 2–2048 |
 | `width` | float (px) | `48` | 8–400 |
 | `height` | float (px) | `16` | 6–200 |
 | `line_width` | float (px) | `1.5` | 0.5–8 |

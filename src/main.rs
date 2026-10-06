@@ -138,11 +138,12 @@ mod registry;
 /// semantic clusters that render as separate sub-islands (RFC 0005). The gaps between
 /// groups are the separators; the order is `clock` last so time anchors the far edge.
 const DEFAULT_RIGHT_GROUPS: &[&[&str]] = &[
-    &["cpu", "memory", "temperature", "disk"], // machine vitals
-    &["ping", "github"],                       // connectivity + dev
+    &["cpu", "memory", "temperature", "gpu", "disk"], // machine vitals
+    &["ping", "github"],                              // connectivity + dev
     &["spotify"], // media (calendar + kube context live in WASM plugins)
     &["stock", "volume", "battery"], // status
     &["agents"],  // Claude Code agent meter (RFC 0022; native sibling of the claude wasm pill)
+    &["tray"],    // application status icons (SNI + XEmbed)
     &["clock"],   // time — a dedicated end-cap (switcher trails)
 ];
 
@@ -686,6 +687,7 @@ struct BarSurface {
     /// the output's logical (layout) width — same space as iced's logical cursor x,
     /// so the popup clamp stays scale-correct on fractional-scale outputs.
     width: u32,
+    rect: [i32; 4],
 }
 
 struct Bar {
@@ -741,6 +743,7 @@ struct Bar {
 struct OutputInfo {
     name: String,
     width: u32,
+    rect: [i32; 4],
 }
 
 /// Active sway outputs (name + logical width), via sway IPC. `rect` is in sway's logical layout
@@ -759,6 +762,7 @@ fn sway_outputs() -> Option<Vec<OutputInfo>> {
             .map(|o| OutputInfo {
                 name: o.name,
                 width: o.rect.width.max(0) as u32,
+                rect: [o.rect.x, o.rect.y, o.rect.width, o.rect.height],
             })
             .collect(),
     )
@@ -828,7 +832,7 @@ enum Message {
     PickerDismiss,
     ConfigReloaded(Result<Config, String>),
     WindowClosed(window::Id),
-    Cursor(window::Id, f32),
+    Cursor(window::Id, iced::Point),
     /// Second hop of opening a module popup: create its layer surface anchored to the pill's
     /// real layout `bounds` (queried via a widget operation in `OpenPopup`) — deterministic,
     /// vs. the one-event-stale `cursor_x` it used to read.
@@ -954,6 +958,31 @@ fn bar_geom(b: &config::Bar, pos: config::Position) -> BarGeom {
         size,
         layer: iced_layer(b.layer),
     }
+}
+
+/// Convert a bar-local pointer to compositor layout coordinates for external
+/// tray menus. Output rectangles and iced positions are both logical pixels.
+fn bar_pointer_position(
+    rect: [i32; 4],
+    bar: &config::Bar,
+    dock_left: f32,
+    point: iced::Point,
+) -> (i32, i32) {
+    let [x, y, width, height] = rect;
+    let left = if bar.position == config::Position::Right {
+        width - bar.height.max(1) as i32 - bar.margin.right
+    } else {
+        bar.margin.left
+    };
+    let top = if bar.position == config::Position::Bottom {
+        height - bar.height.max(1) as i32 - bar.margin.bottom
+    } else {
+        bar.margin.top
+    };
+    (
+        (x as f32 + left as f32 + dock_left + point.x).round() as i32,
+        (y as f32 + top as f32 + point.y).round() as i32,
+    )
 }
 
 /// Layer-shell geometry for the vertical agent **dock** (RFC 0022): pinned to a side edge, spanning
@@ -1287,12 +1316,14 @@ impl Bar {
                     id: did,
                     output: o.name.clone(),
                     width: o.width,
+                    rect: o.rect,
                 });
             }
             bars.push(BarSurface {
                 id,
                 output: o.name,
                 width: o.width,
+                rect: o.rect,
             });
         }
         // The bar's runtime — the one we drive WASM plugins on (RFC 0008 §3.1).
@@ -1451,11 +1482,22 @@ impl Bar {
                 log::warn!("config reload failed ({e}); keeping previous config");
                 Task::none()
             }
-            Message::Cursor(id, x) => {
+            Message::Cursor(id, position) => {
                 if let Some(b) = self.bars.iter().find(|b| b.id == id) {
-                    self.cursor_x = x;
+                    self.cursor_x = position.x;
                     self.screen_w = b.width;
                     self.cursor_output = Some(b.output.clone());
+                    let (x, y) = bar_pointer_position(
+                        b.rect,
+                        &self.config.bar,
+                        self.dock_left_offset(),
+                        position,
+                    );
+                    for entry in &mut self.modules {
+                        if !entry.disabled {
+                            entry.module.pointer_position(x, y);
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -1875,7 +1917,12 @@ impl Bar {
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if self.is_bar(id) {
             // The same chip row renders on every output's bar surface.
-            return self.bar_view();
+            // CursorEnter carries a position in the layer-shell runtime's cursor,
+            // but iced's public CursorEntered event drops it. Capture it from
+            // widget state too, including a direct entry onto a tray icon.
+            return mouse_area(self.bar_view())
+                .on_move(move |position| Message::Cursor(id, position))
+                .into();
         }
         if self.is_dock(id) {
             return self.dock_view();
@@ -2706,6 +2753,7 @@ impl Bar {
         for o in &desired {
             if let Some(b) = self.bars.iter_mut().find(|b| b.output == o.name) {
                 b.width = o.width;
+                b.rect = o.rect;
             }
         }
 
@@ -2723,6 +2771,10 @@ impl Bar {
             }));
             self.bars.push(BarSurface {
                 id,
+                rect: desired
+                    .iter()
+                    .find(|o| o.name == name)
+                    .map_or([0, 0, 1920, 1080], |o| o.rect),
                 output: name,
                 width,
             });
@@ -2744,6 +2796,7 @@ impl Bar {
             for o in &desired {
                 if let Some(d) = self.docks.iter_mut().find(|d| d.output == o.name) {
                     d.width = o.width;
+                    d.rect = o.rect;
                 }
             }
             for name in dcreate {
@@ -2759,6 +2812,10 @@ impl Bar {
                 }));
                 self.docks.push(BarSurface {
                     id,
+                    rect: desired
+                        .iter()
+                        .find(|o| o.name == name)
+                        .map_or([0, 0, 1920, 1080], |o| o.rect),
                     output: name,
                     width,
                 });
@@ -2960,7 +3017,7 @@ impl Bar {
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Message::Cursor(id, position.x))
+                    Some(Message::Cursor(id, position))
                 }
                 // RFC 0018: ↑/↓/Esc drive the native picker. Only the picker surface is
                 // keyboard-interactive (`Exclusive`), so these only fire while it's focused;
@@ -3147,6 +3204,26 @@ fn config_stream() -> impl Stream<Item = Message> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tray_pointer_respects_output_edges_margins_and_dock() {
+        let mut bar = Config::default().bar;
+        bar.height = 30;
+        bar.margin.left = 7;
+        bar.margin.top = 8;
+        bar.margin.right = 9;
+        bar.margin.bottom = 10;
+        let rect = [-1920, -200, 1920, 1080];
+        let point = iced::Point::new(100.0, 12.0);
+        bar.position = config::Position::Top;
+        assert_eq!(bar_pointer_position(rect, &bar, 50.0, point), (-1763, -180));
+        bar.position = config::Position::Bottom;
+        assert_eq!(bar_pointer_position(rect, &bar, 0.0, point), (-1813, 852));
+        bar.position = config::Position::Right;
+        assert_eq!(bar_pointer_position(rect, &bar, 0.0, point), (61, -180));
+        bar.position = config::Position::Left;
+        assert_eq!(bar_pointer_position(rect, &bar, 0.0, point), (-1813, -180));
+    }
+
     fn keys(cfg: &Config) -> Vec<String> {
         desired_module_specs(cfg)
             .into_iter()
@@ -3211,6 +3288,7 @@ mod tests {
         // left zone defaults to workspaces (leads); clock anchors the far-right end-cap.
         assert_eq!(ks.first().map(String::as_str), Some("workspaces"));
         assert_eq!(ks.last().map(String::as_str), Some("clock"));
+        assert!(ks.iter().any(|k| k == "gpu"));
         // host chrome (the ▾ switcher) is never resolved as a module…
         assert!(!ks.iter().any(|k| k == "switcher"));
         // …and every resolved spec IS a real module (no chrome leaks through).

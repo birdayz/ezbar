@@ -213,6 +213,11 @@ pub trait Module: Send {
         true
     }
 
+    /// Latest pointer position in compositor layout coordinates over a bar. Used
+    /// by native tray menus which must be anchored outside the layer surface.
+    /// A state-only notification: implementations must not block or perform I/O.
+    fn pointer_position(&mut self, _x: i32, _y: i32) {}
+
     /// Bar content. Full iced: `canvas`, `mouse_area`, etc.
     fn view(&self, ctx: &Ctx) -> iced::Element<'_, ModMsg>;
 

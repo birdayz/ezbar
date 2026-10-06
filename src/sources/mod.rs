@@ -1,9 +1,11 @@
 pub mod battery;
 pub mod github;
+pub mod gpu;
 pub mod media;
 pub mod ping;
 pub mod spotify;
 pub mod stock;
 pub mod sway;
 pub mod system;
+pub mod tray;
 pub mod volume;

@@ -298,13 +298,15 @@ or a missed Output event on cold display wake — consider a low-frequency safet
 
 ## Tier-B desktop stack (RFC 0003 — "expensive, demand-gated")
 
-- [~] **MED** — **`media` (MPRIS now-playing) DONE; `tray` remaining.** The `media` module
+- [~] **MED** — **`media` (MPRIS now-playing) DONE; richer D-Bus media remains.** The `media` module
   shells out to `playerctl` (dependency-free, like `ping`/`battery`) for status/artist/title
   from any MPRIS player — click = play/pause (with an immediate state read-back), scroll =
   skip, hidden when nothing plays, change-gated renders. Opt-in (`[modules.media]`, not in
   default placement). A richer D-Bus version (album art + the shared `Service` layer) and
-  **`tray`** (StatusNotifierItem) still want the `Service` layer. (`modules/media.rs`,
-  `sources/media.rs`)
+  its shared `Service` layer remain. (`modules/media.rs`, `sources/media.rs`)
+- [x] **MED** — **`tray`**: shared StatusNotifier watcher/host, dbusmenu and legacy
+  Wine/XEmbed icons, bounded protocol workers and isolated integration tests.
+  See `docs/tray.md` for supported behavior and limitations.
 - [ ] **MED** — **OSD** (volume/brightness transient overlay), driven by `ezbar msg
   volume/brightness …` + widget interaction.
 - [ ] **LOW** — `privacy` (PipeWire mic/cam/screenshare dots).

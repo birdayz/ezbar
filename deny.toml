@@ -14,6 +14,14 @@ multiple-versions = "warn"
 wildcards = "deny"
 # our workspace-internal crates are path deps with no version — that's fine
 allow-wildcard-paths = true
+# Known supply-chain incident versions. scripts/check-lock.py also runs before
+# compilation, without building cargo-deny or any project dependency.
+deny = [
+    { name = "arrayref", version = "=0.3.10" },
+    { name = "proc-macro1" },
+    { name = "internment", version = "=0.8.7" },
+    { name = "append-only-vec", version = "=0.1.9" },
+]
 
 [sources]
 unknown-registry = "deny"

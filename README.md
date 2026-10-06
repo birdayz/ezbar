@@ -23,8 +23,8 @@ filled GPU sparklines, a dark base. Square, not rounded; dark, not busy. Drop in
 - **Real popups.** Hover/click panels are actual layer-shell surfaces, not floating overlays.
 - **One static binary.** No daemon zoo, no GTK; `config.toml` is plain TOML and fully optional.
 
-**Built-in widgets:** workspaces · window title · clock · CPU / temperature / memory / ping
-graphs · volume · battery · media (MPRIS) · GitHub · Google Calendar · Spotify · kubectl ·
+**Built-in widgets:** workspaces · window title · clock · CPU / GPU (usage + temp) / temperature / memory / ping
+graphs · volume · battery · media (MPRIS) · tray (SNI + Wine/XEmbed) · GitHub · Google Calendar · Spotify · kubectl ·
 stock ticker · live Claude-usage · and a no-code `custom` command widget. Clicking, scrolling,
 and hover popups all work.
 
@@ -55,8 +55,12 @@ sudo apt install pkg-config libwayland-dev libxkbcommon-dev libvulkan1 \
 Then:
 
 ```bash
-cargo build --release        # -> target/release/ezbar
+python3 scripts/check-lock.py # Python 3.11+; known malicious-version guard
+cargo build --locked --release # -> target/release/ezbar
 ```
+
+See [tray setup and protocol details](docs/tray.md) and the scoped
+[dependency review / outstanding advisories](docs/tray-dependency-review.md).
 
 ## Run
 
@@ -124,7 +128,7 @@ Full design: [RFC 0002](rfcs/0002-config.md).
 
 ### Graph colors (per-widget)
 
-The inline sparklines (`cpu` · `temperature` · `memory` · `ping`) are **functional by
+The inline sparklines (`cpu` · `gpu` · `temperature` · `memory` · `ping`) are **functional by
 default**: they run green→red by load, so a pinned core *looks* hot. That colour carries
 meaning, so it isn't a global theme token — it's a per-widget knob under
 `[modules.<id>.graph]`, not `[theme]`:
@@ -157,8 +161,10 @@ value can't blank a graph.
 | Widget | Action |
 |--------|--------|
 | cpu / temp / mem / ping | click the label to toggle its graph |
+| gpu | AMD GPU utilization + edge temperature; click either label to toggle both graphs |
 | volume | click to mute, scroll to change |
 | media | click to play/pause, scroll to skip; hides when nothing's playing |
+| tray | left/middle activate, right-click menu, scroll forwarded to the application |
 | kubectl | left-click clears the context, right-click opens the picker |
 | calendar | click for today's meetings; blinks when one is imminent/ongoing |
 | github | click for the grouped list; click a row to open + mark read, right-click to dismiss, `[clear all]` to mark all |

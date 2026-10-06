@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod custom;
 pub mod disk;
 pub mod github;
+pub mod gpu;
 pub mod ip;
 pub mod keyboard;
 pub mod markup;
@@ -17,6 +18,7 @@ pub mod ping;
 pub mod spotify;
 pub mod stock;
 pub mod temperature;
+pub mod tray;
 pub mod updates;
 pub mod volume;
 pub mod window_title;
@@ -326,6 +328,7 @@ pub fn is_module(id: &str) -> bool {
             id,
             "agents"
                 | "cpu"
+                | "gpu"
                 | "github"
                 | "custom"
                 | "disk"
@@ -335,6 +338,7 @@ pub fn is_module(id: &str) -> bool {
                 | "keyboard"
                 | "workspaces"
                 | "media"
+                | "tray"
                 | "memory"
                 | "temperature"
                 | "ping"
@@ -358,8 +362,8 @@ pub(crate) fn graph_line_color(cfg: &toml::Value) -> Option<String> {
 }
 
 /// Build the sparkline canvas for a metric module from its resolved [`GraphCfg`] — the one
-/// place the four near-identical metric views (cpu/memory/temperature/ping) share, so a graph
-/// change (size, stroke, fill, a future `smooth`) touches one spot, not four. `line_color` is
+/// place the metric views (cpu/gpu/memory/temperature/ping) share, so a graph
+/// change (size, stroke, fill, a future `smooth`) touches one spot. `line_color` is
 /// the resolved override (`None` = per-value threshold colouring).
 pub(crate) fn graph_widget<'a>(
     gcfg: &GraphCfg,
@@ -437,6 +441,7 @@ pub fn build(
     match id {
         "agents" => Some(Box::new(agents::Agents::new(instance, cfg))),
         "cpu" => Some(Box::new(cpu::Cpu::new(instance, cfg))),
+        "gpu" => Some(Box::new(gpu::Gpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
         "disk" => Some(Box::new(disk::Disk::new(instance, cfg))),
@@ -446,6 +451,7 @@ pub fn build(
         "keyboard" => Some(Box::new(keyboard::Keyboard::new(instance, cfg))),
         "workspaces" => Some(Box::new(workspaces::Workspaces::new(instance, cfg))),
         "media" => Some(Box::new(media::Media::new(instance, cfg))),
+        "tray" => Some(Box::new(tray::Tray::new(instance, cfg))),
         "memory" => Some(Box::new(memory::Memory::new(instance, cfg))),
         "temperature" => Some(Box::new(temperature::Temperature::new(instance, cfg))),
         "ping" => Some(Box::new(ping::Ping::new(instance, cfg))),
@@ -542,6 +548,16 @@ mod tests {
         assert!(!g[0].write);
         // no fs key → no grants (default-deny)
         assert!(fs_grants(&tbl("")).is_empty());
+    }
+
+    #[test]
+    fn gpu_is_registered_and_buildable() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(is_module("gpu"));
+        let module = build("gpu", 7, &tbl(""), rt.handle()).unwrap();
+        assert_eq!(module.id(), "gpu");
     }
 
     #[test]

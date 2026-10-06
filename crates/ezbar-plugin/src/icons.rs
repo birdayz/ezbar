@@ -33,7 +33,7 @@ macro_rules! icon_set {
 
 icon_set! {
     // ── system (Lucide) ──
-    Cpu => "cpu", Memory => "memory", Temperature => "temperature", Ping => "ping",
+    Cpu => "cpu", Gpu => "gpu", Memory => "memory", Temperature => "temperature", Ping => "ping",
     VolumeHigh => "volume-high", VolumeMedium => "volume-medium", VolumeMute => "volume-mute",
     Battery => "battery", BatteryCharging => "battery-charging",
     BatteryLow => "battery-low", BatteryWarning => "battery-warning",
