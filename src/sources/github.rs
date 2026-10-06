@@ -1,7 +1,9 @@
 //! GitHub notifications via the REST API. Port of pkg/datasource/github.go.
 //! Uses conditional requests (If-Modified-Since), honours X-Poll-Interval,
-//! filters by reason, and prunes merged/closed review-requested PRs.
+//! filters by reason, and prunes merged/closed review-requested PRs. Also lists the
+//! user's own open PRs via the search API.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration as StdDuration;
 
@@ -81,13 +83,24 @@ pub fn load_config() -> GitHubConfig {
         .unwrap_or_default()
 }
 
-pub fn find_token() -> Option<String> {
+/// `~/.config/ezbar/github_token` (next to `config.toml`): the token file used when
+/// `[modules.github] token_file` is not set.
+pub fn default_token_file() -> Option<PathBuf> {
+    Some(crate::config::path()?.with_file_name("github_token"))
+}
+
+/// Resolve a token: `$GH_TOKEN` / `$GITHUB_TOKEN`, then `token_file`, then `gh auth token`.
+/// Blocking (may spawn `gh`).
+pub fn find_token(token_file: Option<&Path>) -> Option<String> {
     for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(t) = std::env::var(var) {
             if !t.is_empty() {
                 return Some(t);
             }
         }
+    }
+    if let Some(t) = token_file.and_then(read_token_file) {
+        return Some(t);
     }
     let out = Command::new("gh").args(["auth", "token"]).output().ok()?;
     if out.status.success() {
@@ -97,6 +110,63 @@ pub fn find_token() -> Option<String> {
         }
     }
     None
+}
+
+fn read_token_file(path: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// One of the user's own open pull requests.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MyPr {
+    pub repo_name: String,
+    pub number: u64,
+    pub title: String,
+    pub html_url: String,
+    pub draft: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+const MY_PRS_QUERY: &str = "is:pr is:open author:@me archived:false";
+
+/// Parse a `/search/issues` response into PRs. Items without an https URL are dropped,
+/// since the URL is handed to `xdg-open`.
+pub fn parse_my_prs(body: &Value) -> Vec<MyPr> {
+    let Some(items) = body["items"].as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let html_url = it["html_url"].as_str()?;
+            if !html_url.starts_with("https://") {
+                return None;
+            }
+            Some(MyPr {
+                repo_name: repo_from_api_url(it["repository_url"].as_str().unwrap_or("")),
+                number: it["number"].as_u64().unwrap_or(0),
+                title: it["title"].as_str().unwrap_or("").to_string(),
+                html_url: html_url.to_string(),
+                draft: it["draft"].as_bool().unwrap_or(false),
+                updated_at: it["updated_at"]
+                    .as_str()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(Utc::now),
+            })
+        })
+        .collect()
+}
+
+/// `https://api.github.com/repos/owner/repo` → `owner/repo`.
+fn repo_from_api_url(u: &str) -> String {
+    let mut parts = u.trim_end_matches('/').rsplit('/');
+    match (parts.next(), parts.next()) {
+        (Some(repo), Some(owner)) if !owner.is_empty() => format!("{owner}/{repo}"),
+        _ => String::new(),
+    }
 }
 
 fn client(token: &str) -> Result<Client, String> {
@@ -243,6 +313,27 @@ impl GitHub {
         Ok(FetchResult::Data(data))
     }
 
+    /// The user's own open PRs, most recently updated first.
+    pub async fn fetch_my_prs(&self) -> Result<Vec<MyPr>, String> {
+        let client = client(&self.token)?;
+        let resp = client
+            .get("https://api.github.com/search/issues")
+            .query(&[
+                ("q", MY_PRS_QUERY),
+                ("sort", "updated"),
+                ("order", "desc"),
+                ("per_page", "50"),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("searching PRs: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("github search API {}", resp.status().as_u16()));
+        }
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        Ok(parse_my_prs(&body))
+    }
+
     fn filter(&self, ns: Vec<GitHubNotification>) -> Vec<GitHubNotification> {
         ns.into_iter()
             .filter(|n| n.unread)
@@ -360,6 +451,48 @@ mod tests {
             "https://github.com/o/r/issues/3"
         );
         assert_eq!(api_to_html("", "Issue"), "");
+    }
+
+    #[test]
+    fn token_file_is_trimmed_and_empty_is_none() {
+        let dir = std::env::temp_dir().join(format!("ezbar-gh-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("github_token");
+        std::fs::write(&f, "  ghp_abc\n").unwrap();
+        assert_eq!(read_token_file(&f).as_deref(), Some("ghp_abc"));
+        std::fs::write(&f, "\n").unwrap();
+        assert_eq!(read_token_file(&f), None);
+        assert_eq!(read_token_file(&dir.join("missing")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parses_my_prs_search_response() {
+        let body = serde_json::json!({"items": [
+            {
+                "repository_url": "https://api.github.com/repos/o/r",
+                "number": 42,
+                "title": "Fix it",
+                "html_url": "https://github.com/o/r/pull/42",
+                "draft": true,
+                "updated_at": "2026-10-06T13:34:24Z"
+            },
+            {   // not https → never handed to xdg-open
+                "repository_url": "https://api.github.com/repos/o/r",
+                "number": 1,
+                "title": "x",
+                "html_url": "file:///etc/passwd"
+            }
+        ]});
+        let prs = parse_my_prs(&body);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].repo_name, "o/r");
+        assert_eq!(prs[0].number, 42);
+        assert_eq!(prs[0].title, "Fix it");
+        assert!(prs[0].draft);
+        assert_eq!(prs[0].updated_at.to_rfc3339(), "2026-10-06T13:34:24+00:00");
+        assert!(parse_my_prs(&serde_json::json!({"message": "Bad credentials"})).is_empty());
+        assert_eq!(repo_from_api_url(""), "");
     }
 
     #[test]

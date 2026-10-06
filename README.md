@@ -93,7 +93,7 @@ Every module's `[modules.<id>]` options are listed in
 | Widget   | Reads from |
 |----------|------------|
 | Calendar | `calendar_url` (your secret iCal URL) or `$GOOGLE_CALENDAR_ICAL_URL` |
-| GitHub   | `$GH_TOKEN` / `$GITHUB_TOKEN` / `gh auth token`; optional `github_config.json` (`reasons`, `exclude_repos`) |
+| GitHub   | `$GH_TOKEN` / `$GITHUB_TOKEN` / `github_token` / `gh auth token`; optional `github_config.json` (`reasons`, `exclude_repos`) |
 | Spotify  | `spotify_config.json` (`client_id`, `client_secret`); or `$SPOTIFY_ACCESS_TOKEN` |
 | Stock    | `$EZBAR_STOCK_SYMBOL` (default `NQ=F`), `$EZBAR_STOCK_API_KEY` (optional) |
 | Ping     | `[modules.ping].target` (default `8.8.8.8`) |
@@ -167,7 +167,7 @@ value can't blank a graph.
 | tray | left/middle activate, right-click menu, scroll forwarded to the application |
 | kubectl | left-click clears the context, right-click opens the picker |
 | calendar | click for today's meetings; blinks when one is imminent/ongoing |
-| github | click for the grouped list; click a row to open + mark read, right-click to dismiss, `[clear all]` to mark all |
+| github | click for the grouped list + your open PRs; click a row to open (notifications: + mark read), right-click to dismiss, `[clear all]` to mark all |
 | spotify | click to play/pause (or authorize), scroll to skip; long titles marquee |
 
 ## Plugins — two ways

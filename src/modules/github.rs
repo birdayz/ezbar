@@ -1,22 +1,35 @@
 //! GitHub module: count label + click-toggle interactive popup (grouped
-//! notifications; rows open/dismiss, "clear all" marks read).
+//! notifications; rows open/dismiss, "clear all" marks read; then the user's own
+//! open PRs, click to open).
 //! Validates: click popup (PopupMode::Click) with input routed back to the module.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use ezbar_plugin::iced::alignment::Vertical;
 use ezbar_plugin::iced::futures::{SinkExt, Stream};
-use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text};
+use ezbar_plugin::iced::widget::{column, mouse_area, row, scrollable, text, Space};
 use ezbar_plugin::iced::{Color, Element, Length, Subscription, Task};
 use ezbar_plugin::icons::Icon;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Response};
 
-use crate::sources::github::{self, GitHubData, GitHubNotification};
+use crate::sources::github::{self, FetchResult, GitHubData, GitHubNotification, MyPr};
+
+/// How often to retry token discovery while none is found (no `gh`, not logged in,
+/// no token file), so setting one up needs no restart.
+const NO_TOKEN_RETRY: Duration = Duration::from_secs(60);
+/// Popup cap for the "My open PRs" list.
+const MAX_PRS: usize = 30;
 
 enum Msg {
-    Loaded(GitHubData),
+    /// Token discovery result from the stream; `None` = nothing found (yet).
+    Token(Option<String>),
+    /// Fresh notifications, `Ok(None)` = 304 Not Modified, or a fetch error.
+    Notifications(Result<Option<GitHubData>, String>),
+    Prs(Result<Vec<MyPr>, String>),
     TogglePopup,
     Open(String, String), // url, id
+    OpenPr(String),       // url
     MarkRead(String),
     MarkAll,
     Done,
@@ -26,18 +39,51 @@ pub struct GitHub {
     instance: u64,
     data: GitHubData,
     token: Option<String>,
+    /// Token discovery ran and found nothing: the popup shows setup instructions.
+    no_token: bool,
+    token_file: Option<PathBuf>,
+    show_prs: bool,
+    /// `None` until the first PR search returns.
+    prs: Option<Vec<MyPr>>,
+    notif_error: Option<String>,
+    prs_error: Option<String>,
 }
 
 impl GitHub {
-    pub fn new(instance: u64) -> Self {
+    /// `[modules.github]`: `token_file` (default `~/.config/ezbar/github_token`) and
+    /// `my_prs` (default `true`).
+    pub fn new(instance: u64, cfg: &toml::Value) -> Self {
         GitHub {
             instance,
             data: GitHubData {
                 display_text: "…".to_string(),
                 ..Default::default()
             },
-            token: github::find_token(),
+            token: None,
+            no_token: false,
+            token_file: cfg
+                .get("token_file")
+                .and_then(|v| v.as_str())
+                .map(super::expand_tilde)
+                .or_else(github::default_token_file),
+            show_prs: cfg.get("my_prs").and_then(|v| v.as_bool()).unwrap_or(true),
+            prs: None,
+            notif_error: None,
+            prs_error: None,
         }
+    }
+
+    /// The token file path for the setup hint, `~`-abbreviated.
+    fn token_file_hint(&self) -> String {
+        let Some(p) = &self.token_file else {
+            return "~/.config/ezbar/github_token".to_string();
+        };
+        if let Some(home) = std::env::var_os("HOME") {
+            if let Ok(rest) = p.strip_prefix(&home) {
+                return format!("~/{}", rest.display());
+            }
+        }
+        p.display().to_string()
     }
 
     fn remove(&mut self, id: &str) {
@@ -65,13 +111,53 @@ impl Module for GitHub {
     }
 
     fn subscription(&self) -> Subscription<ModMsg> {
-        ezbar_plugin::sub::keyed(self.instance, gh_stream)
+        // bake the config into the recipe so a config change re-rolls the stream
+        Subscription::run_with(
+            (self.instance, self.token_file.clone(), self.show_prs),
+            gh_stream,
+        )
     }
 
     fn update(&mut self, msg: ModMsg) -> Response {
         match msg.get::<Msg>() {
-            Some(Msg::Loaded(d)) => {
-                self.data = d.clone();
+            Some(Msg::Token(t)) => {
+                self.token = t.clone();
+                self.no_token = t.is_none();
+                if self.no_token {
+                    self.data.display_text = "?".to_string();
+                } else if self.data.display_text == "?" {
+                    self.data.display_text = "…".to_string();
+                }
+                Response::none()
+            }
+            Some(Msg::Notifications(r)) => {
+                match r {
+                    Ok(Some(d)) => {
+                        self.data = d.clone();
+                        self.notif_error = None;
+                    }
+                    Ok(None) => self.notif_error = None,
+                    Err(e) => {
+                        self.notif_error = Some(e.clone());
+                        if self.data.display_text == "…" {
+                            self.data.display_text = "!".to_string();
+                        }
+                    }
+                }
+                Response::none()
+            }
+            Some(Msg::Prs(r)) => {
+                match r {
+                    Ok(p) => {
+                        self.prs = Some(p.clone());
+                        self.prs_error = None;
+                    }
+                    Err(e) => self.prs_error = Some(e.clone()),
+                }
+                Response::none()
+            }
+            Some(Msg::OpenPr(url)) => {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
                 Response::none()
             }
             Some(Msg::TogglePopup) => Response::request(HostRequest::OpenPopup(PopupMode::Click)),
@@ -122,7 +208,21 @@ impl Module for GitHub {
         .into()
     }
 
-    fn popup(&self, _ctx: &Ctx) -> Option<Element<'_, ModMsg>> {
+    fn popup(&self, ctx: &Ctx) -> Option<Element<'_, ModMsg>> {
+        if self.no_token {
+            return Some(
+                column![
+                    text("GitHub not set up").size(15),
+                    text(format!(
+                        "Install gh and run `gh auth login`,\nor save a token to {}",
+                        self.token_file_hint()
+                    ))
+                    .color(ctx.fg_dim()),
+                ]
+                .spacing(4)
+                .into(),
+            );
+        }
         let mut col: Vec<Element<ModMsg>> = Vec::new();
 
         let mut header: Vec<Element<ModMsg>> =
@@ -170,11 +270,66 @@ impl Module for GitHub {
                 col.push(notification_row(n));
             }
         }
-        if self.data.notifications.is_empty() {
+        if let Some(e) = &self.notif_error {
+            col.push(text(e.clone()).color(ctx.warn()).into());
+        } else if self.data.notifications.is_empty() {
             col.push(text("No notifications").into());
+        }
+
+        if self.show_prs {
+            col.push(Space::new().height(Length::Fixed(6.0)).into());
+            col.push(
+                text(match &self.prs {
+                    Some(prs) => format!("My open PRs ({})", prs.len()),
+                    None => "My open PRs".to_string(),
+                })
+                .size(15)
+                .into(),
+            );
+            if let Some(e) = &self.prs_error {
+                col.push(text(e.clone()).color(ctx.warn()).into());
+            }
+            match &self.prs {
+                Some(prs) if prs.is_empty() => col.push(text("No open PRs").into()),
+                Some(prs) => {
+                    for pr in prs.iter().take(MAX_PRS) {
+                        col.push(pr_row(pr));
+                    }
+                }
+                None if self.prs_error.is_none() => {
+                    col.push(text("…").color(ctx.fg_dim()).into());
+                }
+                None => {}
+            }
         }
         Some(scrollable(column(col).spacing(4)).into())
     }
+}
+
+/// One of the user's open PRs; click opens it in the browser. Drafts are dimmed.
+fn pr_row<'a>(pr: &MyPr) -> Element<'a, ModMsg> {
+    let dim = Color::from_rgb(0.55, 0.58, 0.6);
+    let repo = pr
+        .repo_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(&pr.repo_name)
+        .to_string();
+    let title = text(trunc(&format!("#{} {}", pr.number, pr.title), 45)).width(Length::Fill);
+    let r = row(vec![
+        text(if pr.draft { "DR" } else { "PR" }).color(dim).into(),
+        text(trunc(&repo, 15))
+            .color(dim)
+            .width(Length::Fixed(110.0))
+            .into(),
+        if pr.draft { title.color(dim) } else { title }.into(),
+        text(github::time_ago(pr.updated_at)).color(dim).into(),
+    ])
+    .spacing(8)
+    .align_y(Vertical::Center);
+    mouse_area(r)
+        .on_press(ModMsg::new(Msg::OpenPr(pr.html_url.clone())))
+        .into()
 }
 
 fn notification_row<'a>(n: &GitHubNotification) -> Element<'a, ModMsg> {
@@ -228,26 +383,35 @@ fn trunc(s: &str, max: usize) -> String {
     out
 }
 
-fn gh_stream(_id: &u64) -> impl Stream<Item = ModMsg> {
+fn gh_stream(key: &(u64, Option<PathBuf>, bool)) -> impl Stream<Item = ModMsg> {
+    let (_, token_file, show_prs) = key.clone();
     ezbar_plugin::iced::stream::channel(
         1,
-        |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
-            let token = match github::find_token() {
-                Some(t) => t,
-                None => {
-                    let _ = out
-                        .send(ModMsg::new(Msg::Loaded(GitHubData {
-                            display_text: "?".to_string(),
-                            ..Default::default()
-                        })))
-                        .await;
-                    return;
+        move |mut out: ezbar_plugin::iced::futures::channel::mpsc::Sender<ModMsg>| async move {
+            let token = loop {
+                let tf = token_file.clone();
+                // `gh auth token` is a blocking subprocess: keep it off the runtime threads.
+                let t = tokio::task::spawn_blocking(move || github::find_token(tf.as_deref()))
+                    .await
+                    .ok()
+                    .flatten();
+                let _ = out.send(ModMsg::new(Msg::Token(t.clone()))).await;
+                if let Some(t) = t {
+                    break t;
                 }
+                tokio::time::sleep(NO_TOKEN_RETRY).await;
             };
             let mut gh = github::GitHub::new(token);
             loop {
-                if let Ok(github::FetchResult::Data(d)) = gh.fetch().await {
-                    let _ = out.send(ModMsg::new(Msg::Loaded(d))).await;
+                let notifs = match gh.fetch().await {
+                    Ok(FetchResult::Data(d)) => Ok(Some(d)),
+                    Ok(FetchResult::NotModified) => Ok(None),
+                    Err(e) => Err(e),
+                };
+                let _ = out.send(ModMsg::new(Msg::Notifications(notifs))).await;
+                if show_prs {
+                    let prs = gh.fetch_my_prs().await;
+                    let _ = out.send(ModMsg::new(Msg::Prs(prs))).await;
                 }
                 tokio::time::sleep(Duration::from_secs(gh.poll_interval.max(1))).await;
             }

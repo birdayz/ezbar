@@ -13,7 +13,7 @@ samples = 60
 ## Modules with no options
 
 These are placed by id alone and read no config: `battery`, `calendar`, `claude`,
-`github`, `kubectl`, `spotify`, `stock`, `volume`.
+`kubectl`, `spotify`, `stock`, `volume`.
 
 ## Per-module options
 
@@ -23,6 +23,8 @@ These are placed by id alone and read no config: `battery`, `calendar`, `claude`
 | `tray` | `icon_size` | int (px) | `22` | clamped 12..48; [SNI + XEmbed details](tray.md) |
 | | `spacing` | int (px) | `8` | clamped 0..32 |
 | | `show_passive` | bool | `false` | include passive/hidden application icons |
+| `github` | `token_file` | string (path) | `"~/.config/ezbar/github_token"` | used when `$GH_TOKEN`/`$GITHUB_TOKEN` are unset; before `gh auth token`. See [GitHub](#github) |
+| | `my_prs` | bool | `true` | list your open PRs in the popup |
 | `cpu` | `[graph]` | table | — | see [Graph sub-table](#graph-sub-table) (samples default 30) |
 | `gpu` | `card` | string | `""` (auto) | DRM card name, e.g. `"card1"`; see [GPU](#gpu) |
 | | `[graph]` | table | — | applies to both utilization and temperature graphs (samples default 30) |
@@ -58,6 +60,23 @@ These are placed by id alone and read no config: `battery`, `calendar`, `claude`
 
 `custom` output and `window_title`'s `format` accept the [inline markup](#inline-markup)
 subset.
+
+## GitHub
+
+The chip counts unread notifications; the click popup lists them, then your open PRs
+(`is:pr is:open author:@me`, most recently updated first; drafts dimmed). Click a PR to
+open it in the browser.
+
+The token is taken from, in order: `$GH_TOKEN` / `$GITHUB_TOKEN`, the `token_file`
+(only its trimmed contents), then `gh auth token`. Without `gh`, put a token in the file:
+
+```sh
+(umask 077; printf '%s\n' ghp_… > ~/.config/ezbar/github_token)
+```
+
+Use a **classic** token with the `notifications` and `repo` scopes: fine-grained tokens
+cannot read the notifications API. Until a token is found the chip shows `?` and the
+popup explains the setup; it is picked up within a minute, without a restart.
 
 ## GPU
 

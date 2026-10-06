@@ -442,7 +442,7 @@ pub fn build(
         "agents" => Some(Box::new(agents::Agents::new(instance, cfg))),
         "cpu" => Some(Box::new(cpu::Cpu::new(instance, cfg))),
         "gpu" => Some(Box::new(gpu::Gpu::new(instance, cfg))),
-        "github" => Some(Box::new(github::GitHub::new(instance))),
+        "github" => Some(Box::new(github::GitHub::new(instance, cfg))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
         "disk" => Some(Box::new(disk::Disk::new(instance, cfg))),
         "net" => Some(Box::new(net::Net::new(instance, cfg))),

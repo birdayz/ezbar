@@ -20,7 +20,7 @@ fn main() -> ezbar_plugin::iced::Result {
     let modules: Vec<Box<dyn Module>> = match which.as_str() {
         "cpu" => vec![Box::new(Cpu::new(0, &cfg))],
         "gpu" => vec![Box::new(Gpu::new(0, &cfg))],
-        "github" => vec![Box::new(GitHub::new(0))],
+        "github" => vec![Box::new(GitHub::new(0, &cfg))],
         "clock" => {
             // CLOCK_CAL=hover|click picks which popup to preview (default click = full grid).
             let mut t = toml::value::Table::new();
@@ -33,7 +33,7 @@ fn main() -> ezbar_plugin::iced::Result {
         "all" => vec![
             Box::new(Cpu::new(0, &cfg)),
             Box::new(Gpu::new(1, &cfg)),
-            Box::new(GitHub::new(2)),
+            Box::new(GitHub::new(2, &cfg)),
         ],
         other => {
             eprintln!("unknown module '{other}'. try one of: cpu, gpu, github, clock, all");
