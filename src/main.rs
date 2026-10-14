@@ -19,6 +19,7 @@ use ezbar::config::{self, Config, Style, SwitcherPos};
 use ezbar::modules;
 use ezbar::sources::volume;
 use ezbar_plugin::{Ctx, HostRequest, ModMsg, Module, PopupMode, Reconfigure, ThemeTokens};
+use wayland_client::protocol::wl_output::WlOutput;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -131,6 +132,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod install;
 mod ipc;
+mod launcher;
+mod outputs;
 mod package;
 mod registry;
 
@@ -416,11 +419,15 @@ fn main() -> iced_layershell::Result {
         // outputs on hotplug (RFC 0004) and watches its own config, so the new
         // invocation just exits. The lock self-clears when its owner dies, so a
         // crashed instance is cleanly replaced (no stale lockfiles).
-        let _singleton = match acquire_singleton() {
-            Ok(guard) => guard,
-            Err(()) => {
+        let _singleton = match launcher::supervisor_guard() {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
                 log::info!("ezbar already running for this session — exiting");
                 return Ok(());
+            }
+            Err(e) => {
+                eprintln!("ezbar: cannot acquire supervisor lock: {e}");
+                std::process::exit(1);
             }
         };
         loop {
@@ -429,7 +436,7 @@ fn main() -> iced_layershell::Result {
                 .env("EZBAR_CHILD", "1")
                 .status()
             {
-                Ok(s) if s.success() => log::info!("child exited cleanly"),
+                Ok(s) if s.success() => log::debug!("child exited cleanly"),
                 Ok(s) => log::error!("child crashed: {:?}", s.code()),
                 Err(e) => log::error!("failed to spawn child: {e}"),
             }
@@ -437,6 +444,20 @@ fn main() -> iced_layershell::Result {
         }
     }
 
+    // The renderer must own its own guard: it can outlive a killed supervisor,
+    // and EZBAR_CHILD=1 foreground launches must not bypass singleton protection.
+    // A replacement supervisor keeps retrying until an orphaned renderer exits.
+    let _renderer = match launcher::renderer_guard() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            log::debug!("ezbar renderer already running for this session — exiting");
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("ezbar: cannot acquire renderer lock: {e}");
+            std::process::exit(1);
+        }
+    };
     run_bar()
 }
 
@@ -458,30 +479,6 @@ fn print_help() {
          ezbar --help       print this help\n\n\
          EZBAR_CHILD=1 ezbar   run a single foreground instance (no respawn)"
     );
-}
-
-/// Acquire a per-session singleton lock via a Linux **abstract** socket: the
-/// kernel drops it automatically when the owning process exits, so it's
-/// self-cleaning (unlike a pidfile, which can go stale after a crash). `Err(())`
-/// means another ezbar already holds it for this `(XDG_RUNTIME_DIR,
-/// WAYLAND_DISPLAY)` — i.e. this wayland session.
-#[cfg(target_os = "linux")]
-fn acquire_singleton() -> Result<std::os::unix::net::UnixListener, ()> {
-    use std::os::linux::net::SocketAddrExt;
-    use std::os::unix::net::{SocketAddr, UnixListener};
-    let key = format!(
-        "ezbar.{}.{}",
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
-        std::env::var("WAYLAND_DISPLAY").unwrap_or_default()
-    );
-    SocketAddr::from_abstract_name(key.as_bytes())
-        .and_then(|addr| UnixListener::bind_addr(&addr))
-        .map_err(|_| ())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn acquire_singleton() -> Result<(), ()> {
-    Ok(()) // singleton guard is Linux-only; elsewhere just proceed
 }
 
 /// Install the metric sampler the WASM reactor fans out to subscribers (RFC 0012). Maps each
@@ -557,6 +554,11 @@ fn net_total_bytes() -> Option<u64> {
 }
 
 fn run_bar() -> iced_layershell::Result {
+    let outputs = outputs::Outputs::connect()
+        .map_err(|e| iced_layershell::Error::WindowCreationFailed(Box::new(e)))?;
+    let connection = outputs.connection();
+    assert!(WAYLAND_OUTPUTS.set(outputs).is_ok());
+
     // Memory: glibc hoards freed heap in its arenas instead of returning it to the
     // OS, so the startup churn (wgpu + wasmtime warmup) strands a few hundred MB of
     // free-but-resident pages — measured ~330 MB that `malloc_trim(0)` hands straight
@@ -622,6 +624,7 @@ fn run_bar() -> iced_layershell::Result {
                 start_mode: StartMode::Background,
                 ..Default::default()
             },
+            with_connection: Some(connection.into()),
             ..Default::default()
         })
         .style(Bar::style)
@@ -647,6 +650,14 @@ struct BoundedExecutor(tokio::runtime::Runtime);
 /// this exact runtime. Avoids both a second runtime and any `Handle::current()` ordering
 /// risk in `Bar::new`.
 static RT_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+
+/// Named output proxies from the same connection iced uses. Never bind a bar by name:
+/// iced_layershell silently falls back to the default monitor when its name cache lags.
+static WAYLAND_OUTPUTS: std::sync::OnceLock<outputs::Outputs> = std::sync::OnceLock::new();
+
+fn named_output(name: &str) -> Option<WlOutput> {
+    WAYLAND_OUTPUTS.get()?.get(name)
+}
 
 impl iced::Executor for BoundedExecutor {
     fn new() -> Result<Self, std::io::Error> {
@@ -684,6 +695,9 @@ enum PopupKind {
 struct BarSurface {
     id: window::Id,
     output: String,
+    /// A monitor can disappear and return with the same name but a different proxy.
+    /// Keep its binding identity: iced_layershell may lose the old Closed event.
+    binding: WlOutput,
     /// the output's logical (layout) width — same space as iced's logical cursor x,
     /// so the popup clamp stays scale-correct on fractional-scale outputs.
     width: u32,
@@ -783,17 +797,18 @@ fn desired_outputs(cfg: &Config) -> Option<Vec<OutputInfo>> {
 
 /// The pure output-churn decision (RFC 0004): given the `desired` output names and the
 /// currently-`tracked` `(output, surface-id)` pairs, return `(close, create)` — the surface
-/// ids to close (their output is gone or de-selected) and the output names that need a new
-/// surface (desired but untracked). **Dedups**: an output already tracked, or listed twice in
-/// `desired`, yields at most ONE surface — the guard against the "two-bars saga" (a duplicate
+/// ids to close (their output is gone, de-selected, or tracked more than once) and output names
+/// that need a new surface (desired but untracked). **Dedups**: an output already tracked, or
+/// listed twice in `desired`, yields at most ONE surface — the guard against the "two-bars saga" (a duplicate
 /// bar stacked on one output). Generic over the id type so it unit-tests without `window::Id`.
 fn plan_surfaces<Id: Copy>(desired: &[String], tracked: &[(String, Id)]) -> (Vec<Id>, Vec<String>) {
     use std::collections::HashSet;
     let desired_set: HashSet<&str> = desired.iter().map(String::as_str).collect();
     let tracked_set: HashSet<&str> = tracked.iter().map(|(n, _)| n.as_str()).collect();
+    let mut kept = HashSet::new();
     let close = tracked
         .iter()
-        .filter(|(n, _)| !desired_set.contains(n.as_str()))
+        .filter(|(n, _)| !desired_set.contains(n.as_str()) || !kept.insert(n.as_str()))
         .map(|(_, id)| *id)
         .collect();
     let mut seen = HashSet::new();
@@ -802,6 +817,27 @@ fn plan_surfaces<Id: Copy>(desired: &[String], tracked: &[(String, Id)]) -> (Vec
         .filter(|n| !tracked_set.contains(n.as_str()) && seen.insert(n.as_str()))
         .cloned()
         .collect();
+    (close, create)
+}
+
+/// Drop surfaces whose actual output binding disappeared or was replaced, even when
+/// Sway still reports the same name or a compositor-close event was lost/coalesced.
+fn plan_bound_surfaces<Id: Copy>(
+    desired: &[String],
+    tracked: &[(String, Id, bool)],
+) -> (Vec<Id>, Vec<String>) {
+    let current: Vec<_> = tracked
+        .iter()
+        .filter(|(_, _, valid)| *valid)
+        .map(|(name, id, _)| (name.clone(), *id))
+        .collect();
+    let (mut close, create) = plan_surfaces(desired, &current);
+    close.extend(
+        tracked
+            .iter()
+            .filter(|(_, _, valid)| !valid)
+            .map(|(_, id, _)| *id),
+    );
     (close, create)
 }
 
@@ -1003,7 +1039,7 @@ fn dock_geom(d: &config::Dock) -> BarGeom {
     }
 }
 
-fn dock_settings(cfg: &Config, output: &str) -> NewLayerShellSettings {
+fn dock_settings(cfg: &Config, output: OutputOption) -> NewLayerShellSettings {
     let g = dock_geom(&cfg.dock);
     NewLayerShellSettings {
         size: Some(g.size),
@@ -1012,13 +1048,17 @@ fn dock_settings(cfg: &Config, output: &str) -> NewLayerShellSettings {
         margin: Some(g.margin),
         layer: g.layer,
         keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: OutputOption::OutputName(output.to_string()),
+        output_option: output,
         namespace: Some("ezbar-dock".to_string()),
         ..Default::default()
     }
 }
 
-fn bar_settings(cfg: &Config, pos: config::Position, output: &str) -> NewLayerShellSettings {
+fn bar_settings(
+    cfg: &Config,
+    pos: config::Position,
+    output: OutputOption,
+) -> NewLayerShellSettings {
     let g = bar_geom(&cfg.bar, pos);
     NewLayerShellSettings {
         size: Some(g.size),
@@ -1027,7 +1067,7 @@ fn bar_settings(cfg: &Config, pos: config::Position, output: &str) -> NewLayerSh
         margin: Some(g.margin),
         layer: g.layer,
         keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: OutputOption::OutputName(output.to_string()),
+        output_option: output,
         namespace: Some("ezbar".to_string()),
         ..Default::default()
     }
@@ -1289,43 +1329,9 @@ impl Bar {
         modules::set_yolo(config.plugins.yolo); // before any module is built
         let bar_pos = config.bar.position;
         let theme = config.theme_tokens();
-        // One surface per matching output (RFC 0004). Empty is valid — the
-        // output-event subscription will add surfaces as outputs appear.
-        // At startup an IPC failure (`None`) just means "no surfaces yet" — outputs_stream emits a
-        // synthetic reconcile on (re)connect, so the bar converges once sway answers.
-        let outputs = desired_outputs(&config).unwrap_or_default();
-        let screen_w = outputs.first().map(|o| o.width).unwrap_or(1920);
-        let mut bars = Vec::new();
-        let mut docks = Vec::new();
-        let mut opens = Vec::new();
+        // Boot uses the same readiness-gated, deduplicated surface reconcile as hotplug
+        // and reload. A Sway output name alone is not enough to safely bind a surface.
         let dock_on = config.dock.enabled;
-        for o in outputs {
-            let id = window::Id::unique();
-            opens.push(Task::done(Message::NewLayerShell {
-                settings: bar_settings(&config, bar_pos, &o.name),
-                id,
-            }));
-            // RFC 0022: a parallel dock surface per output when enabled.
-            if dock_on {
-                let did = window::Id::unique();
-                opens.push(Task::done(Message::NewLayerShell {
-                    settings: dock_settings(&config, &o.name),
-                    id: did,
-                }));
-                docks.push(BarSurface {
-                    id: did,
-                    output: o.name.clone(),
-                    width: o.width,
-                    rect: o.rect,
-                });
-            }
-            bars.push(BarSurface {
-                id,
-                output: o.name,
-                width: o.width,
-                rect: o.rect,
-            });
-        }
         // The bar's runtime — the one we drive WASM plugins on (RFC 0008 §3.1).
         // Captured in `BoundedExecutor::new` (runs before boot); `Handle::current()`
         // is a defensive fallback (iced also runs `new` inside the executor context).
@@ -1333,9 +1339,9 @@ impl Bar {
             .get()
             .cloned()
             .unwrap_or_else(tokio::runtime::Handle::current);
-        let bar = Bar {
-            bars,
-            docks,
+        let mut bar = Bar {
+            bars: Vec::new(),
+            docks: Vec::new(),
             dock_visible: dock_on,
             popup: None,
             module_popup: None,
@@ -1346,12 +1352,13 @@ impl Bar {
             cursor_output: None,
             config,
             theme,
-            screen_w,
+            screen_w: 1920,
             bar_pos,
             generation: HashMap::new(),
             rt,
         };
-        let open = Task::batch(opens);
+        let open = bar.reconcile_surfaces();
+        bar.screen_w = bar.bars.first().map_or(1920, |b| b.width);
         // Dev/screenshot hook: open the switcher popup on startup for capture.
         if std::env::var("EZBAR_OPEN_POPUP").is_ok() {
             return (
@@ -2737,14 +2744,23 @@ impl Bar {
 
         // The pure close/create decision (deduped against the two-bars saga).
         let desired_list: Vec<String> = desired.iter().map(|o| o.name.clone()).collect();
-        let tracked: Vec<(String, window::Id)> =
-            self.bars.iter().map(|b| (b.output.clone(), b.id)).collect();
-        let (to_close, to_create) = plan_surfaces(&desired_list, &tracked);
+        let tracked: Vec<_> = self
+            .bars
+            .iter()
+            .map(|b| {
+                (
+                    b.output.clone(),
+                    b.id,
+                    named_output(&b.output).as_ref() == Some(&b.binding),
+                )
+            })
+            .collect();
+        let (to_close, to_create) = plan_bound_surfaces(&desired_list, &tracked);
 
-        // Close surfaces whose output is gone or de-selected.
+        // Close surfaces whose output is gone, replaced, or de-selected.
         let closed_any = !to_close.is_empty();
         for id in &to_close {
-            log::info!("reconcile: CLOSE {id:?} (output de-selected)");
+            log::info!("reconcile: CLOSE {id:?} (output removed/replaced/de-selected)");
             tasks.push(iced::window::close(*id));
         }
         self.bars.retain(|b| !to_close.contains(&b.id));
@@ -2759,6 +2775,12 @@ impl Bar {
 
         // Open surfaces for newly-matching outputs.
         for name in to_create {
+            let Some(output) = named_output(&name) else {
+                // Sway IPC can announce a monitor before its Wayland Name/Done events.
+                // Readiness changes trigger another reconcile; do not create or track it yet.
+                log::debug!("reconcile: waiting for Wayland output {name}");
+                continue;
+            };
             let width = desired
                 .iter()
                 .find(|o| o.name == name)
@@ -2766,7 +2788,11 @@ impl Bar {
             let id = window::Id::unique();
             log::info!("reconcile: CREATE {id:?} for output {name}");
             tasks.push(Task::done(Message::NewLayerShell {
-                settings: bar_settings(&self.config, self.bar_pos, &name),
+                settings: bar_settings(
+                    &self.config,
+                    self.bar_pos,
+                    OutputOption::Output(output.clone()),
+                ),
                 id,
             }));
             self.bars.push(BarSurface {
@@ -2776,6 +2802,7 @@ impl Bar {
                     .find(|o| o.name == name)
                     .map_or([0, 0, 1920, 1080], |o| o.rect),
                 output: name,
+                binding: output,
                 width,
             });
         }
@@ -2783,12 +2810,18 @@ impl Bar {
         // ── dock surfaces (RFC 0022): same per-output reconcile when shown; tear all down when
         // hidden (a `[dock] enabled = false` edit, or a chip-click toggle, closes them).
         if self.dock_visible {
-            let tracked_d: Vec<(String, window::Id)> = self
+            let tracked_d: Vec<_> = self
                 .docks
                 .iter()
-                .map(|d| (d.output.clone(), d.id))
+                .map(|d| {
+                    (
+                        d.output.clone(),
+                        d.id,
+                        named_output(&d.output).as_ref() == Some(&d.binding),
+                    )
+                })
                 .collect();
-            let (dclose, dcreate) = plan_surfaces(&desired_list, &tracked_d);
+            let (dclose, dcreate) = plan_bound_surfaces(&desired_list, &tracked_d);
             for id in &dclose {
                 tasks.push(iced::window::close(*id));
             }
@@ -2800,6 +2833,9 @@ impl Bar {
                 }
             }
             for name in dcreate {
+                let Some(output) = named_output(&name) else {
+                    continue;
+                };
                 let width = desired
                     .iter()
                     .find(|o| o.name == name)
@@ -2807,7 +2843,7 @@ impl Bar {
                 let id = window::Id::unique();
                 log::info!("reconcile: CREATE dock {id:?} for output {name}");
                 tasks.push(Task::done(Message::NewLayerShell {
-                    settings: dock_settings(&self.config, &name),
+                    settings: dock_settings(&self.config, OutputOption::Output(output.clone())),
                     id,
                 }));
                 self.docks.push(BarSurface {
@@ -2817,6 +2853,7 @@ impl Bar {
                         .find(|o| o.name == name)
                         .map_or([0, 0, 1920, 1080], |o| o.rect),
                     output: name,
+                    binding: output,
                     width,
                 });
             }
@@ -3013,6 +3050,7 @@ impl Bar {
             Subscription::run(config_stream),
             Subscription::run(ipc_stream),
             Subscription::run(outputs_stream),
+            Subscription::run(wayland_outputs_stream),
             Subscription::run(pick_stream), // RFC 0018: reactor pick() requests → the bar
             event::listen_with(|ev, _status, id| match ev {
                 iced::Event::Window(iced::window::Event::Closed) => Some(Message::WindowClosed(id)),
@@ -3078,6 +3116,28 @@ fn read_parse(_path: &std::path::Path) -> Result<Config, String> {
     }
 }
 
+/// Reconcile when a named Wayland output is actually ready (or removed), independently
+/// of Sway IPC's timing. The initial kick also covers changes between boot and subscribe.
+fn wayland_outputs_stream() -> impl Stream<Item = Message> {
+    iced::stream::channel(
+        4,
+        |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
+            let Some(outputs) = WAYLAND_OUTPUTS.get() else {
+                return;
+            };
+            let mut changes = outputs.subscribe();
+            if out.send(Message::OutputsChanged).await.is_err() {
+                return;
+            }
+            while changes.changed().await.is_ok() {
+                if out.send(Message::OutputsChanged).await.is_err() {
+                    return;
+                }
+            }
+        },
+    )
+}
+
 /// Subscribe to sway `output` events and emit [`Message::OutputsChanged`] on each,
 /// so the host reconciles its per-output surface set on monitor hotplug/layout
 /// changes (RFC 0004). The blocking sway event iterator runs on a blocking task and
@@ -3123,14 +3183,8 @@ fn outputs_stream() -> impl Stream<Item = Message> {
                         }
                     }
                 });
-                // Forward each output change until the sway event stream ends,
-                // coalescing bursts and letting the change settle first. The settle
-                // delay matters: sway's Output IPC event can arrive before the
-                // matching `wl_output` global reaches iced_layershell's cache, and a
-                // `NewLayerShell{OutputName}` that the cache can't yet resolve binds
-                // to the compositor-default output instead. Waiting lets the global
-                // land so the bind targets the intended output. (The true fix is an
-                // upstream `Output(wl_output)` / bind-result API — see RFC 0004.)
+                // Coalesce bursts of Sway layout changes. This delay is only debounce:
+                // actual binding is gated on named Wayland proxies, not elapsed time.
                 while rx.recv().await.is_some() {
                     while rx.try_recv().is_ok() {}
                     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -3265,6 +3319,36 @@ mod tests {
         assert_eq!(plan(&["DP-1", "DP-1"], &[]), (vec![], vec!["DP-1".into()]));
         // and never a second surface for an already-tracked output (even if double-listed)
         assert_eq!(plan(&["DP-1", "DP-1"], &[("DP-1", 1)]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn churn_removes_existing_duplicates_and_keeps_one_survivor() {
+        assert_eq!(
+            plan(&["DP-1", "DP-1", "DP-2"], &[("DP-1", 1), ("DP-1", 2)]),
+            (vec![2], vec!["DP-2".into()])
+        );
+        assert_eq!(
+            plan(&["DP-1"], &[("DP-1", 1), ("DP-1", 2), ("DP-2", 3)]),
+            (vec![2, 3], vec![])
+        );
+        assert_eq!(plan(&["DP-1"], &[("DP-1", 1)]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn replaced_output_binding_is_recreated_even_without_a_closed_event() {
+        let desired = vec!["DP-1".into()];
+        assert_eq!(
+            plan_bound_surfaces(&desired, &[("DP-1".into(), 1, false)]),
+            (vec![1], vec!["DP-1".into()])
+        );
+        assert_eq!(
+            plan_bound_surfaces(&desired, &[("DP-1".into(), 2, true)]),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            plan_bound_surfaces(&[], &[("DP-1".into(), 1, false)]),
+            (vec![1], vec![])
+        );
     }
 
     #[test]

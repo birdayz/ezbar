@@ -31,6 +31,9 @@ claude-logic = { path = "crates/claude-logic" }
 codex-logic = { path = "crates/codex-logic" }
 iced = { version = "0.14", features = ["canvas", "svg", "tokio", "advanced"] }
 iced_layershell = "0.18"
+# Bind named wl_output proxies on iced's own connection; OutputName can silently
+# fall back to the default monitor while the layer-shell output cache is catching up.
+wayland-client = "=0.31.14"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }

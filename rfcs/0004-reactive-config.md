@@ -218,15 +218,13 @@ the app surviving zero surfaces.
   commits the surface itself, so `reconcile_bar_geometry` applies layer/margin/exclusive-
   zone first, then anchor+size *together and last* via `AnchorSizeChange` — one reflow per
   logical change, not up to four.
-- **`OutputName` bind race (the one real multi-output caveat).** iced_layershell resolves
-  `OutputOption::OutputName` against its own `wl_output` cache; if a name isn't cached yet
-  (sway's Output IPC event can precede the `wl_output` global reaching the client), the
-  surface binds to the compositor-default output instead of failing. We *mitigate* with a
-  250 ms settle delay before reconciling on an output event, which lets the global land —
-  but the **true fix needs an upstream API**: either `OutputOption::Output(wl_output)`
-  resolved from the same enumeration, or a bind-result the host can verify and retry on.
-  Tracked as the top multi-output follow-up. Single-output and steady-state multi-output
-  are correct; the residual is a narrow hotplug-instant race.
+- **`OutputName` bind race — resolved.** iced_layershell silently binds an unknown name
+  to the compositor-default output; a 250 ms settle delay was only a mitigation. The bar
+  now enumerates named `wl_output` v4 proxies on the **same connection** passed through
+  `Settings.with_connection`, waits for Name/Done, and uses `OutputOption::Output` for
+  bar/dock creation. Missing outputs remain untracked until a readiness notification
+  triggers reconcile. Startup, reload, and hotplug all use this same path; the 250 ms
+  output-event delay is only debounce, not a binding guarantee.
 - **Subscription generation is monotonic per id** (never reset on removal; bumped on
   re-add) so a removed-then-readded key re-keys past any still-draining recipe.
 - **Zero surfaces is a valid state** (iced `StartMode::Background` does not exit at zero
@@ -235,9 +233,8 @@ the app surviving zero surfaces.
 
 ## Open questions
 
-1. **`OutputName` bind race** — the residual from the review (see *Implementation notes*).
-   The proper fix is upstream: expose `OutputOption::Output(wl_output)` or a bind-result.
-   Until then we ship the 250 ms settle-delay mitigation. **Top multi-output follow-up.**
+1. ~~**`OutputName` bind race**~~ — **resolved** with ready named proxies on a shared
+   Wayland connection (see *Implementation notes*).
 2. **Identity** — adopted RFC 0002 `key` semantics (`instance_id = stable_id(key)`). Still
    open: an explicit `id` escape hatch and collision handling (validation error with the
    offending line, as RFC 0002) — today duplicate keys just warn-and-skip the second.

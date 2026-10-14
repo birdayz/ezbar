@@ -76,8 +76,11 @@ one `exec_always`), or add it by hand:
 exec_always /path/to/ezbar
 ```
 
-`ezbar` is a thin launcher: it respawns the bar if the output disappears (monitor
-sleep / hotplug). For a single foreground instance (debugging):
+`ezbar` is a thin launcher: it respawns the bar after a crash; monitor sleep / hotplug
+is reconciled by the running bar. Both the launcher and bar have per-session locks,
+so relaunching cannot stack another bar, even if the launcher died and left its child
+running. A replacement launcher waits for that child to exit before taking over.
+For a single foreground instance (debugging, still singleton-protected):
 
 ```bash
 EZBAR_CHILD=1 ./target/release/ezbar
