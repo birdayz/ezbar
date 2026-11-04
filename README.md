@@ -93,6 +93,16 @@ config just stays quiet. Nothing is hardcoded; no secrets ship in the binary.
 Every module's `[modules.<id>]` options are listed in
 [docs/config-reference.md](docs/config-reference.md).
 
+To hide a default widget, set `enabled = false` (use its lowercase built-in ID):
+
+```toml
+[modules.stock]
+enabled = false
+```
+
+Custom `left` / `center` / `right` layouts work at the TOML root or inside `[bar]`;
+see [placement and disabling modules](docs/config-reference.md#placement-and-disabling-modules).
+
 | Widget   | Reads from |
 |----------|------------|
 | Calendar | `calendar_url` (your secret iCal URL) or `$GOOGLE_CALENDAR_ICAL_URL` |

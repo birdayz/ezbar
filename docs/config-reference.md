@@ -10,10 +10,52 @@ every key the built-in modules read, with defaults. Theme/bar keys (`[theme]`, `
 samples = 60
 ```
 
-## Modules with no options
+## Placement and disabling modules
 
-These are placed by id alone and read no config: `battery`, `calendar`, `claude`,
-`kubectl`, `spotify`, `stock`, `volume`.
+Set `left`, `center`, and `right` either at the TOML root (before any `[table]`
+header) or inside `[bar]`. If both forms supply a zone, the top-level key wins.
+Omitted or empty lists use that zone's shipped defaults. A non-empty list replaces
+that zone's defaults, so leaving `stock` out of a custom `right` list removes it:
+
+```toml
+[bar]
+left = ["workspaces", "window_title"]
+center = ["clock"]
+right = ["cpu", "memory", "volume", "battery"]
+```
+
+To disable a module without replacing the default layout, set the host's `enabled`
+option (boolean, default `true`). Disabled modules are not started or rendered,
+including auto-placed WASM plugins, and changes apply on config reload:
+
+```toml
+[modules.stock]
+enabled = false
+
+[modules.spotify]
+enabled = false
+
+[modules.github]
+enabled = false
+```
+
+Module IDs and table names are case-sensitive: use `[modules.stock]`, not
+`[modules.Stock]`. WASM IDs match the `.wasm` filename stem exactly. Shared defaults
+use the module's `id`, not an instance's `key`. An instance's inline config takes
+precedence, so `config = { enabled = true }` can enable one instance of an otherwise
+disabled module:
+
+```toml
+right = [{ id = "stock", key = "ticker", config = { enabled = true } }]
+
+[modules.stock]
+enabled = false
+```
+
+## Modules with no module-specific options
+
+Apart from the host's `enabled` option, these are placed by id alone and read no
+config: `battery`, `calendar`, `claude`, `kubectl`, `spotify`, `stock`, `volume`.
 
 ## Per-module options
 

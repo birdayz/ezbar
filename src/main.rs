@@ -1090,8 +1090,23 @@ fn empty_cfg() -> toml::Value {
     toml::Value::Table(Default::default())
 }
 
-/// Resolve a zone's entries (or the shipped default) into ordered `Placed` items.
-fn resolve_zone(entries: &[config::Entry], default: &[&str], out: &mut Vec<Placed>) {
+/// Whether this placement is enabled after inline options override shared defaults.
+fn placement_enabled(config: &Config, placed: &Placed) -> bool {
+    placed
+        .config
+        .get("enabled")
+        .or_else(|| config.modules.get(&placed.type_id)?.get("enabled"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Resolve a zone's entries (or the shipped default) into enabled `Placed` items.
+fn resolve_zone(
+    config: &Config,
+    entries: &[config::Entry],
+    default: &[&str],
+    out: &mut Vec<Placed>,
+) {
     if entries.is_empty() {
         for id in default {
             out.push(Placed {
@@ -1105,6 +1120,7 @@ fn resolve_zone(entries: &[config::Entry], default: &[&str], out: &mut Vec<Place
             resolve_entry(e, out);
         }
     }
+    out.retain(|p| placement_enabled(config, p));
 }
 
 fn resolve_entry(e: &config::Entry, out: &mut Vec<Placed>) {
@@ -1129,8 +1145,13 @@ fn resolve_entry(e: &config::Entry, out: &mut Vec<Placed>) {
 
 /// Resolve the right zone into **groups** (RFC 0005) — each becomes a sub-island in
 /// `islands` style. A top-level `Entry::Group` is one group; a bare entry is its own
-/// singleton group; an empty zone uses the shipped default groups.
+/// singleton group; an empty zone uses the shipped default groups. Disabled entries
+/// and groups with no remaining entries are omitted before the switcher is inserted.
 fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
+    resolve_right_groups_with_plugins(config, modules::wasm_plugin_ids())
+}
+
+fn resolve_right_groups_with_plugins(config: &Config, plugin_ids: Vec<String>) -> Vec<Vec<Placed>> {
     let mut groups: Vec<Vec<Placed>> = if config.right.is_empty() {
         DEFAULT_RIGHT_GROUPS
             .iter()
@@ -1156,15 +1177,21 @@ fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
             .collect()
     };
     // Each discovered WASM plugin (RFC 0006) gets its own trailing pill, unless the
-    // user already placed it in the right zone — so a dropped-in `.wasm` is a
-    // distinct, obvious chip rather than glued onto a neighbour.
+    // user already placed it in any zone — so a dropped-in `.wasm` is a
+    // distinct, obvious chip rather than glued onto a neighbour. Collect these
+    // BEFORE filtering: an inline-disabled plugin must not be auto-added again.
     let plugins = {
+        let mut other_zones = Vec::new();
+        for e in config.left.iter().chain(&config.center) {
+            resolve_entry(e, &mut other_zones);
+        }
         let placed: std::collections::HashSet<&str> = groups
             .iter()
             .flatten()
+            .chain(&other_zones)
             .map(|p| p.type_id.as_str())
             .collect();
-        unplaced_wasm_plugins(&placed)
+        unplaced_wasm_plugins(plugin_ids, &placed)
     };
     // Insert plugin pills just BEFORE the final group (the clock end-cap by
     // default), so the trailing ▾ switcher stays on the end-cap and a plugin's
@@ -1172,13 +1199,20 @@ fn resolve_right_groups(config: &Config) -> Vec<Vec<Placed>> {
     let end_cap = groups.pop();
     groups.extend(plugins.into_iter().map(|p| vec![p]));
     groups.extend(end_cap);
+    for group in &mut groups {
+        group.retain(|p| placement_enabled(config, p));
+    }
+    groups.retain(|g| !g.is_empty());
     groups
 }
 
 /// WASM plugins the user did not explicitly place (RFC 0006) — each becomes its
 /// own right-cluster pill so dropping a `.wasm` in the plugins dir just works.
-fn unplaced_wasm_plugins(placed: &std::collections::HashSet<&str>) -> Vec<Placed> {
-    modules::wasm_plugin_ids()
+fn unplaced_wasm_plugins(
+    plugin_ids: Vec<String>,
+    placed: &std::collections::HashSet<&str>,
+) -> Vec<Placed> {
+    plugin_ids
         .into_iter()
         .filter(|id| !placed.contains(id.as_str()))
         .map(|id| Placed {
@@ -1192,8 +1226,8 @@ fn unplaced_wasm_plugins(placed: &std::collections::HashSet<&str>) -> Vec<Placed
 /// All placed items across the three zones, in order (zones fall back to defaults).
 fn all_placed(config: &Config) -> Vec<Placed> {
     let mut items = Vec::new();
-    resolve_zone(&config.left, &["workspaces"], &mut items);
-    resolve_zone(&config.center, &["window_title"], &mut items);
+    resolve_zone(config, &config.left, &["workspaces"], &mut items);
+    resolve_zone(config, &config.center, &["window_title"], &mut items);
     // resolve_right_groups already appends a group per discovered WASM plugin.
     items.extend(resolve_right_groups(config).into_iter().flatten());
     items
@@ -2396,8 +2430,13 @@ impl Bar {
         // becomes a sub-island (islands) or a divider-joined run (solid).
         let mut left = Vec::new();
         let mut center = Vec::new();
-        resolve_zone(&self.config.left, &["workspaces"], &mut left);
-        resolve_zone(&self.config.center, &["window_title"], &mut center);
+        resolve_zone(&self.config, &self.config.left, &["workspaces"], &mut left);
+        resolve_zone(
+            &self.config,
+            &self.config.center,
+            &["window_title"],
+            &mut center,
+        );
         let mut right_groups = resolve_right_groups(&self.config);
 
         // Place the ▾ switcher per [bar].switcher (unless the user listed it): before
@@ -2453,22 +2492,32 @@ impl Bar {
             // is inset. The 4px float used to live on the bar's outer padding; moving
             // it per-cell keeps the look identical while opening the edge.
             let float = Padding::from([4, 0]);
-            let ws_pill = container(
-                container(ws_row)
-                    .padding([2, 10])
-                    .center_y(Length::Fill)
-                    .style(pill_style),
-            )
-            .height(Length::Fill)
-            .padding(float);
-            let title_pill = container(
-                container(title_el)
-                    .padding([2, 12])
-                    .center_y(Length::Fill)
-                    .style(pill_style),
-            )
-            .height(Length::Fill)
-            .padding(float);
+            let ws_pill: Element<Message> = if left.is_empty() {
+                Space::new().into()
+            } else {
+                container(
+                    container(ws_row)
+                        .padding([2, 10])
+                        .center_y(Length::Fill)
+                        .style(pill_style),
+                )
+                .height(Length::Fill)
+                .padding(float)
+                .into()
+            };
+            let title_pill: Element<Message> = if center.is_empty() {
+                Space::new().into()
+            } else {
+                container(
+                    container(title_el)
+                        .padding([2, 12])
+                        .center_y(Length::Fill)
+                        .style(pill_style),
+                )
+                .height(Length::Fill)
+                .padding(float)
+                .into()
+            };
             // right cluster: one sub-island per group, `group_gap` between.
             let mut right_pills: Vec<Element<Message>> = Vec::new();
             for (i, g) in right_groups.iter().enumerate() {
@@ -2901,13 +2950,19 @@ impl Bar {
             // the plugin was re-deployed in place — reload it even though the config is identical.
             let sig = modules::wasm_plugin_sig(&s.type_id);
             match live.remove(&s.key) {
-                // unchanged config AND unchanged bytes: keep the instance, its state and subs.
-                Some(entry) if entry.cfg == s.cfg && entry.wasm_sig == sig => next.push(entry),
-                // same key — config changed and/or the plugin's `.wasm` was swapped on disk.
+                // Unchanged type, config AND bytes: keep the instance, its state and subs.
+                Some(entry)
+                    if entry.module.id() == s.type_id
+                        && entry.cfg == s.cfg
+                        && entry.wasm_sig == sig =>
+                {
+                    next.push(entry)
+                }
+                // Same key — the module type, config, or plugin's on-disk bytes changed.
                 Some(mut entry) => {
-                    // A content swap can't be adopted in place (the loaded module IS the old
-                    // bytes) — it must rebuild. A pure config change tries `reconfigure` first.
-                    let action = if entry.wasm_sig != sig {
+                    // A type or content swap can't be adopted in place — it must rebuild.
+                    // A pure config change tries `reconfigure` first.
+                    let action = if entry.module.id() != s.type_id || entry.wasm_sig != sig {
                         Reconfigure::Reconstruct
                     } else {
                         entry.module.reconfigure(&s.cfg)
@@ -3285,6 +3340,27 @@ mod tests {
             .collect()
     }
 
+    fn test_bar(cfg: Config, rt: &tokio::runtime::Runtime) -> Bar {
+        Bar {
+            bars: Vec::new(),
+            docks: Vec::new(),
+            dock_visible: false,
+            popup: None,
+            module_popup: None,
+            module_popup_size: None,
+            picker: None,
+            modules: build_modules(&cfg, rt.handle()),
+            cursor_x: 0.0,
+            cursor_output: None,
+            theme: cfg.theme_tokens(),
+            screen_w: 1920,
+            bar_pos: cfg.bar.position,
+            generation: HashMap::new(),
+            rt: rt.handle().clone(),
+            config: cfg,
+        }
+    }
+
     // ── output-churn reconcile (RFC 0004) — the regression harness for the two-bars saga ──
     fn plan(desired: &[&str], tracked: &[(&str, u32)]) -> (Vec<u32>, Vec<String>) {
         let d: Vec<String> = desired.iter().map(|s| s.to_string()).collect();
@@ -3379,6 +3455,291 @@ mod tests {
         assert!(desired_module_specs(&cfg)
             .iter()
             .all(|s| modules::is_module(&s.type_id)));
+    }
+
+    #[test]
+    fn issue_6_bar_layout_removes_unlisted_modules() {
+        let cfg = config::parse_str(
+            r#"
+            [bar]
+            left   = ["workspaces", "window_title"]
+            center = ["clock"]
+            right  = ["cpu", "memory", "volume", "battery"]
+
+            [modules.workspaces]
+            style = "underbar"
+
+            [modules.window_title]
+            max = 20
+
+            [modules.Stock]
+            enabled = false
+
+            [modules.Spotify]
+            enabled = false
+
+            [modules.Github]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&cfg),
+            [
+                "workspaces",
+                "window_title",
+                "clock",
+                "cpu",
+                "memory",
+                "volume",
+                "battery"
+            ]
+        );
+    }
+
+    #[test]
+    fn disabled_modules_are_removed_from_default_placement() {
+        let cfg = config::parse_str(
+            "[modules.stock]\nenabled = false\n\
+             [modules.spotify]\nenabled = false\n\
+             [modules.github]\nenabled = false",
+        )
+        .unwrap();
+        let ks = keys(&cfg);
+        for disabled in ["stock", "spotify", "github"] {
+            assert!(
+                !ks.iter().any(|k| k == disabled),
+                "{disabled} is still placed"
+            );
+        }
+        assert!(ks.iter().any(|k| k == "volume"));
+        assert!(ks.iter().any(|k| k == "clock"));
+        assert!(resolve_right_groups(&cfg).iter().all(|g| !g.is_empty()));
+    }
+
+    #[test]
+    fn inline_enabled_overrides_shared_defaults_and_removes_empty_groups() {
+        let cfg = config::parse_str(
+            r#"
+            right = [
+                ["stock", { id = "stock", key = "on", config = { enabled = true } }],
+                [{ id = "cpu", key = "off", config = { enabled = false } }],
+                { id = "memory", key = "on-too", config = { enabled = true } },
+            ]
+
+            [modules.stock]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(keys(&cfg), ["workspaces", "window_title", "on", "on-too"]);
+        let groups = resolve_right_groups(&cfg);
+        let group_keys: Vec<Vec<&str>> = groups
+            .iter()
+            .map(|g| g.iter().map(|p| p.key.as_str()).collect())
+            .collect();
+        assert_eq!(group_keys, [vec!["on"], vec!["on-too"]]);
+    }
+
+    #[test]
+    fn disabled_occurrence_does_not_claim_a_duplicate_key() {
+        let cfg = config::parse_str(
+            r#"
+            left = [
+                { id = "cpu", key = "same", config = { enabled = false } },
+                { id = "memory", key = "same" },
+            ]
+            "#,
+        )
+        .unwrap();
+        let specs = desired_module_specs(&cfg);
+        let shared_key: Vec<_> = specs.iter().filter(|s| s.key == "same").collect();
+        assert_eq!(shared_key.len(), 1);
+        assert_eq!(shared_key[0].type_id, "memory");
+        let mut rendered = Vec::new();
+        resolve_zone(&cfg, &cfg.left, &["workspaces"], &mut rendered);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].type_id, "memory");
+    }
+
+    #[test]
+    fn disabling_all_entries_leaves_no_zone_or_group_placeholders() {
+        let cfg = config::parse_str(
+            r#"
+            left = [{ id = "workspaces", config = { enabled = false } }]
+            center = [{ id = "clock", config = { enabled = false } }]
+            right = [[{ id = "stock", config = { enabled = false } }]]
+            "#,
+        )
+        .unwrap();
+        assert!(all_placed(&cfg).is_empty());
+        assert!(resolve_right_groups(&cfg).is_empty());
+        assert!(keys(&cfg).is_empty());
+    }
+
+    #[test]
+    fn explicitly_placed_plugins_are_not_auto_added_even_when_disabled() {
+        for zone in ["left", "center", "right"] {
+            for enabled in [false, true] {
+                let cfg = config::parse_str(&format!(
+                    "{zone} = [{{ id = \"demo\", config = {{ enabled = {enabled} }} }}]"
+                ))
+                .unwrap();
+                let groups = resolve_right_groups_with_plugins(&cfg, vec!["demo".into()]);
+                let count = groups
+                    .iter()
+                    .flatten()
+                    .filter(|p| p.type_id == "demo")
+                    .count();
+                assert_eq!(
+                    count,
+                    usize::from(zone == "right" && enabled),
+                    "{zone}: {enabled}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_placed_plugins_respect_shared_enabled_option() {
+        let cfg = config::parse_str("[modules.demo]\nenabled = false").unwrap();
+        let groups = resolve_right_groups_with_plugins(&cfg, vec!["demo".into()]);
+        assert!(!groups.iter().flatten().any(|p| p.type_id == "demo"));
+
+        let groups = resolve_right_groups_with_plugins(&Config::default(), vec!["demo".into()]);
+        assert_eq!(groups[groups.len() - 2][0].type_id, "demo");
+        assert_eq!(groups.last().unwrap()[0].type_id, "clock");
+    }
+
+    #[test]
+    fn disabling_and_reenabling_on_reload_reconciles_the_live_instance() {
+        let cfg = config::parse_str(
+            "left = [\"clock\"]\ncenter = [\"switcher\"]\nright = [\"switcher\"]",
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut bar = test_bar(cfg, &rt);
+        bar.module_popup = Some((window::Id::unique(), stable_id("clock"), PopupMode::Hover));
+        assert_eq!(bar.modules.len(), 1);
+        bar.config.modules.insert(
+            "clock".into(),
+            "enabled = false".parse::<toml::Value>().unwrap(),
+        );
+        let _ = bar.reconcile_modules();
+        assert!(bar.modules.is_empty());
+        assert!(bar.module_popup.is_none());
+
+        bar.config.modules.clear();
+        let _ = bar.reconcile_modules();
+        assert_eq!(bar.modules.len(), 1);
+        assert_eq!(bar.modules[0].name, "clock");
+        assert_eq!(bar.generation[&stable_id("clock")], 1);
+    }
+
+    #[test]
+    fn disabling_a_duplicate_key_winner_replaces_its_module_type_on_reload() {
+        let before = r#"
+            left = [
+                { id = "cpu", key = "same", config = { enabled = true } },
+                { id = "memory", key = "same", config = { enabled = true } },
+            ]
+            center = ["switcher"]
+            right = ["switcher"]
+        "#;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut bar = test_bar(config::parse_str(before).unwrap(), &rt);
+        assert_eq!(bar.modules.len(), 1);
+        assert_eq!(bar.modules[0].module.id(), "cpu");
+
+        let after = before.replacen("enabled = true", "enabled = false", 1);
+        bar.config = config::parse_str(&after).unwrap();
+        let _ = bar.reconcile_modules();
+        assert_eq!(bar.modules.len(), 1);
+        assert_eq!(bar.modules[0].module.id(), "memory");
+        assert_eq!(bar.modules[0].name, "same");
+        assert_eq!(bar.generation[&stable_id("same")], 1);
+    }
+
+    #[test]
+    fn disabled_islands_do_not_draw_empty_shells() {
+        use iced::advanced::renderer::{Headless, Renderer};
+        use iced::advanced::{layout, mouse, widget::Tree, Layout};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut renderer = rt
+            .block_on(<iced::Renderer as Headless>::new(
+                iced::Font::DEFAULT,
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+            .expect("the software renderer must be available without a display or GPU");
+        let size = iced::Size::new(640, 34);
+        let logical_size = iced::Size::new(size.width as f32, size.height as f32);
+        let bounds = iced::Rectangle::with_size(logical_size);
+        for left in [false, true] {
+            for center in [false, true] {
+                for switcher in ["off", "right"] {
+                    let cfg = config::parse_str(&format!(
+                        r#"
+                        left = [{{ id = "clock", key = "left", config = {{ enabled = {left} }} }}]
+                        center = [{{ id = "clock", key = "center", config = {{ enabled = {center} }} }}]
+                        right = [{{ id = "clock", key = "right", config = {{ enabled = false }} }}]
+                        [bar]
+                        switcher = "{switcher}"
+                        [theme]
+                        style = "islands"
+                        "#,
+                    ))
+                    .unwrap();
+                    let bar = test_bar(cfg, &rt);
+                    let mut view = bar.bar_view();
+                    let mut tree = Tree::new(view.as_widget());
+                    let node = view.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(iced::Size::ZERO, logical_size),
+                    );
+                    renderer.reset(bounds);
+                    view.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &iced::Theme::Dark,
+                        &iced::advanced::renderer::Style::default(),
+                        Layout::new(&node),
+                        mouse::Cursor::Unavailable,
+                        &bounds,
+                    );
+                    let pixels = renderer.screenshot(size, 1.0, Color::TRANSPARENT);
+                    assert_eq!(pixels.len(), (size.width * size.height * 4) as usize);
+                    let mut painted = [false; 3];
+                    for (i, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+                        if pixel[3] != 0 {
+                            let x = i % size.width as usize;
+                            painted[if x < 128 {
+                                0
+                            } else if x < 512 {
+                                1
+                            } else {
+                                2
+                            }] = true;
+                        }
+                    }
+                    assert_eq!(painted, [left, center, switcher == "right"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_true_preserves_the_default_layout() {
+        let cfg = config::parse_str("[modules.stock]\nenabled = true").unwrap();
+        assert_eq!(keys(&cfg), keys(&Config::default()));
     }
 
     #[test]

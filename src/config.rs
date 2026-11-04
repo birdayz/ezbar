@@ -652,6 +652,7 @@ pub struct Config {
     /// `[dock]` — the always-on vertical agent dock (RFC 0022). Off by default.
     pub dock: Dock,
     pub theme: Theme,
+    /// Placement lists, also accepted under `[bar]`; top-level keys take precedence.
     pub left: Vec<Entry>,
     pub center: Vec<Entry>,
     pub right: Vec<Entry>,
@@ -715,6 +716,18 @@ pub fn parse_with(
     active: Option<&str>,
 ) -> Result<Config, String> {
     let mut root: toml::Table = toml::from_str(s).map_err(|e| e.to_string())?;
+
+    // Accept the documented `[bar]` placement form without changing existing root
+    // placement. Presence, not emptiness, decides which form takes precedence.
+    for zone in ["left", "center", "right"] {
+        let nested = root
+            .get_mut("bar")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|bar| bar.remove(zone));
+        if let Some(entries) = nested {
+            root.entry(zone).or_insert(entries);
+        }
+    }
 
     // 1. effective [theme] = preset theme (base) <- user [theme] (override)
     let user_theme = root.remove("theme");
@@ -1055,6 +1068,55 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn bar_placement_fills_only_missing_top_level_zones() {
+        let c = parse_str(
+            r#"
+            left = ["clock"]
+            right = []
+
+            [bar]
+            left = ["memory"]
+            center = ["stock"]
+            right = ["battery"]
+            height = 28
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.left[0].key(), Some("clock"));
+        assert_eq!(c.center[0].key(), Some("stock"));
+        assert!(c.right.is_empty());
+        assert_eq!(c.bar.height, 28);
+    }
+
+    #[test]
+    fn bar_placement_preserves_groups_and_inline_config() {
+        let c = parse_str(
+            r#"
+            [bar]
+            right = [["cpu", { id = "stock", key = "ticker", config = { enabled = false } }]]
+            "#,
+        )
+        .unwrap();
+        let Entry::Group(group) = &c.right[0] else {
+            panic!("expected a group");
+        };
+        assert_eq!(group[0].key(), Some("cpu"));
+        let Entry::Spec(spec) = &group[1] else {
+            panic!("expected a module spec");
+        };
+        assert_eq!(spec.id, "stock");
+        assert_eq!(spec.key.as_deref(), Some("ticker"));
+        assert_eq!(spec.config["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn invalid_bar_placement_is_not_silently_ignored() {
+        for zone in ["left", "center", "right"] {
+            assert!(parse_str(&format!("[bar]\n{zone} = 42")).is_err());
+        }
     }
 
     #[test]
