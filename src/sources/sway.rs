@@ -15,6 +15,9 @@ use tokio::sync::watch;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub name: String,
+    /// the output (monitor) this workspace lives on, e.g. `DP-1` — sway workspaces belong to
+    /// exactly one output, so each bar shows only its own monitor's workspaces
+    pub output: String,
     /// focused on the focused output (the active workspace)
     pub focused: bool,
     /// visible on *some* output (focused, or active on another monitor)
@@ -245,6 +248,7 @@ fn fetch_workspaces(conn: &mut Connection) -> swayipc::Fallible<Vec<Workspace>> 
         .into_iter()
         .map(|w| Workspace {
             name: w.name,
+            output: w.output,
             focused: w.focused,
             visible: w.visible,
             urgent: w.urgent,
@@ -305,6 +309,7 @@ mod tests {
     fn ws(name: &str) -> Workspace {
         Workspace {
             name: name.into(),
+            output: String::new(),
             focused: false,
             visible: false,
             urgent: false,

@@ -9,6 +9,11 @@
 //! style = "boxed"   # boxed | filled | outlined | underbar
 //! ```
 //!
+//! **Per output:** a sway workspace belongs to exactly one output, so each bar surface lists
+//! only the workspaces of *its own* monitor (`Ctx::output`) — monitor A with 1–4 and monitor B
+//! with 5–8 each show just their own. The active workspace of an output that isn't focused is
+//! drawn in the `visible` tier; only the focused output carries the accent highlight.
+//!
 //! **Motion (RFC 0010):** when the focused workspace changes, the accent highlight
 //! *cross-fades* from the old pill to the new instead of hard-cutting. Each pill owns an
 //! `Animation<bool>` ("am I focused") keyed by name; `view` reads a single `now`, projects
@@ -159,9 +164,10 @@ impl Module for Workspaces {
 
     fn view(&self, ctx: &Ctx) -> Element<'_, ModMsg> {
         let fs = ctx.theme.text_size;
+        // only this bar's monitor's workspaces (all of them when there is no output context)
+        let shown = on_output(&self.list, ctx.output);
         // one shared, uniform cell width so `1` and `10` read as the same square cell
-        let max_chars = self
-            .list
+        let max_chars = shown
             .iter()
             .map(|w| w.name.chars().count())
             .max()
@@ -174,9 +180,8 @@ impl Module for Workspaces {
         // intra-frame skew), else discrete {0,1} (the default — chip renders the resting or
         // fully-focused paint, no interpolation).
         let now = Instant::now();
-        let chips: Vec<Element<ModMsg>> = self
-            .list
-            .iter()
+        let chips: Vec<Element<ModMsg>> = shown
+            .into_iter()
             .map(|w| {
                 let t = if self.animate {
                     self.anim
@@ -195,6 +200,21 @@ impl Module for Workspaces {
         mouse_area(row(chips).spacing(4).align_y(Vertical::Center))
             .on_scroll(|d| ModMsg::new(Msg::Scroll(d)))
             .into()
+    }
+}
+
+/// The workspaces to draw on the bar of `output`: just that monitor's. With no output context
+/// (`None`), or when none match (an output name sway doesn't report — never an empty bar),
+/// the full list is shown, which is the old behaviour.
+fn on_output<'a>(list: &'a [Workspace], output: Option<&str>) -> Vec<&'a Workspace> {
+    let own: Vec<&Workspace> = match output {
+        Some(o) => list.iter().filter(|w| w.output == o).collect(),
+        None => Vec::new(),
+    };
+    if own.is_empty() {
+        list.iter().collect()
+    } else {
+        own
     }
 }
 
@@ -405,7 +425,7 @@ fn chip<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::urgent_pulse;
+    use super::{on_output, urgent_pulse, Workspace};
     use ezbar_plugin::iced::Color;
 
     #[test]
@@ -419,6 +439,43 @@ mod tests {
         let off = urgent_pulse(red, true, false);
         assert!(off.a < red.a && off.a > 0.0); // dimmed but still visible
         assert_eq!((off.r, off.g, off.b), (red.r, red.g, red.b)); // pulses alpha, not hue
+    }
+
+    fn ws(name: &str, output: &str) -> Workspace {
+        Workspace {
+            name: name.into(),
+            output: output.into(),
+            focused: false,
+            visible: false,
+            urgent: false,
+        }
+    }
+
+    fn names(v: Vec<&Workspace>) -> Vec<&str> {
+        v.iter().map(|w| w.name.as_str()).collect()
+    }
+
+    #[test]
+    fn each_output_shows_only_its_own_workspaces() {
+        let all = vec![
+            ws("1", "DP-1"),
+            ws("5", "HDMI-A-1"),
+            ws("7", "HDMI-A-1"),
+            ws("10", "HDMI-A-1"),
+            ws("2", "DP-1"),
+        ];
+        assert_eq!(names(on_output(&all, Some("DP-1"))), vec!["1", "2"]);
+        assert_eq!(
+            names(on_output(&all, Some("HDMI-A-1"))),
+            vec!["5", "7", "10"]
+        );
+    }
+
+    #[test]
+    fn no_output_context_or_unknown_output_shows_everything() {
+        let all = vec![ws("1", "DP-1"), ws("5", "HDMI-A-1")];
+        assert_eq!(names(on_output(&all, None)), vec!["1", "5"]); // harness / popup
+        assert_eq!(names(on_output(&all, Some("eDP-9"))), vec!["1", "5"]); // never an empty bar
     }
 
     #[test]

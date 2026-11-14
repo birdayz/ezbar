@@ -1957,11 +1957,17 @@ impl Bar {
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if self.is_bar(id) {
-            // The same chip row renders on every output's bar surface.
+            // The same placement renders on every output's bar surface; each surface passes its
+            // own output name so per-monitor modules (`workspaces`) show only their monitor.
             // CursorEnter carries a position in the layer-shell runtime's cursor,
             // but iced's public CursorEntered event drops it. Capture it from
             // widget state too, including a direct entry onto a tray icon.
-            return mouse_area(self.bar_view())
+            let output = self
+                .bars
+                .iter()
+                .find(|b| b.id == id)
+                .map(|b| b.output.as_str());
+            return mouse_area(self.bar_view(output))
                 .on_move(move |position| Message::Cursor(id, position))
                 .into();
         }
@@ -1984,6 +1990,7 @@ impl Bar {
                     let ctx = Ctx {
                         instance_id: instance,
                         theme: &self.theme,
+                        output: None,
                     };
                     if let Some(content) = entry.module.popup(&ctx) {
                         let mapped = content.map(move |m| Message::ModuleMsg { instance, msg: m });
@@ -2012,6 +2019,7 @@ impl Bar {
                 let ctx = Ctx {
                     instance_id: instance,
                     theme: &self.theme,
+                    output: None,
                 };
                 match entry
                     .module
@@ -2186,7 +2194,13 @@ impl Bar {
     }
 
     /// Render an RFC 0001 module by its `id` (looked up in the live module list).
-    fn render_module(&self, id: &str) -> Option<Element<'_, Message>> {
+    ///
+    /// `output` is the output of the bar surface being drawn (see [`Ctx::output`]).
+    fn render_module<'a>(
+        &'a self,
+        id: &str,
+        output: Option<&'a str>,
+    ) -> Option<Element<'a, Message>> {
         let entry = self.modules.iter().find(|e| e.name == id)?;
         let instance = entry.id;
         if !entry.disabled && !entry.module.visible() {
@@ -2202,6 +2216,7 @@ impl Bar {
         let ctx = Ctx {
             instance_id: instance,
             theme: &self.theme,
+            output,
         };
         Some(
             entry
@@ -2264,7 +2279,11 @@ impl Bar {
     /// Build a run of widgets (one group / zone): a module renders by `key`, host
     /// chrome by `type_id`, with `[theme].spacing` between them and the configured
     /// separator mark interposed (never before the `▾` switcher).
-    fn build_widgets(&self, items: &[Placed]) -> Element<'_, Message> {
+    fn build_widgets<'a>(
+        &'a self,
+        items: &[Placed],
+        output: Option<&'a str>,
+    ) -> Element<'a, Message> {
         // When a group holds ≥2 modules, the single-module `with_pill_hover` on the group cell
         // can't target one of them — so the host wraps EACH module per-module in a full-height
         // hover/click cell (RFC 0017 §5), reaching the bar's top/bottom edge (Fitts) even
@@ -2277,7 +2296,7 @@ impl Bar {
         let mut out: Vec<Element<Message>> = Vec::new();
         for p in items {
             let el = if self.modules.iter().any(|e| e.name == p.key) {
-                self.render_module(&p.key).map(|el| {
+                self.render_module(&p.key, output).map(|el| {
                     if module_count >= 2 {
                         self.wrap_pill_interaction(&p.key, el)
                     } else {
@@ -2424,7 +2443,7 @@ impl Bar {
         mouse_area(content).on_press(Message::DismissPopups).into()
     }
 
-    fn bar_view(&self) -> Element<'_, Message> {
+    fn bar_view<'a>(&'a self, output: Option<&'a str>) -> Element<'a, Message> {
         // Placement drives which widgets render and in what order; an empty zone falls
         // back to the shipped default. The right zone is GROUPED (RFC 0005): each group
         // becomes a sub-island (islands) or a divider-joined run (solid).
@@ -2458,8 +2477,8 @@ impl Bar {
             _ => {}
         }
 
-        let ws_row = self.build_widgets(&left);
-        let title_el = self.build_widgets(&center);
+        let ws_row = self.build_widgets(&left, output);
+        let title_el = self.build_widgets(&center, output);
         let gap = self.config.theme.group_gap;
 
         if matches!(self.config.theme.style, Style::Islands) {
@@ -2526,7 +2545,7 @@ impl Bar {
                 }
                 // full-height cell holding the inset, floating pill
                 let cell = container(
-                    container(self.build_widgets(g))
+                    container(self.build_widgets(g, output))
                         .padding([2, 10])
                         .center_y(Length::Fill)
                         .style(pill_style),
@@ -2590,7 +2609,7 @@ impl Bar {
                 // unaffected because they wrap their own `mouse_area`). Wrap in a FULL-HEIGHT
                 // centered cell first so the hover surface covers the bar-colored padding
                 // above/below the chip too (Fitts's law), not just the glyph's tight bounds.
-                let cell = container(self.build_widgets(g))
+                let cell = container(self.build_widgets(g, output))
                     .height(Length::Fill)
                     .align_y(Vertical::Center);
                 run.push(self.with_pill_hover(g, cell.into()));
@@ -3698,7 +3717,7 @@ mod tests {
                     ))
                     .unwrap();
                     let bar = test_bar(cfg, &rt);
-                    let mut view = bar.bar_view();
+                    let mut view = bar.bar_view(None);
                     let mut tree = Tree::new(view.as_widget());
                     let node = view.as_widget_mut().layout(
                         &mut tree,

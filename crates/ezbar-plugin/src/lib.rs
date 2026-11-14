@@ -73,6 +73,11 @@ impl ThemeTokens {
 pub struct Ctx<'a> {
     pub instance_id: u64,
     pub theme: &'a ThemeTokens,
+    /// Name of the output (monitor, e.g. `DP-1`) whose bar surface is being rendered, so a
+    /// module can show per-monitor content (`workspaces` lists only that output's
+    /// workspaces). `None` when there is no particular output: popups, the agent dock,
+    /// the standalone harness.
+    pub output: Option<&'a str>,
 }
 
 impl Ctx<'_> {
