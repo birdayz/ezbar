@@ -323,6 +323,14 @@ fn flatten_cfg(cfg: &toml::Value) -> Vec<(String, String)> {
 /// Whether `id` names a built-in module or a registered wasm plugin (vs host
 /// chrome such as `switcher`). Kept in sync with [`build`].
 pub fn is_module(id: &str) -> bool {
+    // `custom.<name>`: a named instance of the custom widget, configured by
+    // `[modules.custom.<name>]` (any number of them).
+    if id
+        .strip_prefix("custom.")
+        .is_some_and(|n| !n.is_empty() && !n.contains('.'))
+    {
+        return true;
+    }
     wasm_plugin_path(id).is_some()
         || matches!(
             id,
@@ -444,6 +452,9 @@ pub fn build(
         "gpu" => Some(Box::new(gpu::Gpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance, cfg))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
+        named if is_module(named) && named.starts_with("custom.") => {
+            Some(Box::new(custom::Custom::new(instance, named, cfg)))
+        }
         "disk" => Some(Box::new(disk::Disk::new(instance, cfg))),
         "net" => Some(Box::new(net::Net::new(instance, cfg))),
         "ip" => Some(Box::new(ip::Ip::new(instance, cfg))),
@@ -548,6 +559,18 @@ mod tests {
         assert!(!g[0].write);
         // no fs key → no grants (default-deny)
         assert!(fs_grants(&tbl("")).is_empty());
+    }
+
+    #[test]
+    fn named_custom_instances_are_modules() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(is_module("custom.myname1"));
+        assert!(!is_module("custom.")); // empty name
+        assert!(!is_module("custom.a.b")); // one level only
+        let m = build("custom.myname1", 1, &tbl("command = \"date\""), rt.handle()).unwrap();
+        assert_eq!(m.id(), "custom.myname1");
     }
 
     #[test]
