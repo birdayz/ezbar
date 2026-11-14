@@ -103,6 +103,33 @@ config: `battery`, `calendar`, `claude`, `kubectl`, `spotify`, `stock`, `volume`
 `custom` output and `window_title`'s `format` accept the [inline markup](#inline-markup)
 subset.
 
+### Multiple custom widgets
+
+Place any number of named instances as `custom.<name>` (`<name>` is one segment, no dots)
+and configure each in `[modules.custom.<name>]`. Options set directly in `[modules.custom]`
+are shared defaults for every instance; the instance table overrides them:
+
+```toml
+[bar]
+right = ["custom.vpn", "custom.weather", "clock"]
+
+[modules.custom]            # shared by all custom.* instances
+icon = ""
+
+[modules.custom.vpn]
+command = "nmcli -t -f NAME connection show --active | head -1"
+interval = 10
+alert = "^$"
+
+[modules.custom.weather]
+command = "curl -s 'wttr.in?format=%t'"
+interval = 600
+on_click = "xdg-open https://wttr.in"
+```
+
+The bare `custom` id still works (configured by `[modules.custom]` itself). Inline
+`{ id = "custom", key = "x", config = { … } }` also still works.
+
 ## GitHub
 
 The chip counts unread notifications; the click popup lists them, then your open PRs

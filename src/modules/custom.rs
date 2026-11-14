@@ -2,6 +2,8 @@
 //!
 //! Two forms — **poll** or **stream**:
 //! ```toml
+//! # Place as "custom.<name>" in left/center/right; configure in [modules.custom.<name>]
+//! # (options in plain [modules.custom] are shared defaults).
 //! # poll: run `command` every `interval` seconds, show its trimmed stdout
 //! [modules.custom]
 //! command  = "checkupdates | wc -l"
@@ -12,7 +14,7 @@
 //! # stream: run a long-running `listen_cmd` once; each stdout LINE updates the chip
 //! # (event-driven, no polling — the widget changes the instant the command emits a line).
 //! # If both are set, `listen_cmd` wins. The process is restarted (gently) if it exits.
-//! [modules.weather-stream]
+//! [modules.custom.weather-stream]
 //! listen_cmd = "my-daemon --watch"   # e.g. a script that prints a value per change
 //! icon       = ""
 //! ```
@@ -20,7 +22,7 @@
 //! The command's output may use the inline-markup subset (RFC 0002) to colour or bold a
 //! substring against the theme — no Rust, no Pango:
 //! ```toml
-//! [modules.net]
+//! [modules.custom.net]
 //! command = "ping -c1 -W1 1.1.1.1 >/dev/null && echo '[c=ok]up[/c]' || echo '[c=urgent]down[/c]'"
 //! ```
 //! Tags: `[c=TOKEN]…[/c]` (TOKEN = accent/fg/fg_dim/ok/warn/urgent/sep) and `[b]…[/b]`.
@@ -28,13 +30,13 @@
 //!
 //! The glyph can swap by what the output says, and a danger dot can flag a bad state:
 //! ```toml
-//! [modules.netcheck]
+//! [modules.custom.netcheck]
 //! command = "ping -c1 -W1 1.1.1.1 >/dev/null && echo up || echo down"
 //! icon    = ""                       # fallback glyph
 //! alert   = "down|error"              # paint an urgent dot when the output matches
-//! [[modules.netcheck.icons]]         # first matching regex wins, else `icon`
+//! [[modules.custom.netcheck.icons]]         # first matching regex wins, else `icon`
 //! match = "up";   icon = ""
-//! [[modules.netcheck.icons]]
+//! [[modules.custom.netcheck.icons]]
 //! match = "down"; icon = ""
 //! ```
 

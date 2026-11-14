@@ -809,6 +809,32 @@ pub fn merge_module_config(defaults: Option<&toml::Value>, inline: &toml::Value)
     toml::Value::Table(base)
 }
 
+/// Shared defaults for a placement id from `[modules.*]`. A plain id (`cpu`) reads
+/// `[modules.cpu]`. A named custom instance (`custom.myname1`) reads `[modules.custom]`
+/// (shared options for every custom widget) overlaid by `[modules.custom.myname1]`.
+/// Other instances' sub-tables inside `[modules.custom]` are dropped, so they never leak
+/// into this instance's config (and don't force its reconfigure when a sibling changes).
+pub fn module_defaults(
+    modules: &HashMap<String, toml::Value>,
+    type_id: &str,
+) -> Option<toml::Value> {
+    let Some((base, name)) = type_id.split_once('.') else {
+        return modules.get(type_id).cloned();
+    };
+    let shared = modules.get(base);
+    let mut merged = match shared {
+        Some(toml::Value::Table(t)) => t.clone(),
+        _ => toml::Table::new(),
+    };
+    // `custom` has no table-valued options of its own (`icons` is an array of tables), so
+    // every table under `[modules.custom]` is a named instance.
+    merged.retain(|_, v| !v.is_table());
+    if let Some(toml::Value::Table(it)) = shared.and_then(|s| s.get(name)) {
+        merge_into(&mut merged, it.clone());
+    }
+    Some(toml::Value::Table(merged))
+}
+
 /// Recursively merge `src` into `dst`: tables deep-merge, scalars/arrays overwrite.
 fn merge_into(dst: &mut toml::Table, src: toml::Table) {
     for (k, sv) in src {
@@ -964,6 +990,27 @@ mod tests {
         let g = t["graph"].as_table().unwrap();
         assert_eq!(g["height"].as_integer(), Some(24));
         assert_eq!(g["line_color"].as_str(), Some("accent"));
+    }
+
+    #[test]
+    fn module_defaults_named_custom_overlays_instance_table() {
+        let c = parse_str(
+            "[modules.custom]\ninterval = 9\nicon = \"X\"\n\
+             [modules.custom.a]\ncommand = \"echo a\"\ninterval = 1\n\
+             [modules.custom.b]\ncommand = \"echo b\"\n",
+        )
+        .unwrap();
+        let a = module_defaults(&c.modules, "custom.a").unwrap();
+        let a = a.as_table().unwrap();
+        assert_eq!(a["command"].as_str(), Some("echo a"));
+        assert_eq!(a["interval"].as_integer(), Some(1)); // instance beats shared
+        assert_eq!(a["icon"].as_str(), Some("X")); // shared default inherited
+        assert!(!a.contains_key("b")); // sibling instance doesn't leak
+                                       // a plain id is unchanged
+        assert!(module_defaults(&c.modules, "cpu").is_none());
+        // an undefined instance falls back to the shared options only
+        let z = module_defaults(&c.modules, "custom.z").unwrap();
+        assert_eq!(z.as_table().unwrap()["interval"].as_integer(), Some(9));
     }
 
     #[test]

@@ -1095,8 +1095,13 @@ fn placement_enabled(config: &Config, placed: &Placed) -> bool {
     placed
         .config
         .get("enabled")
-        .or_else(|| config.modules.get(&placed.type_id)?.get("enabled"))
-        .and_then(toml::Value::as_bool)
+        .cloned()
+        .or_else(|| {
+            config::module_defaults(&config.modules, &placed.type_id)?
+                .get("enabled")
+                .cloned()
+        })
+        .and_then(|v| v.as_bool())
         .unwrap_or(true)
 }
 
@@ -1267,7 +1272,8 @@ fn desired_module_specs(config: &Config) -> Vec<ModuleSpec> {
             log::warn!("duplicate module key {:?}; ignoring the second", p.key);
             continue;
         }
-        let cfg = config::merge_module_config(config.modules.get(&p.type_id), &p.config);
+        let defaults = config::module_defaults(&config.modules, &p.type_id);
+        let cfg = config::merge_module_config(defaults.as_ref(), &p.config);
         out.push(ModuleSpec {
             key: p.key,
             type_id: p.type_id,
@@ -3857,5 +3863,30 @@ mod tests {
         assert!(!keys.contains(&"switcher"));
         // Every spec names a real module type.
         assert!(specs.iter().all(|s| modules::is_module(&s.type_id)));
+    }
+
+    #[test]
+    fn named_custom_placements_get_their_own_config_and_can_be_disabled() {
+        let cfg = config::parse_str(
+            "[bar]\nright = [\"custom.a\", \"custom.b\", \"custom.off\", \"clock\"]\n\
+             [modules.custom]\nicon = \"X\"\n\
+             [modules.custom.a]\ncommand = \"echo a\"\n\
+             [modules.custom.b]\ncommand = \"echo b\"\n\
+             [modules.custom.off]\ncommand = \"echo c\"\nenabled = false\n",
+        )
+        .unwrap();
+        let specs = desired_module_specs(&cfg);
+        let get = |k: &str| specs.iter().find(|s| s.key == k);
+        let a = get("custom.a").expect("custom.a placed");
+        assert_eq!(a.cfg["command"].as_str(), Some("echo a"));
+        assert_eq!(a.cfg["icon"].as_str(), Some("X"));
+        assert_eq!(
+            get("custom.b").unwrap().cfg["command"].as_str(),
+            Some("echo b")
+        );
+        assert!(
+            get("custom.off").is_none(),
+            "enabled=false must drop the instance"
+        );
     }
 }
