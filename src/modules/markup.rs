@@ -245,6 +245,7 @@ mod tests {
         let ctx = Ctx {
             instance_id: 0,
             theme: &theme,
+            output: None,
         };
         let _styled: Element<'_, ModMsg> = super::view("net [c=urgent]down[/c] [b]!!![/b]", &ctx);
         let _plain: Element<'_, ModMsg> = super::view("just text", &ctx);

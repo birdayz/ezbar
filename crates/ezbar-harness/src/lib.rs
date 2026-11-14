@@ -265,6 +265,7 @@ impl Harness {
                 let ctx = Ctx {
                     instance_id: instance,
                     theme: &self.theme,
+                    output: None,
                 };
                 chips.push(
                     entry
@@ -299,6 +300,7 @@ impl Harness {
                         let ctx = Ctx {
                             instance_id: instance,
                             theme: &self.theme,
+                            output: None,
                         };
                         match entry.module.popup(&ctx) {
                             Some(content) => {
