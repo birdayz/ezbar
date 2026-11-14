@@ -10,6 +10,37 @@ every key the built-in modules read, with defaults. Theme/bar keys (`[theme]`, `
 samples = 60
 ```
 
+## Bar position
+
+Which screen edge the bar sits on is set with `position` in `[bar]`:
+
+```toml
+[bar]
+position = "top"       # "top" | "bottom" (default) | "left" | "right"
+```
+
+- `top` / `bottom` give a horizontal bar spanning the output width; `left` / `right` give a
+  vertical bar spanning its height. `height` is the bar's thickness on either axis.
+- The bar reserves its space (exclusive zone), so windows never sit under it.
+- Module popups open on the same edge as the bar (below a top bar, above a bottom one).
+- `[bar] margin = { top = 8, right = 8, bottom = 0, left = 8 }` adds a per-side gap from
+  the screen edges, which floats the bar; the gap on the bar's own edge is added to the
+  reserved space.
+- `layer` (`background` | `bottom` | `top` (default) | `overlay`) selects the layer-shell
+  layer, independent of `position`.
+- Changing `position` and reloading the config re-anchors the live bar in place; no restart.
+
+It can also be switched at runtime, without editing the config:
+
+```sh
+ezbar msg position top        # or: bottom | toggle
+```
+
+A runtime override is not saved: the next config reload re-applies `position` from the file.
+
+The other `[bar]` keys (`height`, `outputs`, `font`, `weight`, `scale`, `switcher`) and
+`[theme]` are in `rfcs/0002-config.md`.
+
 ## Placement and disabling modules
 
 Set `left`, `center`, and `right` either at the TOML root (before any `[table]`
