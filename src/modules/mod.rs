@@ -8,6 +8,7 @@ pub mod custom;
 pub mod disk;
 pub mod github;
 pub mod gpu;
+pub mod inhibit;
 pub mod ip;
 pub mod keyboard;
 pub mod markup;
@@ -331,6 +332,7 @@ pub fn is_module(id: &str) -> bool {
                 | "gpu"
                 | "github"
                 | "custom"
+                | "inhibit"
                 | "disk"
                 | "net"
                 | "ip"
@@ -444,6 +446,7 @@ pub fn build(
         "gpu" => Some(Box::new(gpu::Gpu::new(instance, cfg))),
         "github" => Some(Box::new(github::GitHub::new(instance, cfg))),
         "custom" => Some(Box::new(custom::Custom::new(instance, id, cfg))),
+        "inhibit" => Some(Box::new(inhibit::Inhibit::new(cfg))),
         "disk" => Some(Box::new(disk::Disk::new(instance, cfg))),
         "net" => Some(Box::new(net::Net::new(instance, cfg))),
         "ip" => Some(Box::new(ip::Ip::new(instance, cfg))),

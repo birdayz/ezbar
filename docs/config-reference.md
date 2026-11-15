@@ -87,6 +87,9 @@ config: `battery`, `calendar`, `claude`, `kubectl`, `spotify`, `stock`, `volume`
 | | `update_cmd` | string | — | command run on click |
 | | `icon` | string |  (cloud-download) | |
 | `keyboard` | `icon` | string | — | |
+| `inhibit` | `icon_on` | string |  (eye) | shown while idle is inhibited (accent colour) |
+| | `icon_off` | string |  (eye-slash) | shown while idle is allowed (dimmed) |
+| | `what` | string | `"idle"` | logind lock type(s), colon-separated: `"idle"`, `"idle:sleep"` … See [Inhibit](#inhibit) |
 | `media` | `max_len` | int | `40` | truncate "artist – title" (clamped 8–200) |
 | `window_title` | `max` | int | `80` | truncate; `0` = no limit |
 | | `format` | string | `"{title}"` | `{title}` placeholder + [markup](#inline-markup) |
@@ -102,6 +105,23 @@ config: `battery`, `calendar`, `claude`, `kubectl`, `spotify`, `stock`, `volume`
 
 `custom` output and `window_title`'s `format` accept the [inline markup](#inline-markup)
 subset.
+
+## Inhibit
+
+`inhibit` is a click-to-toggle idle inhibitor. While on, automatic idle actions (screen
+blank, lock, suspend-on-idle) are held off. It takes a systemd-logind inhibitor lock
+(`org.freedesktop.login1.Manager.Inhibit`, what `systemd-inhibit` does), so it works with idle
+daemons that honour logind inhibitors, such as swayidle and hypridle; it is not a Wayland
+`idle-inhibit` surface, so a daemon that ignores logind is unaffected. Place it like any module:
+
+```toml
+[bar]
+right = ["inhibit", "cpu", "clock"]
+```
+
+The lock is a file descriptor, released when toggled off, when the module is removed or
+reconfigured with a different `what`, and by the kernel if ezbar dies. If logind can't be
+reached, the icon turns `warn` and the reason is logged; the next click retries.
 
 ## GitHub
 

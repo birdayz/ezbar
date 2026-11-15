@@ -25,7 +25,7 @@ filled GPU sparklines, a dark base. Square, not rounded; dark, not busy. Drop in
 
 **Built-in widgets:** workspaces · window title · clock · CPU / GPU (usage + temp) / temperature / memory / ping
 graphs · volume · battery · media (MPRIS) · tray (SNI + Wine/XEmbed) · GitHub · Google Calendar · Spotify · kubectl ·
-stock ticker · live Claude-usage · and a no-code `custom` command widget. Clicking, scrolling,
+stock ticker · live Claude-usage · an idle-inhibitor toggle · and a no-code `custom` command widget. Clicking, scrolling,
 and hover popups all work.
 
 ## Build
