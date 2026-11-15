@@ -1,11 +1,17 @@
 //! `inhibit` module: a click-to-toggle **idle inhibitor**.
 //!
 //! While on, automatic idle actions (screen blank, lock, suspend-on-idle) are held off; turn
-//! it off and idle behaves as normal. It takes a systemd-logind inhibitor lock
-//! (`org.freedesktop.login1.Manager.Inhibit`, exactly what `systemd-inhibit(1)` does), so it
-//! works with idle daemons that honour logind inhibitors (swayidle, hypridle, …) and needs no
-//! extra process. The lock is an fd: dropping it releases the lock, and the kernel does so even
-//! if ezbar is killed, so the bar can never leave the machine stuck awake.
+//! it off and idle behaves as normal. Two locks are taken together, because idle daemons
+//! disagree on which one they honour:
+//!
+//! * a Wayland `zwp_idle_inhibit_manager_v1` inhibitor ([`crate::idle_inhibit`]) — the only one
+//!   Sway and swayidle look at (it is skipped unless `what` contains `idle`);
+//! * a systemd-logind inhibitor lock (`org.freedesktop.login1.Manager.Inhibit`, exactly what
+//!   `systemd-inhibit(1)` does), for daemons that honour logind inhibitors (hypridle, …).
+//!
+//! Either one is enough for the click to count as inhibiting. Neither needs an extra process,
+//! and both go away if ezbar is killed (the logind lock is an fd the kernel closes; the Wayland
+//! inhibitor dies with its connection), so the bar can never leave the machine stuck awake.
 //!
 //! ```toml
 //! [modules.inhibit]
@@ -14,7 +20,7 @@
 //! what     = "idle" # logind lock type(s), colon-separated: "idle", "idle:sleep", …
 //! ```
 //!
-//! A failed attempt (no system bus, logind refusing) paints the icon in the `warn` colour and
+//! A failed attempt (neither lock could be taken) paints the icon in the `warn` colour and
 //! logs the reason; the next click retries.
 
 use std::os::fd::OwnedFd;
@@ -24,16 +30,28 @@ use ezbar_plugin::iced::widget::{mouse_area, text};
 use ezbar_plugin::iced::{Element, Task};
 use ezbar_plugin::{Ctx, ModMsg, Module, Reconfigure, Response};
 
+use crate::idle_inhibit::WaylandInhibitor;
+
 const DEFAULT_ICON_ON: &str = "\u{f06e}"; // eye
 const DEFAULT_ICON_OFF: &str = "\u{f070}"; // eye-slash
 const DEFAULT_WHAT: &str = "idle";
 
-type AcquireResult = Result<OwnedFd, String>;
+/// What is held while idle is inhibited; dropping it releases both locks (the fields are only
+/// kept alive, never read).
+struct Lock {
+    /// The logind lock fd (`None` when logind refused but the Wayland inhibitor was granted).
+    _logind: Option<OwnedFd>,
+    /// The Wayland idle inhibitor (`None` when the compositor lacks the protocol, e.g. not
+    /// Sway, or `what` has no `idle`).
+    _wayland: Option<WaylandInhibitor>,
+}
+
+type AcquireResult = Result<Lock, String>;
 
 enum Msg {
     Toggle,
-    /// The logind reply. The fd is moved out of the slot exactly once; if the message is never
-    /// delivered (instance retired meanwhile) dropping the slot closes the fd, releasing the lock.
+    /// The lock reply. It is moved out of the slot exactly once; if the message is never
+    /// delivered (instance retired meanwhile) dropping the slot releases the locks.
     Acquired(Arc<Mutex<Option<AcquireResult>>>),
 }
 
@@ -41,8 +59,8 @@ pub struct Inhibit {
     icon_on: String,
     icon_off: String,
     what: String,
-    /// The held logind lock; `Some` ⇔ idle is currently inhibited.
-    lock: Option<OwnedFd>,
+    /// The held locks; `Some` ⇔ idle is currently inhibited.
+    lock: Option<Lock>,
     /// An `Inhibit` call is in flight — further clicks are ignored until it answers.
     pending: bool,
     /// The last attempt failed (cleared by the next click).
@@ -98,11 +116,11 @@ impl Inhibit {
         Some(self.what.clone())
     }
 
-    /// The logind answer for a request started by [`on_toggle`](Self::on_toggle).
+    /// The answer for a request started by [`on_toggle`](Self::on_toggle).
     fn on_acquired(&mut self, result: AcquireResult) {
         self.pending = false;
         match result {
-            Ok(fd) => self.lock = Some(fd),
+            Ok(lock) => self.lock = Some(lock),
             Err(e) => {
                 log::warn!("inhibit: could not take the idle inhibitor: {e}");
                 self.failed = true;
@@ -165,13 +183,59 @@ impl Module for Inhibit {
     }
 
     fn shutdown(&mut self) {
-        self.lock = None; // releases the logind lock
+        self.lock = None; // releases the logind lock and the Wayland inhibitor
     }
 }
 
-/// Ask logind for an inhibitor lock and return its fd. Runs on the host's tokio executor
+/// Whether the logind lock type list `what` (colon-separated) includes `idle`.
+fn wants_idle(what: &str) -> bool {
+    what.split(':').any(|w| w.trim() == "idle")
+}
+
+/// Take the Wayland inhibitor and the logind lock. Runs on the host's tokio executor
 /// (a `Task` from `update`), never on the render thread.
+///
+/// Succeeds when at least one of them is granted: a compositor without idle-inhibit (or a
+/// machine without logind) still gets the other one.
 async fn acquire(what: String) -> AcquireResult {
+    let wayland = if wants_idle(&what) {
+        // Connecting does blocking Wayland roundtrips.
+        tokio::task::spawn_blocking(WaylandInhibitor::new)
+            .await
+            .map_err(|e| format!("join: {e}"))
+            .and_then(|r| r)
+            .map(Some)
+    } else {
+        Ok(None)
+    };
+    let logind = acquire_logind(&what).await;
+
+    match (logind, wayland) {
+        (Ok(fd), Ok(wayland)) => Ok(Lock {
+            _logind: Some(fd),
+            _wayland: wayland,
+        }),
+        (Ok(fd), Err(e)) => {
+            log::warn!("inhibit: no Wayland idle inhibitor ({e}); holding the logind lock only");
+            Ok(Lock {
+                _logind: Some(fd),
+                _wayland: None,
+            })
+        }
+        (Err(e), Ok(Some(wayland))) => {
+            log::warn!("inhibit: no logind lock ({e}); holding the Wayland inhibitor only");
+            Ok(Lock {
+                _logind: None,
+                _wayland: Some(wayland),
+            })
+        }
+        (Err(e), Ok(None)) => Err(e),
+        (Err(e), Err(w)) => Err(format!("{e}; Wayland idle-inhibit: {w}")),
+    }
+}
+
+/// Ask logind for an inhibitor lock and return its fd.
+async fn acquire_logind(what: &str) -> Result<OwnedFd, String> {
     let conn = zbus::Connection::system()
         .await
         .map_err(|e| format!("system bus: {e}"))?;
@@ -183,7 +247,7 @@ async fn acquire(what: String) -> AcquireResult {
             "Inhibit",
             // (what, who, why, mode) — "block" so idle daemons actually hold off
             &(
-                what.as_str(),
+                what,
                 "ezbar",
                 "Idle inhibition requested from the bar",
                 "block",
@@ -208,8 +272,19 @@ mod tests {
     }
 
     /// A real, owned fd standing in for the logind lock.
-    fn fake_lock() -> OwnedFd {
+    fn fake_fd() -> OwnedFd {
         std::fs::File::open("/dev/null").unwrap().into()
+    }
+
+    fn lock_of(fd: OwnedFd) -> Lock {
+        Lock {
+            _logind: Some(fd),
+            _wayland: None,
+        }
+    }
+
+    fn fake_lock() -> Lock {
+        lock_of(fake_fd())
     }
 
     fn fd_is_open(raw: i32) -> bool {
@@ -230,6 +305,17 @@ mod tests {
     }
 
     #[test]
+    fn wayland_inhibitor_is_only_wanted_for_idle_locks() {
+        assert!(wants_idle("idle"));
+        assert!(wants_idle("idle:sleep"));
+        assert!(wants_idle("sleep:idle"));
+        assert!(wants_idle(" idle "));
+        assert!(!wants_idle("sleep"));
+        assert!(!wants_idle("shutdown:sleep"));
+        assert!(!wants_idle("idlefoo"));
+    }
+
+    #[test]
     fn click_requests_a_lock_then_the_next_click_releases_it() {
         let mut m = make("what = \"idle:sleep\"");
         assert_eq!(m.on_toggle().as_deref(), Some("idle:sleep"));
@@ -245,10 +331,10 @@ mod tests {
     #[test]
     fn releasing_closes_the_fd() {
         let mut m = make("");
-        let fd = fake_lock();
+        let fd = fake_fd();
         let raw = fd.as_raw_fd();
         m.on_toggle();
-        m.on_acquired(Ok(fd));
+        m.on_acquired(Ok(lock_of(fd)));
         assert!(fd_is_open(raw));
         m.on_toggle();
         assert!(!fd_is_open(raw), "dropping the lock must close its fd");

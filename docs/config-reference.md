@@ -89,7 +89,7 @@ config: `battery`, `calendar`, `claude`, `kubectl`, `spotify`, `stock`, `volume`
 | `keyboard` | `icon` | string | — | |
 | `inhibit` | `icon_on` | string |  (eye) | shown while idle is inhibited (accent colour) |
 | | `icon_off` | string |  (eye-slash) | shown while idle is allowed (dimmed) |
-| | `what` | string | `"idle"` | logind lock type(s), colon-separated: `"idle"`, `"idle:sleep"` … See [Inhibit](#inhibit) |
+| | `what` | string | `"idle"` | logind lock type(s), colon-separated: `"idle"`, `"idle:sleep"` …; the Wayland inhibitor is taken when it includes `idle`. See [Inhibit](#inhibit) |
 | `media` | `max_len` | int | `40` | truncate "artist – title" (clamped 8–200) |
 | `window_title` | `max` | int | `80` | truncate; `0` = no limit |
 | | `format` | string | `"{title}"` | `{title}` placeholder + [markup](#inline-markup) |
@@ -109,19 +109,22 @@ subset.
 ## Inhibit
 
 `inhibit` is a click-to-toggle idle inhibitor. While on, automatic idle actions (screen
-blank, lock, suspend-on-idle) are held off. It takes a systemd-logind inhibitor lock
-(`org.freedesktop.login1.Manager.Inhibit`, what `systemd-inhibit` does), so it works with idle
-daemons that honour logind inhibitors, such as swayidle and hypridle; it is not a Wayland
-`idle-inhibit` surface, so a daemon that ignores logind is unaffected. Place it like any module:
+blank, lock, suspend-on-idle) are held off. It takes two locks, since idle daemons differ in
+which one they honour: a Wayland `idle-inhibit` inhibitor (what Sway and swayidle look at), and
+a systemd-logind inhibitor lock (`org.freedesktop.login1.Manager.Inhibit`, what
+`systemd-inhibit` does; honoured by e.g. hypridle). Place it like any module:
 
 ```toml
 [bar]
 right = ["inhibit", "cpu", "clock"]
 ```
 
-The lock is a file descriptor, released when toggled off, when the module is removed or
-reconfigured with a different `what`, and by the kernel if ezbar dies. If logind can't be
-reached, the icon turns `warn` and the reason is logged; the next click retries.
+Both locks are released when toggled off, when the module is removed or reconfigured with a
+different `what`, and automatically if ezbar dies (the logind lock is a file descriptor the
+kernel closes; the Wayland inhibitor goes with its connection). The Wayland inhibitor is only
+taken when `what` contains `idle`. Either lock is enough: if the compositor has no
+`idle-inhibit` or logind can't be reached, the other one is still held. If neither can be
+taken, the icon turns `warn` and the reason is logged; the next click retries.
 
 ## GitHub
 
