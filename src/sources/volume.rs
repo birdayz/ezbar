@@ -113,16 +113,39 @@ pub fn toggle_mute() {
     }
 }
 
-/// direction: +1 to raise, -1 to lower (by 5%).
+/// Highest level the volume is raised to (percent). PulseAudio would otherwise happily go to
+/// 150% and beyond (`+5%` is not capped), which distorts and can damage speakers.
+const MAX_VOLUME: i32 = 100;
+
+/// The level to set when raising `current` by `step` percent, capped at [`MAX_VOLUME`]; `None`
+/// when `current` is already at or above the cap (raising must never *lower* an over-amplified
+/// sink, nor push it further up).
+fn raised_volume(current: i32, step: i32) -> Option<i32> {
+    if current >= MAX_VOLUME {
+        None
+    } else {
+        Some((current + step).min(MAX_VOLUME))
+    }
+}
+
+/// direction: +1 to raise, -1 to lower (by 5%). Raising stops at 100%.
 pub fn change_volume(direction: i32) {
     let change = direction * 5;
-    let sign = if change > 0 { "+" } else { "" };
+    let target = if change > 0 {
+        match get_pulseaudio_volume() {
+            Some((current, _)) => match raised_volume(current, change) {
+                Some(level) => format!("{level}%"),
+                None => return,
+            },
+            // PulseAudio not readable: fall through (pactl will fail too, then amixer, which
+            // is bounded by the hardware range).
+            None => format!("+{change}%"),
+        }
+    } else {
+        format!("{change}%")
+    };
     let pulse = Command::new("pactl")
-        .args([
-            "set-sink-volume",
-            "@DEFAULT_SINK@",
-            &format!("{}{}%", sign, change),
-        ])
+        .args(["set-sink-volume", "@DEFAULT_SINK@", &target])
         .status();
     if pulse.map(|s| !s.success()).unwrap_or(true) {
         let alsa_dir = if change > 0 {
@@ -147,5 +170,16 @@ mod tests {
         assert_eq!(format_volume(40, false), "40%");
         assert_eq!(format_volume(80, false), "80%");
         assert_eq!(format_volume(50, true), "--%");
+    }
+
+    #[test]
+    fn raising_is_capped_at_100() {
+        assert_eq!(raised_volume(0, 5), Some(5));
+        assert_eq!(raised_volume(90, 5), Some(95));
+        assert_eq!(raised_volume(96, 5), Some(100));
+        assert_eq!(raised_volume(99, 5), Some(100));
+        // already at the cap, or over-amplified elsewhere: leave it alone
+        assert_eq!(raised_volume(100, 5), None);
+        assert_eq!(raised_volume(130, 5), None);
     }
 }
