@@ -10,5 +10,6 @@
 pub mod config;
 pub mod grants;
 pub mod history;
+pub mod idle_inhibit;
 pub mod modules;
 pub mod sources;

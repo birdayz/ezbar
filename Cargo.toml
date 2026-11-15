@@ -34,6 +34,10 @@ iced_layershell = "0.18"
 # Bind named wl_output proxies on iced's own connection; OutputName can silently
 # fall back to the default monitor while the layer-shell output cache is catching up.
 wayland-client = "=0.31.14"
+# idle-inhibit-unstable-v1 for the `inhibit` module: swayidle/Sway ignore logind inhibitor locks.
+wayland-protocols = { version = "=0.32.12", features = ["client", "unstable"] }
+# layer-shell: the inhibitor rides on a real (transparent 1x1) layer surface; Sway ignores bare ones.
+wayland-protocols-wlr = { version = "=0.3.12", features = ["client"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
